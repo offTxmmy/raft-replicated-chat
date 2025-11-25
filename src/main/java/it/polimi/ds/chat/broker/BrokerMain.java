@@ -13,7 +13,7 @@ public class BrokerMain {
         int udpPort = 50002;
 
         BrokerConfig config = new BrokerConfig(brokerid, isSequencer, clientPort, sequencerHost, sequencerPort, udpPort);
-        BrokerHandler broker = new BrokerHandler(config);
+        Broker broker = new Broker(config);
 
         try{
             broker.start();

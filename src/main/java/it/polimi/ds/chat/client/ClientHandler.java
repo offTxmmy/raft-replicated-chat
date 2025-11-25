@@ -1,6 +1,6 @@
 package it.polimi.ds.chat.client;
 
-import it.polimi.ds.chat.broker.BrokerHandler;
+import it.polimi.ds.chat.broker.Broker;
 import it.polimi.ds.chat.utilities.Protocol;
 
 import java.io.BufferedReader;
@@ -11,11 +11,11 @@ import java.net.Socket;
 
 public class ClientHandler implements Runnable {
     private final Socket socket;
-    private final BrokerHandler broker;
+    private final Broker broker;
     private PrintWriter out;
     private String username = "anonymous";
 
-    public ClientHandler(Socket socket, BrokerHandler broker) {
+    public ClientHandler(Socket socket, Broker broker) {
         this.socket = socket;
         this.broker = broker;
     }
@@ -50,7 +50,7 @@ public class ClientHandler implements Runnable {
             broker.notifyJoin(username);
         } else if (Protocol.isMsg(line)) {
             String text = Protocol.parseMsg(line);
-            broker.broadcast(username, text);
+            broker.onClientMessage(username, text);
         } else if (Protocol.isQuit(line)) {
             try {
                 socket.close();
@@ -60,9 +60,9 @@ public class ClientHandler implements Runnable {
         }
     }
 
-    public void sendMessageToClient(String sender, String text) {
+    public void sendMessageToClient(long seq, String sender, String text) {
         if (out != null) {
-            out.println(Protocol.msgToClient(sender, text));
+            out.println(Protocol.msgToClient(seq, sender, text));
         }
     }
 }
