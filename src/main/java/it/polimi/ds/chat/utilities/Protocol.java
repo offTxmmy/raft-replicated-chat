@@ -53,7 +53,7 @@ public class Protocol {
     }
 
     // Broker --> Sequencer
-    public static String chatReq(String localMsgId, String brokerId, String username, String text) {
+    public static String chatReq(String localMsgId, int brokerId, String username, String text) {
         return "CHAT_REQ " + localMsgId + " " + brokerId + " " + username + " " + text;
     }
 
@@ -67,7 +67,7 @@ public class Protocol {
         String[] parts = withoutPrefix.split(" ", 4);
 
         String localMsgId = parts[0];
-        String brokerId = parts[1];
+        int brokerId = Integer.parseInt(parts[1]);
         String username = parts[2];
         String text = parts.length >= 4 ? parts[3] : "";
 

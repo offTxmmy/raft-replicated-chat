@@ -8,7 +8,7 @@ public class SequencerState {
         this.broker = broker;
     }
 
-    public synchronized void handleChatFromBroker(String senderBrokerId, String username, String text) {
+    public synchronized void handleChatFromBroker(int senderBrokerId, String username, String text) {
         long seq = ++globalSeq;
 
         // for now directly deliver to this broker's clients

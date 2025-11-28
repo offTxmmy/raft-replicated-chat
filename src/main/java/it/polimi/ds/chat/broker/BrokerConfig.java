@@ -1,28 +1,55 @@
 package it.polimi.ds.chat.broker;
 
 public class BrokerConfig {
-    private final String brokerId;
-    private boolean sequencer;
+
+    private final int brokerId;          // 0 for leader, -1 for followers at startup
+    private final boolean isSequencer;
+
+    private final String brokerHost;
+    private final int brokerPort;
+
     private final int clientPort;
     private final String sequencerHost;
     private final int sequencerPort;
-    private final int udpBroadcastPort;
+    private final int udpPort;
 
-    public BrokerConfig(String brokerId, boolean sequencer, int clientPort, String sequencerHost, int sequencerPort, int udpBroadcastPort) {
+    // Only non-null on the sequencer (leader); null for followers
+    private final HandlerState handlerState;
+
+    public BrokerConfig(int brokerId,
+                        boolean isSequencer,
+                        String brokerHost,
+                        int brokerPort,
+                        int clientPort,
+                        String sequencerHost,
+                        int sequencerPort,
+                        int udpPort,
+                        HandlerState handlerState) {
         this.brokerId = brokerId;
-        this.sequencer = sequencer;
+        this.isSequencer = isSequencer;
+        this.brokerHost = brokerHost;
+        this.brokerPort = brokerPort;
         this.clientPort = clientPort;
         this.sequencerHost = sequencerHost;
         this.sequencerPort = sequencerPort;
-        this.udpBroadcastPort = udpBroadcastPort;
+        this.udpPort = udpPort;
+        this.handlerState = handlerState;
     }
 
-    public String getBrokerId() {
+    public int getBrokerId() {
         return brokerId;
     }
 
     public boolean isSequencer() {
-        return sequencer;
+        return isSequencer;
+    }
+
+    public String getBrokerHost() {
+        return brokerHost;
+    }
+
+    public int getBrokerPort() {
+        return brokerPort;
     }
 
     public int getClientPort() {
@@ -37,10 +64,11 @@ public class BrokerConfig {
         return sequencerPort;
     }
 
-    public int getUdpBroadcastPort() {
-        return udpBroadcastPort;
+    public int getUdpPort() {
+        return udpPort;
     }
 
-
-
+    public HandlerState getHandlerState() {
+        return handlerState;
+    }
 }

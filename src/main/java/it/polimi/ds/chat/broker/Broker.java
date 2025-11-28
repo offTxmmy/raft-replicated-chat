@@ -1,10 +1,12 @@
 package it.polimi.ds.chat.broker;
 
 import it.polimi.ds.chat.client.ClientHandler;
+import it.polimi.ds.chat.messages.BrokerJoinAck;
+import it.polimi.ds.chat.messages.BrokerJoinMessage;
+import it.polimi.ds.chat.messages.ChatReqMessage;
 import it.polimi.ds.chat.utilities.Protocol;
 
-import java.io.IOException;
-import java.io.PrintWriter;
+import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
@@ -17,29 +19,32 @@ import java.util.List;
  * Responsibilities:
  * - Accept TCP connections from chat clients.
  * - If it is the sequencer: accept TCP connections from other brokers and
- *   order their messages.
- * - If it is NOT the sequencer: connect to the sequencer and send CHAT_REQ messages.
+ *   order their messages (and assign brokerIds on join).
+ * - If it is NOT the sequencer: connect to the sequencer, obtain a brokerId
+ *   and send CHAT_REQ messages.
  * - Deliver ordered messages to its local clients.
  */
 public class Broker {
-    // Static configuration for this broker (id, ports, isSequencer, etc.)
+    // Static configuration for this broker (ports, host, isSequencer, etc.)
     private final BrokerConfig config;
 
-    // All clients currently connected to this broker.
-    // Wrapped in a synchronizedList because multiple threads (one per client)
-    // will access it concurrently.
-    private final List<ClientHandler> clients = Collections.synchronizedList((new ArrayList<>()));
+    // Runtime brokerId (may differ from initial config value for followers)
+    private int brokerId;
 
-    // Local sequence counter used to assign sequence numbers in broadcastToClients.
-    // At the moment still used in fallback / local mode.
+    // All clients currently connected to this broker.
+    private final List<ClientHandler> clients =
+            Collections.synchronizedList(new ArrayList<>());
+
+    // Local sequence counter used in fallback / local mode.
     private long nextSeq = 1;
 
     // Holds the global sequencing state when this broker acts as sequencer.
     private SequencerState sequencerState;
 
-    // TCP connection from this broker to the sequencer (only used if this broker is NOT sequencer).
+    // TCP connection from this broker to the sequencer (only if NOT sequencer).
     private Socket sequencerSocket;
-    private PrintWriter sequencerOut;
+    private ObjectOutputStream sequencerOut;
+    private ObjectInputStream sequencerIn;
 
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
@@ -50,9 +55,19 @@ public class Broker {
      */
     public Broker(BrokerConfig config) {
         this.config = config;
+        this.brokerId = config.getBrokerId(); // 0 for leader, -1 for followers at startup
+
         if(config.isSequencer()) {
+            // The leader must have a HandlerState (AtomicInteger) to generate broker IDs
+            if (config.getHandlerState() == null) {
+                throw new IllegalArgumentException("Sequencer broker must have a HandleState");
+            }
             sequencerState = new SequencerState(this);
         }
+    }
+
+    public int getBrokerId() {
+        return brokerId;
     }
 
     /**
@@ -62,9 +77,14 @@ public class Broker {
      * - if non-sequencer: connect to the sequencer.
      */
     public void start() throws IOException {
-        int port = config.getClientPort();
+        // Followers must first join the sequencer to obtain their brokerId
+        if (!config.isSequencer()) {
+            connectToSequencer();
+        }
+
+        int port = config.getBrokerPort();
         ServerSocket serverSocket = new ServerSocket(port);
-        System.out.println("Broker " + config.getBrokerId() + " listening for clients on port " + port);
+        System.out.println("Broker " + brokerId + " listening for clients on port " + port);
 
         // If this broker is the sequencer, ensure sequencer state exists
         // and start the listener for CHAT_REQ from other brokers.
@@ -73,14 +93,10 @@ public class Broker {
                 sequencerState = new SequencerState(this);
             }
             startSequencerListener();
-        } else {
-            // Non-sequencer: open a TCP connection to the sequencer
-            // in order to send CHAT_REQ messages.
-            connectToSequencer();
         }
 
         // Main loop: accept client TCP connections and spawn a ClientHandler for each.
-        while(true) {
+        while (true) {
             Socket clientSocket = serverSocket.accept();
             System.out.println("New client connected from " + clientSocket.getRemoteSocketAddress());
 
@@ -103,29 +119,19 @@ public class Broker {
 
     /**
      * Assign a sequence number to a message and deliver it to local clients.
-     * Currently used in local/fallback mode; long term the sequencerState
-     * should own global sequence assignment.
+     * Currently used in local/fallback mode.
      */
     public void broadcastToClients(String sender, String text) {
         long seq;
-        // Protect nextSeq with synchronized(this) because multiple threads
-        // (client handlers) may call this concurrently.
         synchronized (this) {
             seq = nextSeq++;
         }
-
-        // Once we have the seq, deliver to all local clients.
         onChatDeliver(seq, sender, text);
     }
 
     /**
      * Deliver a message that has already been assigned a global sequence number
      * to all locally connected clients.
-     *
-     * This is called by:
-     * - broadcastToClients (local mode),
-     * - SequencerState.handleChatFromBroker(...)
-     * - In the future: UDP listener handling CHAT_DELIVER from the sequencer.
      */
     public void onChatDeliver(long seq, String sender, String text) {
         synchronized (clients) {
@@ -137,89 +143,101 @@ public class Broker {
 
     /**
      * Entry point for messages sent by clients connected to THIS broker.
-     * Decides how to handle them based on the role of the broker:
-     * - If this broker is the sequencer, route the message to SequencerState
-     *   so it can assign a global sequence number and deliver.
-     * - If not, send a CHAT_REQ to the sequencer over TCP.
      */
     public void onClientMessage(String username, String text) {
-        if(config.isSequencer()) {
-            // This broker acts as the sequencer: let SequencerState assign seq.
-            sequencerState.handleChatFromBroker(config.getBrokerId(), username, text);
+        if (config.isSequencer()) {
+            // This broker acts as the sequencer
+            sequencerState.handleChatFromBroker(brokerId, username, text);
         } else {
             // This broker is a follower: delegate ordering to the sequencer via CHAT_REQ.
             sendChatReqToSequencer(username, text);
         }
     }
 
-    /**
-     * Notify all local clients that someone left the chat.
-     * Counts as a normal message with sender "[system]".
-     */
     public void notifyLeave(String username) {
         broadcastToClients("[system]", username + " left the chat");
     }
 
-    /**
-     * Notify all local clients that someone joined the chat.
-     * Counts as a normal message with sender "[system]".
-     */
     public void notifyJoin(String username) {
         broadcastToClients("[system]", username + " joined the chat");
     }
 
+    /* =========================================================
+       1) FOLLOWER SIDE: connect to sequencer and obtain brokerId
+       ========================================================= */
+
     /**
-     * Open a TCP connection to the sequencer broker.
-     * This is used only if this broker is NOT the sequencer.
-     * The resulting PrintWriter (sequencerOut) is used to send CHAT_REQ lines.
+     * Open a TCP connection to the sequencer broker and perform a simple
+     * join handshake to obtain a brokerId using object messages:
+     *
+     * Broker → Sequencer:  BrokerJoinMessage(host, port)
+     * Sequencer → Broker:  BrokerJoinAck(brokerId)
      */
     private void connectToSequencer() {
         try {
             System.out.println("Connecting to a sequencer at " + config.getSequencerHost() + ":" + config.getSequencerPort());
             sequencerSocket = new Socket(config.getSequencerHost(), config.getSequencerPort());
 
-            // autoFlush = true so every println is immediately sent over the network
-            sequencerOut = new PrintWriter(sequencerSocket.getOutputStream(), true);
-            System.out.println("Connected to sequencer.");
-        } catch (IOException e) {
-            System.err.println("Failed to connect to sequencer: " + e.getMessage());
-            // TODO: in a real system we might want to retry or shut down gracefully
+            // IMPORTANT: always create ObjectOutputStream first, then flush, then ObjectInputStream
+            sequencerOut = new ObjectOutputStream(sequencerSocket.getOutputStream());
+            sequencerOut.flush();
+            sequencerIn = new ObjectInputStream(sequencerSocket.getInputStream());
+
+            System.out.println("Connected to sequencer, sending BrokerJoinMessage...");
+
+            // send join message
+            BrokerJoinMessage join = new BrokerJoinMessage(config.getBrokerHost(), config.getBrokerPort());
+            sequencerOut.writeObject(join);
+            sequencerOut.flush();
+
+            // read ack
+            Object obj = sequencerIn.readObject();
+            if (obj instanceof BrokerJoinAck ack) {
+                int assignedId = ack.getBrokerId();
+                this.brokerId = assignedId;
+                System.out.println("Sequencer assigned broker ID: " + assignedId);
+            } else {
+                throw new IOException("Unexpected response from sequencer: " + obj);
+            }
+
+        } catch (IOException | ClassNotFoundException e) {
+            System.err.println("Failed to connect/join to sequencer: " + e.getMessage());
+            e.printStackTrace();
+            // TODO: retry or exit gracefully
         }
     }
 
     /**
-     * Send a CHAT_REQ message to the sequencer when a local client sends a chat message.
-     *
-     * Format on the wire:
-     *   CHAT_REQ <localMsgId> <brokerId> <username> <text>
-     *
-     * localMsgId is a per-broker unique id (e.g. "broker2-7").
+     * Send a ChatReqMessage to the sequencer when a local client sends a chat message.
      */
     public void sendChatReqToSequencer(String username, String text) {
         if (sequencerOut == null) {
-            // If we don't have a connection to the sequencer, we can't enforce global order.
-            // For now we fall back to local broadcast so clients still see something.
             System.err.println("No connection to sequencer; falling back to local broadcast.");
-            broadcastToClients(username, text); // fallback for now
+            broadcastToClients(username, text);
             return;
         }
 
-        // Build a unique local message id, useful for logging/retries if needed.
-        String localMsgId = config.getBrokerId() + "-" + (++localMsgCounter);
+        String localMsgId = brokerId + "-" + (++localMsgCounter);
+        ChatReqMessage msg = new ChatReqMessage(localMsgId, brokerId, username, text);
 
-        // Build the CHAT_REQ line using the Protocol helper.
-        String line = Protocol.chatReq(localMsgId, config.getBrokerId(), username, text);
-
-        // Send it to the sequencer over TCP.
-        sequencerOut.println(line);
+        try {
+            sequencerOut.writeObject(msg);
+            sequencerOut.flush();
+        } catch (IOException e) {
+            System.err.println("Failed to send ChatReqMessage to sequencer: " + e.getMessage());
+            broadcastToClients(username, text); // fallback
+        }
     }
 
+    /* =========================================================
+       2) SEQUENCER SIDE: listen for brokers (JOIN + CHAT_REQ)
+       ========================================================= */
+
     /**
-     * Start a dedicated thread that listens for CHAT_REQ connections from other brokers.
-     * This is only started when this broker is the sequencer.
-     *
-     * For each incoming connection from a broker, we spawn a SequencerHandler
-     * to read CHAT_REQ lines and feed them into SequencerState.
+     * Start a dedicated thread that listens for connections from other brokers.
+     * First message on each connection is expected to be BROKER_JOIN;
+     * the sequencer responds with ASSIGN_ID using HandlerState (AtomicInteger),
+     * then a SequencerHandler handles CHAT_REQ lines on the same socket.
      */
     private void startSequencerListener() {
         new Thread(() -> {
@@ -229,19 +247,40 @@ public class Broker {
                 System.out.println("Sequencer " + config.getBrokerId() + " listening for CHAT_REQ on port " + port);
 
                 while (true) {
-                    // Accept a TCP connection from a follower broker.
                     Socket brokerSocket = serverSocket.accept();
                     System.out.println("Sequencer accepted connection from broker: " + brokerSocket.getRemoteSocketAddress());
 
-                    // Each connection is handled in a separate SequencerHandler thread.
-                    SequencerHandler handler = new SequencerHandler(brokerSocket, sequencerState);
+                    // Object streams for this broker connection
+                    ObjectOutputStream out = new ObjectOutputStream(brokerSocket.getOutputStream());
+                    out.flush();
+                    ObjectInputStream in = new ObjectInputStream(brokerSocket.getInputStream());
+
+                    // 1) First message must be BrokerJoinMessage
+                    Object obj = in.readObject();
+                    if (!(obj instanceof BrokerJoinMessage joinMsg)) {
+                        System.err.println("Unexpected first message from broker: " + obj);
+                        brokerSocket.close();
+                        continue;
+                    }
+
+                    int newBrokerId = config.getHandlerState().getNewBrokerId();
+                    System.out.println("Assigned broker ID " + newBrokerId + " to broker " + brokerSocket.getRemoteSocketAddress());
+
+                    // send ack
+                    BrokerJoinAck ack = new BrokerJoinAck(newBrokerId);
+                    out.writeObject(ack);
+                    out.flush();
+
+                    // 2) Now the same socket is used for ChatReqMessage objects
+                    SequencerHandler handler = new SequencerHandler(brokerSocket, sequencerState, in, out);
 
                     Thread t = new Thread(handler);
-                    t.setDaemon(true);
+                    t.setDaemon(true);  // daemon so it doesn't block JVM shutdown
                     t.start();
                 }
-            } catch (IOException e) {
+            } catch (IOException | ClassNotFoundException e) {
                 System.err.println("Sequencer listener failed: " + e.getMessage());
+                e.printStackTrace();
             }
         }, "SequencerListener-" + config.getBrokerId()).start();
     }
