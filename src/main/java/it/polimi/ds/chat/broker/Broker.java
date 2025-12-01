@@ -4,6 +4,7 @@ import it.polimi.ds.chat.client.ClientHandler;
 import it.polimi.ds.chat.messages.BrokerJoinAck;
 import it.polimi.ds.chat.messages.BrokerJoinMessage;
 import it.polimi.ds.chat.messages.ChatReqMessage;
+import it.polimi.ds.chat.messages.ClientAckMessages;
 
 import java.io.*;
 import java.net.ServerSocket;
@@ -282,5 +283,45 @@ public class Broker {
                 e.printStackTrace();
             }
         }, "SequencerListener-" + config.getBrokerId()).start();
+    }
+
+    /**
+     * Entry point per i messaggi dei client, con timestamp.
+     * Per ora assumiamo che solo il sequencer riceva messaggi dai client.
+     */
+    public void onClientMessage(String username, String text, long timestamp) {
+        if (config.isSequencer()) {
+            // questo broker è il sequencer: ordina e consegna
+            long seq;
+            synchronized (this) {
+                seq = nextSeq++;
+            }
+
+            // consegna il messaggio a tutti i client locali
+            onChatDeliver(seq, username, text);
+
+            // manda ACK al mittente
+            sendAckToClient(username, timestamp);
+
+        } else {
+            // Se in futuro avrai follower, qui manderai il ChatReq al sequencer
+            // sendChatReqToSequencer(username, text, timestamp);
+            System.err.println("onClientMessage chiamato su follower (non gestito al momento)");
+        }
+    }
+
+    /**
+     * Manda un ACK al client con dato username.
+     */
+    private void sendAckToClient(String username, long timestamp) {
+        synchronized (clients) {
+            for (ClientHandler handler : clients) {
+                if (username.equals(handler.getUsername())) {
+                    String ackLine = ClientAckMessages.buildAck(timestamp, username);
+                    handler.sendLine(ackLine);
+                    break;
+                }
+            }
+        }
     }
 }

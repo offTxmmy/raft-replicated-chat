@@ -22,6 +22,16 @@ public class ClientHandler implements Runnable {
         this.broker = broker;
     }
 
+    public String getUsername() {
+        return username;
+    }
+
+    public void sendLine(String line) {
+        if (out != null) {
+            out.println(line);
+        }
+    }
+
     @Override
     public void run() {
         try (
