@@ -71,4 +71,23 @@ public class BrokerConfig {
     public HandlerState getHandlerState() {
         return handlerState;
     }
+
+    @Override
+    public boolean equals(Object o) {
+        if (this == o) return true;
+        if (!(o instanceof BrokerConfig that)) return false;
+
+        // Identify a broker only by host+port+role in the cluster context
+        if (brokerPort != that.brokerPort) return false;
+        if (isSequencer != that.isSequencer) return false;
+        return brokerHost.equals(that.brokerHost);
+    }
+
+    @Override
+    public int hashCode() {
+        int result = brokerHost.hashCode();
+        result = 31 * result + brokerPort;
+        result = 31 * result + (isSequencer ? 1 : 0);
+        return result;
+    }
 }

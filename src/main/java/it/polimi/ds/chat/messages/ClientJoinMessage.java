@@ -1,6 +1,10 @@
 package it.polimi.ds.chat.messages;
 
 public class ClientJoinMessage extends ClientMessage {
+    public ClientJoinMessage(String username, String text, long timestamp) {
+        super(username, text, timestamp);
+    }
+
     public static String joinCommand(String username) {
         return "JOIN " + username;
     }
