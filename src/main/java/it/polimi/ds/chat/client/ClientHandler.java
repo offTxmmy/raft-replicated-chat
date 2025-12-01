@@ -61,8 +61,8 @@ public class ClientHandler implements Runnable {
             out.println(ClientJoinMessage.welcome(username));
             broker.notifyJoin(username);
         } else if (ClientMessage.isMsg(line)) {
-            String text = ClientMessage.parseMsg(line);
-            broker.onClientMessage(username, text);
+            ClientMessage message = ClientMessage.fromClientLine(username, line);
+            broker.onClientMessage(message);
         } else if (ClientQuitMessage.isQuit(line)) {
             try {
                 socket.close();

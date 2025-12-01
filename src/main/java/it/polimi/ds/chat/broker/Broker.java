@@ -5,6 +5,7 @@ import it.polimi.ds.chat.messages.BrokerJoinAck;
 import it.polimi.ds.chat.messages.BrokerJoinMessage;
 import it.polimi.ds.chat.messages.ChatReqMessage;
 import it.polimi.ds.chat.messages.ClientAckMessages;
+import it.polimi.ds.chat.messages.ClientMessage;
 
 import java.io.*;
 import java.net.ServerSocket;
@@ -144,13 +145,18 @@ public class Broker {
     /**
      * Entry point for messages sent by clients connected to THIS broker.
      */
-    public void onClientMessage(String username, String text) {
+    public void onClientMessage(ClientMessage message) {
         if (config.isSequencer()) {
-            // This broker acts as the sequencer
-            sequencerState.handleChatFromBroker(brokerId, username, text);
+            long seq;
+            synchronized (this) {
+                seq = nextSeq++;
+            }
+
+            onChatDeliver(seq, message.getUsername(), message.getText());
+            sendAckToClient(message.getUsername(), message.getTimestamp());
         } else {
-            // This broker is a follower: delegate ordering to the sequencer via CHAT_REQ.
-            sendChatReqToSequencer(username, text);
+            // Delegate ordering to the sequencer via CHAT_REQ.
+            sendChatReqToSequencer(message.getUsername(), message.getText());
         }
     }
 
@@ -283,31 +289,6 @@ public class Broker {
                 e.printStackTrace();
             }
         }, "SequencerListener-" + config.getBrokerId()).start();
-    }
-
-    /**
-     * Entry point per i messaggi dei client, con timestamp.
-     * Per ora assumiamo che solo il sequencer riceva messaggi dai client.
-     */
-    public void onClientMessage(String username, String text, long timestamp) {
-        if (config.isSequencer()) {
-            // questo broker è il sequencer: ordina e consegna
-            long seq;
-            synchronized (this) {
-                seq = nextSeq++;
-            }
-
-            // consegna il messaggio a tutti i client locali
-            onChatDeliver(seq, username, text);
-
-            // manda ACK al mittente
-            sendAckToClient(username, timestamp);
-
-        } else {
-            // Se in futuro avrai follower, qui manderai il ChatReq al sequencer
-            // sendChatReqToSequencer(username, text, timestamp);
-            System.err.println("onClientMessage chiamato su follower (non gestito al momento)");
-        }
     }
 
     /**
