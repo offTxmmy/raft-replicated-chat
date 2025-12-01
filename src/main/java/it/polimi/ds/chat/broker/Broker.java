@@ -174,7 +174,7 @@ public class Broker {
      */
     private void connectToSequencer() {
         try {
-            System.out.println("Connecting to a sequencer at " + config.getSequencerHost() + ":" + config.getSequencerPort());
+            System.out.println("Connecting to the sequencer at " + config.getSequencerHost() + ":" + config.getSequencerPort());
             sequencerSocket = new Socket(config.getSequencerHost(), config.getSequencerPort());
 
             // IMPORTANT: always create ObjectOutputStream first, then flush, then ObjectInputStream
@@ -234,16 +234,16 @@ public class Broker {
 
     /**
      * Start a dedicated thread that listens for connections from other brokers.
-     * First message on each connection is expected to be BROKER_JOIN;
+     * First message on each connection is expected to be BrokerJoinMessage;
      * the sequencer responds with ASSIGN_ID using HandlerState (AtomicInteger),
-     * then a SequencerHandler handles CHAT_REQ lines on the same socket.
+     * then a SequencerHandler handles ChatReqMessage messages on the same socket.
      */
     private void startSequencerListener() {
         new Thread(() -> {
             try {
                 int port = config.getSequencerPort();
                 ServerSocket serverSocket = new ServerSocket(port);
-                System.out.println("Sequencer " + config.getBrokerId() + " listening for CHAT_REQ on port " + port);
+                System.out.println("Sequencer " + config.getBrokerId() + " listening for ChatReqMessage on port " + port);
 
                 while (true) {
                     Socket brokerSocket = serverSocket.accept();

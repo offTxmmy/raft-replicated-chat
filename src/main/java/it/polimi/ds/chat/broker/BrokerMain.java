@@ -10,8 +10,6 @@ public class BrokerMain {
 
     private static final Scanner scanner = new Scanner(System.in);
 
-    private static HandlerState handlerState;
-
     public static void main(String[] args) {
         System.out.println("---REPLICATED CHAT INFRASTACTURE---");
 
@@ -33,6 +31,8 @@ public class BrokerMain {
             brokerId = handlerState.getNewBrokerId();
             sequencerHost = brokerIp;
             System.out.println("Starting as SEQUENCER with brokerId = " + brokerId);
+            System.out.println("Sequencer address for other brokers: "
+                    + sequencerHost + ":" + sequencerPort);
         } else {
             brokerId = -1;
             sequencerHost = askForSequencerHost();
