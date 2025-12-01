@@ -4,7 +4,6 @@ import it.polimi.ds.chat.client.ClientHandler;
 import it.polimi.ds.chat.messages.BrokerJoinAck;
 import it.polimi.ds.chat.messages.BrokerJoinMessage;
 import it.polimi.ds.chat.messages.ChatReqMessage;
-import it.polimi.ds.chat.utilities.Protocol;
 
 import java.io.*;
 import java.net.ServerSocket;

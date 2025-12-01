@@ -2,7 +2,6 @@ package it.polimi.ds.chat.broker;
 
 import it.polimi.ds.chat.messages.ChatReqMessage;
 import it.polimi.ds.chat.utilities.ChatReqFields;
-import it.polimi.ds.chat.utilities.Protocol;
 
 import java.io.*;
 import java.net.Socket;
