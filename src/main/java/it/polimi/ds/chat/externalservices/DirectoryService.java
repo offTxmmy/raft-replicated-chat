@@ -2,26 +2,45 @@ package it.polimi.ds.chat.externalservices;
 
 import it.polimi.ds.chat.broker.BrokerConfig;
 import it.polimi.ds.chat.broker.HandlerState;
-import it.polimi.ds.chat.messages.DirectoryRegisterMessage;
+import it.polimi.ds.chat.messages.*;
 
-import java.io.IOException;
-import java.io.ObjectInputStream;
+import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class DirectoryService {
-    private HashMap<BrokerConfig, Integer> registeredBrokers = new HashMap<>();
+
+    private static final long HEARTBEAT_TIMEOUT_MS = 10_000;
+    private static final long REAPER_INTERVAL_MS   = 5_000;
+
+    // broker configuration + client count
+    private final Map<BrokerConfig, Integer> registeredBrokers = new ConcurrentHashMap<>();
+    // last heartbeat time per brokerId
+    private final Map<Integer, Long> lastHeartbeats = new ConcurrentHashMap<>();
+    // index by brokerId for fast lookup
+    private final Map<Integer, BrokerConfig> brokersById = new ConcurrentHashMap<>();
 
     public static void main(String[] args) {
-        int port = 60000;
+        int brokerPort = 60000;
+        int clientPort = 60001;
 
-        System.out.println("Directory Service starting on port " + port + "...");
+        System.out.println("Directory Service starting...");
         DirectoryService service = new DirectoryService();
-        service.start(port);
+
+        // Lister on brokerPort (register + heartbeat
+        new Thread(() -> service.startBrokersListener(brokerPort), "Dir-BrokerListener").start();
+
+        // Listen on clientPort (GET_BROKER)
+        new Thread(() -> service.startClientsListener(clientPort), "Dir-ClientListener").start();
     }
 
-    public void start(int port) {
+    public DirectoryService() {
+        startReaperThread();
+    }
+
+    public void startBrokersListener(int port) {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             System.out.println("Directory Service listening on port " + port);
 
@@ -37,29 +56,118 @@ public class DirectoryService {
         }
     }
 
-    private void handleConnection(Socket socket) {
-        try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+    public void startClientsListener(int port) {
+        try (ServerSocket serverSocket = new ServerSocket(port)) {
+            System.out.println("Directory Service listening for CLIENTS on port " + port);
 
-            Object obj = in.readObject();
-            if (obj instanceof DirectoryRegisterMessage msg) {
-                registerBroker(msg);
-            } else {
-                System.out.println("Unknown object from " + socket.getRemoteSocketAddress() + ": " + obj);
+            while (true) {
+                Socket socket = serverSocket.accept();
+                System.out.println("New client directory request from " + socket.getRemoteSocketAddress());
+
+                new Thread(() -> handleClientConnection(socket)).start();
             }
-
-        } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Error handling connection: " + e.getMessage());
-        } finally {
-            try { socket.close(); } catch (IOException ignored) {}
+        } catch (IOException e) {
+            System.err.println("Directory Service client listener error: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
-    private void registerBroker(DirectoryRegisterMessage msg) {
+    private void handleClientConnection(Socket socket) {
+        try (ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+             ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+            Object obj = in.readObject();
+            if (obj instanceof GetBrokerRequestMessage req) {
+                BrokerConfig best = chooseBestBroker();
+
+                GetBrokerResponseMessage resp;
+                if (best != null) {
+                    resp = new GetBrokerResponseMessage(
+                            true,
+                            best.getBrokerHost(),
+                            best.getBrokerPort(),
+                            best.getBrokerId()
+                    );
+                    System.out.println("Returned broker " + best.getBrokerId() +
+                            " (" + best.getBrokerHost() + ":" + best.getBrokerPort() + ") to client");
+                } else {
+                    resp = new GetBrokerResponseMessage(false, null, -1, -1);
+                    System.out.println("No brokers available to client request");
+                }
+
+                out.writeObject(resp);
+                out.flush();
+            } else {
+                System.out.println("Unknown client request object: " + obj);
+            }
+
+        } catch (IOException | ClassNotFoundException e) {
+            System.err.println("Error handling client directory request: " + e.getMessage());
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException ignored) {}
+        }
+    }
+
+    private void handleConnection(Socket socket) {
+        try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
+
+            // Expected first message: DirectoryRegisterMessage
+            Object first = in.readObject();
+            if (!(first instanceof DirectoryRegisterMessage msg)) {
+                System.out.println("Unknown first object from " + socket.getRemoteSocketAddress() + ": " + first);
+                return;
+            }
+
+            registerBroker(msg);
+            int brokerId = msg.getBrokerId();
+
+            // Loop: receive HeartbeatMessage on the same connection
+            while (true) {
+                Object obj = in.readObject();
+                if (obj instanceof HeartbeatMessage hb) {
+                    // update last heartbeat time
+                    lastHeartbeats.put(brokerId, hb.getTimestamp());
+                    // System.out.println("Heartbeat from broker " + brokerId);
+                } else if (obj instanceof ClientCountUpdateMessage cc) {
+                    updateClientCount(cc);
+                } else {
+                    System.out.println("Unknown object from broker " + brokerId + ": " + obj);
+                }
+            }
+
+        } catch (IOException e) {
+            System.err.println("Connection with broker died: " + e.getMessage());
+            // The reaper will clean up based on heartbeat timeout
+        } catch (ClassNotFoundException e) {
+            System.err.println("Unknown class from broker: " + e.getMessage());
+        } finally {
+            try {
+                socket.close();
+            } catch (IOException ignored) {}
+        }
+    }
+
+    public void updateClientCount(ClientCountUpdateMessage cc) {
+        int brokerId = cc.getBrokerId();
+        int clientCount = cc.getClientCount();
+
+        BrokerConfig cfg = brokersById.get(brokerId);
+        if (cfg != null) {
+            registeredBrokers.put(cfg, clientCount);
+            // System.out.println("Updated client count for broker " + brokerId + ": " + clientCount);
+        } else {
+            System.out.println("Received ClientCountUpdate for unknown brokerId=" + brokerId);
+        }
+    }
+
+    private BrokerConfig registerBroker(DirectoryRegisterMessage msg) {
+        int brokerId = msg.getBrokerId();
         String host = msg.getBrokerHost();
         int port = msg.getBrokerPort();
         boolean isSequencer = msg.isSequencer();
 
-        int brokerId = isSequencer ? 0 : -1;
         int clientPort = port;
         String sequencerHost = host;
         int sequencerPort = 0;
@@ -79,6 +187,66 @@ public class DirectoryService {
         );
 
         registeredBrokers.putIfAbsent(config, 0);
-        System.out.println("Registered broker: " + config.getBrokerHost() + ":" + config.getBrokerPort() + " (sequencer=" + isSequencer + "), clientCount=0");
+        brokersById.put(brokerId, config);
+        lastHeartbeats.put(brokerId, System.currentTimeMillis());
+
+        System.out.println("Registered broker: id=" + brokerId + " "
+                + config.getBrokerHost() + ":" + config.getBrokerPort()
+                + " (sequencer=" + isSequencer + "), clientCount=0");
+
+        return config;
+    }
+
+    private void startReaperThread() {
+        Thread t = new Thread(() -> {
+            while (true) {
+                try {
+                    long now = System.currentTimeMillis();
+
+                    // Check all brokers by id
+                    for (Map.Entry<Integer, Long> entry : lastHeartbeats.entrySet()) {
+                        int brokerId = entry.getKey();
+                        ;
+                        long last = entry.getValue();
+
+                        if (now - last > HEARTBEAT_TIMEOUT_MS) {
+                            // Consider broker dead
+                            System.out.println("Broker " + brokerId + " considered DEAD (no heartbeat for " + (now - last) + " ms). Removing from directory.");
+
+                            lastHeartbeats.remove(brokerId);
+
+                            BrokerConfig cfg = brokersById.remove(brokerId);
+                            if (cfg != null) {
+                                registeredBrokers.remove(cfg);
+                            }
+                        }
+                    }
+
+                    Thread.sleep(REAPER_INTERVAL_MS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }, "Directory-Reaper");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private BrokerConfig chooseBestBroker() {
+        BrokerConfig best = null;
+        int bestCount = Integer.MAX_VALUE;
+
+        for (Map.Entry<BrokerConfig, Integer> entry : registeredBrokers.entrySet()) {
+            BrokerConfig cfg = entry.getKey();
+            int count = entry.getValue();
+
+            if (count < bestCount) {
+                bestCount = count;
+                best = cfg;
+            }
+        }
+
+        return best;
     }
 }

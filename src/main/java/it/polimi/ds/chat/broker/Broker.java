@@ -1,11 +1,7 @@
 package it.polimi.ds.chat.broker;
 
 import it.polimi.ds.chat.client.ClientHandler;
-import it.polimi.ds.chat.messages.BrokerJoinAck;
-import it.polimi.ds.chat.messages.BrokerJoinMessage;
-import it.polimi.ds.chat.messages.ChatReqMessage;
-import it.polimi.ds.chat.messages.ClientAckMessages;
-import it.polimi.ds.chat.messages.ClientMessage;
+import it.polimi.ds.chat.messages.*;
 
 import java.io.*;
 import java.net.ServerSocket;
@@ -26,6 +22,17 @@ import java.util.List;
  * - Deliver ordered messages to its local clients.
  */
 public class Broker {
+
+    // Directory Service config (for now hardcoded)
+    private static final String DIRECTORY_HOST = "localhost";
+    private static final int DIRECTORY_PORT = 60000;
+    private static final long HEARTBEAT_INTERVAL_MS = 3000;
+
+    // Connection to directory service
+    private Socket directorySocket;
+    private ObjectOutputStream directoryOut;
+    private final Object directoryLock = new Object();
+
     // Static configuration for this broker (ports, host, isSequencer, etc.)
     private final BrokerConfig config;
 
@@ -83,6 +90,10 @@ public class Broker {
             connectToSequencer();
         }
 
+        // Connect to directory service, register, and start sending heartbeats
+        connectAndRegisterWithDirectoryService();
+        startHeartbeatLoop();
+
         int port = config.getBrokerPort();
         ServerSocket serverSocket = new ServerSocket(port);
         System.out.println("Broker " + brokerId + " listening for clients on port " + port);
@@ -104,6 +115,7 @@ public class Broker {
             // One handler per client, running in its own thread.
             ClientHandler handler = new ClientHandler(clientSocket, this);
             clients.add(handler);
+            sendClientCountUpdate();
 
             Thread t = new Thread(handler);
             t.setDaemon(true);  // daemon so it doesn't block JVM shutdown
@@ -116,6 +128,7 @@ public class Broker {
      */
     public void removeClient(ClientHandler handler) {
         clients.remove(handler);
+        sendClientCountUpdate();
     }
 
     /**
@@ -166,6 +179,91 @@ public class Broker {
 
     public void notifyJoin(String username) {
         broadcastToClients("[system]", username + " joined the chat");
+    }
+
+    private void connectAndRegisterWithDirectoryService() {
+        System.out.println("Connecting to Directory Service at " + DIRECTORY_HOST + ":" + DIRECTORY_PORT + "...");
+        try {
+            directorySocket = new Socket(DIRECTORY_HOST, DIRECTORY_PORT);
+            directoryOut = new ObjectOutputStream(directorySocket.getOutputStream());
+
+            DirectoryRegisterMessage msg = new DirectoryRegisterMessage(
+                    this.brokerId,
+                    config.getBrokerHost(),
+                    config.getBrokerPort(),
+                    config.isSequencer()
+            );
+
+            synchronized (directoryLock) {
+                directoryOut.writeObject(msg);
+                directoryOut.flush();
+            }
+
+            System.out.println("Registered broker in Directory Service: " + msg);
+        } catch (IOException e) {
+            System.err.println("Failed to connect/register with Directory Service: " + e.getMessage());
+            // you can decide later if you want to System.exit(1) here
+        }
+    }
+
+    private void startHeartbeatLoop() {
+        if (directoryOut == null) {
+            System.err.println("Heartbeat not started: no connection to Directory Service.");
+            return;
+        }
+
+        Thread t = new Thread(() -> {
+            while (true) {
+                try {
+                    HeartbeatMessage hb = new HeartbeatMessage(
+                            this.brokerId,
+                            System.currentTimeMillis()
+                    );
+
+                    synchronized (directoryLock) {
+                        directoryOut.writeObject(hb);
+                        directoryOut.flush();
+                    }
+
+                    // System.out.println("Sent heartbeat: " + hb); // optional debug
+                    Thread.sleep(HEARTBEAT_INTERVAL_MS);
+                } catch (IOException e) {
+                    System.err.println("Failed to send heartbeat to Directory Service: " + e.getMessage());
+                    // Connection is probably dead; stop the loop
+                    break;
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+
+            try {
+                if (directorySocket != null) {
+                    directorySocket.close();
+                }
+            } catch (IOException ignored) {}
+        }, "HeartbeatSender-" + brokerId);
+
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void sendClientCountUpdate() {
+        if (directoryOut == null) {
+            return;
+        }
+
+        int count = clients.size();
+        ClientCountUpdateMessage msg = new ClientCountUpdateMessage(brokerId, count);
+
+        try {
+            synchronized (directoryLock) {
+                directoryOut.writeObject(msg);
+                directoryOut.flush();
+            }
+        } catch (IOException e) {
+            System.err.println("Failed to send client count update to Directory Service: " + e.getMessage());
+        }
     }
 
     /* =========================================================

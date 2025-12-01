@@ -1,12 +1,7 @@
 package it.polimi.ds.chat.broker;
 
-import it.polimi.ds.chat.messages.DirectoryRegisterMessage;
-
 import java.io.IOException;
-import java.io.ObjectOutputStream;
-import java.io.PrintWriter;
 import java.net.InetAddress;
-import java.net.Socket;
 import java.net.UnknownHostException;
 import java.util.InputMismatchException;
 import java.util.Scanner;
@@ -27,10 +22,6 @@ public class BrokerMain {
         int sequencerPort = 50001;
         int udpPort = 50002;
 
-        // For now: Directory Service is assumed to be on localhost:50000
-        String directoryHost = "localhost";
-        int directoryPort = 60000;
-
         String sequencerHost;
         HandlerState handlerState = null;
         int brokerId;
@@ -48,8 +39,6 @@ public class BrokerMain {
             System.out.println("Starting as FOLLOWER, waiting for ID from sequencer at " + sequencerHost + ":" + sequencerPort);
 
         }
-
-        registerWithDirectoryService(directoryHost, directoryPort, brokerIp, brokerPort, isSequencer);
 
         BrokerConfig config = new BrokerConfig(
                 brokerId,
@@ -70,25 +59,6 @@ public class BrokerMain {
         } catch (IOException e) {
             System.err.println("Broker failed: " + e.getMessage());
             e.printStackTrace();
-        }
-    }
-
-    private static void registerWithDirectoryService(String dirHost, int dirPort,
-                                                     String brokerHost, int brokerPort,
-                                                     boolean isSequencer) {
-        System.out.println("Connecting to Directory Service at " + dirHost + ":" + dirPort + "...");
-        try (Socket socket = new Socket(dirHost, dirPort);
-             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
-
-            DirectoryRegisterMessage msg = new DirectoryRegisterMessage(brokerHost, brokerPort, isSequencer);
-
-            out.writeObject(msg);
-            out.flush();
-
-            System.out.println("Registered broker in Directory Service: " + msg);
-        } catch (IOException e) {
-            System.err.println("Failed to register with Directory Service: " + e.getMessage());
-            // decide later if this should be fatal
         }
     }
 
