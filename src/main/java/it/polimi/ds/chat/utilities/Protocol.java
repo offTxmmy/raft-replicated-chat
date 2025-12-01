@@ -1,6 +1,6 @@
 package it.polimi.ds.chat.utilities;
 
-public class Protocol {
+/*public class Protocol {
 
     private Protocol() {
 
@@ -94,4 +94,4 @@ public class Protocol {
 
         return new ChatDeliverFields(seq, brokerId, username, text);
     }
-}
+}*/

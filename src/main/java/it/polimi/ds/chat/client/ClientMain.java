@@ -1,6 +1,8 @@
 package it.polimi.ds.chat.client;
 
-import it.polimi.ds.chat.utilities.Protocol;
+import it.polimi.ds.chat.messages.ClientJoinMessage;
+import it.polimi.ds.chat.messages.ClientMessage;
+import it.polimi.ds.chat.messages.ClientQuitMessage;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -30,7 +32,7 @@ public class ClientMain {
 
         System.out.println("Enter username: ");
         String username = stdin.readLine();
-        out.println(Protocol.joinCommand(username));
+        out.println(ClientJoinMessage.joinCommand(username));
 
         Thread readerThread = new Thread(() -> {
             try{
@@ -49,10 +51,10 @@ public class ClientMain {
         String input;
         while((input = stdin.readLine()) != null) {
             if(input.equalsIgnoreCase("/quit")) {
-                out.println(Protocol.quitCommand());
+                out.println(ClientQuitMessage.quitCommand());
                 break;
             } else {
-                out.println(Protocol.msgCommand(input));
+                out.println(ClientMessage.msgCommand(input));
             }
         }
 

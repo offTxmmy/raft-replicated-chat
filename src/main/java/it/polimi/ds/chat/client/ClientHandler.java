@@ -1,7 +1,9 @@
 package it.polimi.ds.chat.client;
 
 import it.polimi.ds.chat.broker.Broker;
-import it.polimi.ds.chat.utilities.Protocol;
+import it.polimi.ds.chat.messages.ClientJoinMessage;
+import it.polimi.ds.chat.messages.ClientQuitMessage;
+import it.polimi.ds.chat.messages.ClientMessage;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -44,14 +46,14 @@ public class ClientHandler implements Runnable {
     }
 
     private void handleCommand(String line) {
-        if (Protocol.isJoin(line)) {
-            username = Protocol.parseJoin(line);
-            out.println(Protocol.welcome(username));
+        if (ClientJoinMessage.isJoin(line)) {
+            username = ClientJoinMessage.parseJoin(line);
+            out.println(ClientJoinMessage.welcome(username));
             broker.notifyJoin(username);
-        } else if (Protocol.isMsg(line)) {
-            String text = Protocol.parseMsg(line);
+        } else if (ClientMessage.isMsg(line)) {
+            String text = ClientMessage.parseMsg(line);
             broker.onClientMessage(username, text);
-        } else if (Protocol.isQuit(line)) {
+        } else if (ClientQuitMessage.isQuit(line)) {
             try {
                 socket.close();
             } catch (IOException ignored) {}
@@ -62,7 +64,7 @@ public class ClientHandler implements Runnable {
 
     public void sendMessageToClient(long seq, String sender, String text) {
         if (out != null) {
-            out.println(Protocol.msgToClient(seq, sender, text));
+            out.println(ClientMessage.msgToClient(seq, sender, text));
         }
     }
 }
