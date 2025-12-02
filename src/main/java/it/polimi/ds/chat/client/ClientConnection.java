@@ -8,8 +8,8 @@ import java.net.Socket;
 
 public class ClientConnection {
 
-    private final String host;
-    private final int port;
+    protected String host;
+    protected int port;
 
     private Socket socket;
     private BufferedReader in;
@@ -34,9 +34,11 @@ public class ClientConnection {
         return out;
     }
 
+
     public boolean isOpen() {
         return socket != null && !socket.isClosed();
     }
+
 
     public void close() {
         try {
@@ -45,5 +47,19 @@ public class ClientConnection {
             }
         } catch (IOException ignored) {
         }
+    }
+
+    public String getHost() {
+        return host;
+    }
+
+    public int getPort() {
+        return port;
+    }
+
+    protected void reopenTo(String newHost, int newPort) throws IOException {
+        close();
+        this.host = newHost;
+        this.port = newPort;
     }
 }
