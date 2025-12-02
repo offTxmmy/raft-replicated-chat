@@ -51,7 +51,7 @@ public class SequencerHandler implements Runnable {
             String text = msg.getText();
 
             // Pass the message to the sequencer logic: it will assign global seq
-            sequencerState.handleChatFromBroker(brokerId, username, text);
+            sequencerState.handleChatFromBroker(msg);
 
             // If later you add ACKs, you can send them here using `out.writeObject(...)`
         } else {

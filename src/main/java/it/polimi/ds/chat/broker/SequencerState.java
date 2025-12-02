@@ -1,7 +1,6 @@
 package it.polimi.ds.chat.broker;
 
-import it.polimi.ds.chat.messages.BrokerMessage;
-import it.polimi.ds.chat.messages.ChatReqMessage;
+import it.polimi.ds.chat.messages.*;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -32,12 +31,23 @@ public class SequencerState {
         t.start();
     }
 
-    public synchronized void handleChatFromBroker(int senderBrokerId, String username, String text) {
+    public synchronized void handleChatFromBroker(ChatReqMessage chatReq) {
         long seq = ++globalSeq;
 
-        // for now directly deliver to this broker's clients
-        // later will broadcast CHAT_DELIVER over UDP to all brokers
-        broker.onChatDeliver(seq, username, text);
+        // Deliver locally to clients connected to the sequencer itself
+        broker.onChatDeliver(seq, chatReq.getUsername(), chatReq.getText());
+
+        // Notify all brokers (including the sender) about the ordered message
+        ChatDeliverMessage deliver = new ChatDeliverMessage(
+                seq,
+                chatReq.getBrokerId(),
+                chatReq.getUsername(),
+                chatReq.getText()
+        );
+        sendToAllBrokers(deliver);
+
+        // Optionally confirm ordering to the sender broker
+        sendMessageToBroker(chatReq.getBrokerId(), new ChatReqAck(chatReq.getLocalMsgId(), seq));
     }
 
     public void sendMessageToBroker(int brokerId, Object message) {
@@ -89,7 +99,7 @@ public class SequencerState {
 
     private void processBrokerMessage(int brokerId, BrokerMessage message) {
         if (message instanceof ChatReqMessage chatReq) {
-            handleChatFromBroker(brokerId, chatReq.getUsername(), chatReq.getText());
+            handleChatFromBroker(chatReq);
         } else {
             System.out.println("SequencerState: received unknown broker message from " + brokerId + ": " + message);
         }

@@ -343,6 +343,8 @@ public class Broker implements Serializable{
     private void handleMessageFromSequencer(BrokerMessage message) {
         if (message instanceof ChatReqAck chatReqAck) {
             System.out.println("Received ChatReqAck for message " + chatReqAck.getLocalMsgId() + " with seq " + chatReqAck.getGlobalSeq());
+        } else if (message instanceof ChatDeliverMessage chatDeliver) {
+            onChatDeliver(chatDeliver.getSeq(), chatDeliver.getUsername(), chatDeliver.getText());
         } else {
             System.out.println("Received broker message from sequencer: " + message.getClass().getSimpleName());
         }
