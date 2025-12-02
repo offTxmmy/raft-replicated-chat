@@ -49,7 +49,7 @@ public class ClientMessageReceiver implements Runnable {
                         } else {
                             // ACK per un altro utente (se il server li broadcasta)
                             // Puoi ignorarlo o loggarlo
-                            System.out.println("[INFO] ACK per utente " + ackUser + ": " + ts);
+                            //System.out.println("[INFO] ACK per utente " + ackUser + ": " + ts);
                         }
                     } catch (Exception e) {
                         System.err.println("Errore parsing ACK: " + e.getMessage());

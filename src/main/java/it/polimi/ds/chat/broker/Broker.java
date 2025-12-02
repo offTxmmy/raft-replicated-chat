@@ -163,16 +163,22 @@ public class Broker implements Serializable{
     public void onClientMessage(ClientMessage message) {
         if (config.isSequencer()) {
             // If this broker is the sequencer, handle the message directly
-            long seq;
-            synchronized (this) {
-                seq = nextSeq++;
-            }
-            // Deliver the message to local clients
-            onChatDeliver(seq, message.getUsername(), message.getText());
-            sendAckToClient(message.getUsername(), message.getTimestamp());
+            String localMsgId = brokerId + "-" + (++localMsgCounter);
+            ChatReqMessage chatReq = new ChatReqMessage(
+                    localMsgId,
+                    brokerId,
+                    message.getUsername(),
+                    message.getText()
+            );
 
-            // Broadcast the message to all brokers (sequencer already does this)
-            //broadcastToAllBrokers(message.getUsername(), message.getText());
+            // Reuse the same ordering path used for follower brokers so that
+            // local messages are globally sequenced and delivered to every
+            // broker (including this one).
+            sequencerState.handleChatFromBroker(chatReq);
+
+            // Confirm reception to the local client after handing the message
+            // to the sequencer pipeline.
+            sendAckToClient(message.getUsername(), message.getTimestamp());
         } else {
             // Delegate ordering to the sequencer via CHAT_REQ.
             sendChatReqToSequencer(message.getUsername(), message.getText(), message.getTimestamp());

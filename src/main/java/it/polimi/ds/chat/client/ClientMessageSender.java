@@ -34,7 +34,7 @@ public class ClientMessageSender implements Runnable {
         pendingMessages.put(timestamp, pm);
 
         out.println(wireLine);
-        System.out.println("[SEND] (" + timestamp + ") " + text);
+        //System.out.println("[SEND] (" + timestamp + ") " + text);
     }
 
     /**
@@ -51,7 +51,7 @@ public class ClientMessageSender implements Runnable {
     public void handleAck(long timestamp) {
         ClientPendingMessage removed = pendingMessages.remove(timestamp);
         if (removed != null) {
-            System.out.println("[ACK] Confermato messaggio con timestamp " + timestamp);
+            //System.out.println("[ACK] Confermato messaggio con timestamp " + timestamp);
         } else {
             System.out.println("[ACK] Ricevuto ACK per timestamp sconosciuto: " + timestamp);
         }
