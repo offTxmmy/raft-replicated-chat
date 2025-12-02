@@ -21,7 +21,7 @@ import java.util.List;
  *   and send CHAT_REQ messages.
  * - Deliver ordered messages to its local clients.
  */
-public class Broker {
+public class Broker implements Serializable{
 
     // Directory Service config (for now hardcoded)
     private static final String DIRECTORY_HOST = "localhost";
@@ -29,9 +29,9 @@ public class Broker {
     private static final long HEARTBEAT_INTERVAL_MS = 3000;
 
     // Connection to directory service
-    private Socket directorySocket;
-    private ObjectOutputStream directoryOut;
-    private final Object directoryLock = new Object();
+    private transient Socket directorySocket;
+    private transient ObjectOutputStream directoryOut;
+    private final transient Object directoryLock = new Object();
 
     // Static configuration for this broker (ports, host, isSequencer, etc.)
     private final BrokerConfig config;
@@ -47,12 +47,12 @@ public class Broker {
     private long nextSeq = 1;
 
     // Holds the global sequencing state when this broker acts as sequencer.
-    private SequencerState sequencerState;
+    private transient SequencerState sequencerState;
 
     // TCP connection from this broker to the sequencer (only if NOT sequencer).
-    private Socket sequencerSocket;
-    private ObjectOutputStream sequencerOut;
-    private ObjectInputStream sequencerIn;
+    private transient Socket sequencerSocket;
+    private transient ObjectOutputStream sequencerOut;
+    private transient ObjectInputStream sequencerIn;
 
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
@@ -150,7 +150,9 @@ public class Broker {
     public void onChatDeliver(long seq, String sender, String text) {
         synchronized (clients) {
             for (ClientHandler handler : clients) {
-                handler.sendMessageToClient(seq, sender, text);
+                if (!handler.getUsername().equals(sender)) {  // Don't send the message to the sender
+                    handler.sendMessageToClient(seq, sender, text);
+                }
             }
         }
     }
@@ -160,13 +162,17 @@ public class Broker {
      */
     public void onClientMessage(ClientMessage message) {
         if (config.isSequencer()) {
+            // If this broker is the sequencer, handle the message directly
             long seq;
             synchronized (this) {
                 seq = nextSeq++;
             }
-
+            // Deliver the message to local clients
             onChatDeliver(seq, message.getUsername(), message.getText());
             sendAckToClient(message.getUsername(), message.getTimestamp());
+
+            // Broadcast the message to all brokers (sequencer already does this)
+            //broadcastToAllBrokers(message.getUsername(), message.getText());
         } else {
             // Delegate ordering to the sequencer via CHAT_REQ.
             sendChatReqToSequencer(message.getUsername(), message.getText(), message.getTimestamp());
@@ -290,16 +296,17 @@ public class Broker {
             System.out.println("Connected to sequencer, sending BrokerJoinMessage...");
 
             // send join message
-            BrokerJoinMessage join = new BrokerJoinMessage(config.getBrokerHost(), config.getBrokerPort());
+            BrokerJoinMessage join = new BrokerJoinMessage(config.getBrokerHost(), config.getBrokerPort(), brokerId);
             sequencerOut.writeObject(join);
             sequencerOut.flush();
 
             // read ack
             Object obj = sequencerIn.readObject();
             if (obj instanceof BrokerJoinAck ack) {
-                int assignedId = ack.getBrokerId();
-                this.brokerId = assignedId;
-                System.out.println("Sequencer assigned broker ID: " + assignedId);
+                this.brokerId = ack.getBrokerId();;
+                System.out.println("Sequencer assigned broker ID: " + this.brokerId);
+
+                startSequencerInboundLoop();
             } else {
                 throw new IOException("Unexpected response from sequencer: " + obj);
             }
@@ -308,6 +315,36 @@ public class Broker {
             System.err.println("Failed to connect/join to sequencer: " + e.getMessage());
             e.printStackTrace();
             // TODO: retry or exit gracefully
+        }
+    }
+
+    private void startSequencerInboundLoop() {
+        if (sequencerIn == null) {
+            return;
+        }
+
+        Thread t = new Thread(() -> {
+            try {
+                while (true) {
+                    Object obj = sequencerIn.readObject();
+                    if (obj instanceof BrokerMessage brokerMessage) {
+                        handleMessageFromSequencer(brokerMessage);
+                    }
+                }
+            } catch (IOException | ClassNotFoundException e) {
+                System.err.println("Sequencer inbound loop stopped: " + e.getMessage());
+            }
+        }, "SequencerInbound-" + brokerId);
+
+        t.setDaemon(true);
+        t.start();
+    }
+
+    private void handleMessageFromSequencer(BrokerMessage message) {
+        if (message instanceof ChatReqAck chatReqAck) {
+            System.out.println("Received ChatReqAck for message " + chatReqAck.getLocalMsgId() + " with seq " + chatReqAck.getGlobalSeq());
+        } else {
+            System.out.println("Received broker message from sequencer: " + message.getClass().getSimpleName());
         }
     }
 
@@ -378,12 +415,8 @@ public class Broker {
                     out.writeObject(ack);
                     out.flush();
 
-                    // 2) Now the same socket is used for ChatReqMessage objects
-                    SequencerHandler handler = new SequencerHandler(brokerSocket, sequencerState, in, out);
-
-                    Thread t = new Thread(handler);
-                    t.setDaemon(true);  // daemon so it doesn't block JVM shutdown
-                    t.start();
+                    // 2) Register connection within the sequencer state to listen/send messages
+                    sequencerState.registerBrokerConnection(newBrokerId, brokerSocket, in, out);
                 }
             } catch (IOException | ClassNotFoundException e) {
                 System.err.println("Sequencer listener failed: " + e.getMessage());
