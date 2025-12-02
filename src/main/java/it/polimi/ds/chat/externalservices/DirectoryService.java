@@ -26,7 +26,7 @@ public class DirectoryService {
         int brokerPort = 60000;
         int clientPort = 60001;
 
-        System.out.println("Directory Service starting...");
+        System.out.println("---REPLICATED CHAT INFRASTRUCTURE: DIRECTORY SERVICE---");
         DirectoryService service = new DirectoryService();
 
         // Lister on brokerPort (register + heartbeat

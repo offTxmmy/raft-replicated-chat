@@ -12,7 +12,7 @@ public class ClientMain {
     private static final long ACK_TIMEOUT_MS = 2000L;
 
     public static void main(String[] args) {
-        //System.out.println("[DEBUG] Avvio ClientMain");
+        System.out.println("---REPLICATED CHAT INFRASTRUCTURE: CLIENT---");
 
         String directoryHost = "localhost";
         int directoryPort = 60001;

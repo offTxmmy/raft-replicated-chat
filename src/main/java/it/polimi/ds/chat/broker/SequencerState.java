@@ -8,6 +8,7 @@ import java.io.ObjectOutputStream;
 import java.net.Socket;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public class SequencerState {
     private long globalSeq = 0;
@@ -17,8 +18,11 @@ public class SequencerState {
     private final Map<Integer, ObjectOutputStream> brokerOutStreams = new HashMap<>();
     private final Map<Integer, ObjectInputStream> brokerInStreams = new HashMap<>();
 
+    private final Map<Integer, Long> lastHeartbeats = new HashMap<>();
+
     public SequencerState(Broker broker) {
         this.broker = broker;
+        startHeartbeatReaper();
     }
 
     public synchronized void registerBrokerConnection(int brokerId, Socket socket, ObjectInputStream brokerIn, ObjectOutputStream brokerOut) {
@@ -31,10 +35,46 @@ public class SequencerState {
         t.start();
     }
 
+    // Process heartbeats from brokers
+    public synchronized void handleHeartbeatFromBroker(HeartbeatMessage heartbeatMessage) {
+        // Update the last heartbeat timestamp for the broker
+        lastHeartbeats.put(heartbeatMessage.getBrokerId(), heartbeatMessage.getTimestamp());
+    }
+
+    // Periodic reaper to check for failed brokers based on heartbeats
+    private void startHeartbeatReaper() {
+        // Periodically check for missed heartbeats and identify failed brokers
+        new Thread(() -> {
+            while (true) {
+                try {
+                    TimeUnit.MILLISECONDS.sleep(5000);
+
+                    long currentTime = System.currentTimeMillis();
+
+                    // Check each broker's last heartbeat timestamp
+                    for (Map.Entry<Integer, Long> entry : lastHeartbeats.entrySet()) {
+                        int brokerId = entry.getKey();
+                        long lastHeartbeat = entry.getValue();
+
+                        if (currentTime - lastHeartbeat > 5000) {
+                            System.out.println(("Broker " + brokerId + " considered FAILED (no heartbeat for " + (currentTime - lastHeartbeat) + " ms). Removing broker."));
+                            removeBroker(brokerId);
+                        }
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }).start();
+    }
+
     public synchronized void handleChatFromBroker(ChatReqMessage chatReq) {
         long seq = ++globalSeq;
 
         // Deliver locally to clients connected to the sequencer itself
+        // later we'll implement Raft, so the leader will wait for ACKs before
+        // delivering message to its clients
         broker.onChatDeliver(seq, chatReq.getUsername(), chatReq.getText());
 
         // Notify all brokers (including the sender) about the ordered message
@@ -82,11 +122,30 @@ public class SequencerState {
         }
     }
 
+    private synchronized void removeBroker(int brokerId) {
+        // Remove broker's connection and heartbeat tracking
+        Socket socket = brokerConnections.remove(brokerId);
+        ObjectInputStream out = brokerInStreams.remove(brokerId);
+        ObjectOutputStream in = brokerOutStreams.remove(brokerId);
+
+        // Close socket and clean up streams
+        closeQuietly(socket);
+        closeQuietly(socket);
+        closeQuietly(socket);
+
+        // Remove broker from heartbeat tracking
+        lastHeartbeats.remove(brokerId);
+
+        System.out.println("Broker " + brokerId + " removed from the system due to failure.");
+    }
+
     private void handleBrokerMessages(int brokerId, ObjectInputStream brokerIn) {
         try {
             while (true) {
                 Object msg = brokerIn.readObject();
-                if (msg instanceof BrokerMessage brokerMessage) {
+                if (msg instanceof HeartbeatMessage hb) {
+                    handleHeartbeatFromBroker(hb);
+                } else if (msg instanceof BrokerMessage brokerMessage) {
                     processBrokerMessage(brokerId, brokerMessage);
                 }
             }

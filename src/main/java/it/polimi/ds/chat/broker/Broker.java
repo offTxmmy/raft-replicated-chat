@@ -26,7 +26,8 @@ public class Broker implements Serializable{
     // Directory Service config (for now hardcoded)
     private static final String DIRECTORY_HOST = "localhost";
     private static final int DIRECTORY_PORT = 60000;
-    private static final long HEARTBEAT_INTERVAL_MS = 3000;
+    private static final long HEARTBEAT_INTERVAL_MS = 3000; // Interval to send heartbeats (3 seconds)
+    private static final long HEARTBEAT_TIMEOUT_MS = 5000; // Timeout for broker failure detection (5 seconds)
 
     // Connection to directory service
     private transient Socket directorySocket;
@@ -232,12 +233,17 @@ public class Broker implements Serializable{
                             System.currentTimeMillis()
                     );
 
+                    // Send heartbeat to the DirectoryService
                     synchronized (directoryLock) {
                         directoryOut.writeObject(hb);
                         directoryOut.flush();
                     }
 
-                    // System.out.println("Sent heartbeat: " + hb);
+                    // Send the heartbeat to the Sequencer (if it's not the sequencer itself)
+                    if(config.getSequencerHost() != null && !config.isSequencer()) {
+                        sendHeartbeatToSequencer(hb);
+                    }
+
                     Thread.sleep(HEARTBEAT_INTERVAL_MS);
                 } catch (IOException e) {
                     System.err.println("Failed to send heartbeat to Directory Service: " + e.getMessage());
@@ -258,6 +264,18 @@ public class Broker implements Serializable{
 
         t.setDaemon(true);
         t.start();
+    }
+
+    // Send heartbeat to the sequencer
+    public void sendHeartbeatToSequencer(HeartbeatMessage heartbeatMessage) {
+        try {
+            if (sequencerOut != null) {
+                sequencerOut.writeObject(heartbeatMessage);
+                sequencerOut.flush();
+            }
+        } catch (IOException e) {
+            System.err.println("Failed to send heartbeat to Sequencer: " + e.getMessage());
+        }
     }
 
     private void sendClientCountUpdate() {
@@ -388,8 +406,7 @@ public class Broker implements Serializable{
     /**
      * Start a dedicated thread that listens for connections from other brokers.
      * First message on each connection is expected to be BrokerJoinMessage;
-     * the sequencer responds with ASSIGN_ID using HandlerState (AtomicInteger),
-     * then a SequencerHandler handles ChatReqMessage messages on the same socket.
+     * the sequencer responds with ASSIGN_ID using HandlerState (AtomicInteger).
      */
     private void startSequencerListener() {
         new Thread(() -> {

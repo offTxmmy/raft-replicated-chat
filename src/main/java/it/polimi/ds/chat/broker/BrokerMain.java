@@ -11,7 +11,7 @@ public class BrokerMain {
     private static final Scanner scanner = new Scanner(System.in);
 
     public static void main(String[] args) {
-        System.out.println("---REPLICATED CHAT INFRASTACTURE---");
+        System.out.println("---REPLICATED CHAT INFRASTRUCTURE: BROKER---");
 
         boolean isSequencer = args.length > 0 && "first".equalsIgnoreCase(args[0]);
 
