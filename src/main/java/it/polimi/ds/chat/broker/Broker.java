@@ -169,7 +169,7 @@ public class Broker {
             sendAckToClient(message.getUsername(), message.getTimestamp());
         } else {
             // Delegate ordering to the sequencer via CHAT_REQ.
-            sendChatReqToSequencer(message.getUsername(), message.getText());
+            sendChatReqToSequencer(message.getUsername(), message.getText(), message.getTimestamp());
         }
     }
 
@@ -225,7 +225,7 @@ public class Broker {
                         directoryOut.flush();
                     }
 
-                    // System.out.println("Sent heartbeat: " + hb); // optional debug
+                    // System.out.println("Sent heartbeat: " + hb);
                     Thread.sleep(HEARTBEAT_INTERVAL_MS);
                 } catch (IOException e) {
                     System.err.println("Failed to send heartbeat to Directory Service: " + e.getMessage());
@@ -314,10 +314,11 @@ public class Broker {
     /**
      * Send a ChatReqMessage to the sequencer when a local client sends a chat message.
      */
-    public void sendChatReqToSequencer(String username, String text) {
+    public void sendChatReqToSequencer(String username, String text, long timestamp) {
         if (sequencerOut == null) {
             System.err.println("No connection to sequencer; falling back to local broadcast.");
             broadcastToClients(username, text);
+            sendAckToClient(username, timestamp);
             return;
         }
 
@@ -327,9 +328,11 @@ public class Broker {
         try {
             sequencerOut.writeObject(msg);
             sequencerOut.flush();
+            sendAckToClient(username, timestamp);
         } catch (IOException e) {
             System.err.println("Failed to send ChatReqMessage to sequencer: " + e.getMessage());
             broadcastToClients(username, text); // fallback
+            sendAckToClient(username, timestamp);
         }
     }
 
@@ -361,7 +364,7 @@ public class Broker {
 
                     // 1) First message must be BrokerJoinMessage
                     Object obj = in.readObject();
-                    if (!(obj instanceof BrokerJoinMessage joinMsg)) {
+                    if (!(obj instanceof BrokerJoinMessage)) {
                         System.err.println("Unexpected first message from broker: " + obj);
                         brokerSocket.close();
                         continue;

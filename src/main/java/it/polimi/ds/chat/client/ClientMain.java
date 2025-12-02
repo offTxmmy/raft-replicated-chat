@@ -12,7 +12,7 @@ public class ClientMain {
     private static final long ACK_TIMEOUT_MS = 2000L;
 
     public static void main(String[] args) {
-        System.out.println("[DEBUG] Avvio ClientMain");
+        //System.out.println("[DEBUG] Avvio ClientMain");
 
         String directoryHost = "localhost";
         int directoryPort = 60001;
@@ -26,32 +26,32 @@ public class ClientMain {
             } catch (NumberFormatException ignored) {}
         }
 
-        System.out.println("[DEBUG] Directory host: " + directoryHost + ", port: " + directoryPort);
+        //System.out.println("[DEBUG] Directory host: " + directoryHost + ", port: " + directoryPort);
 
         ClientConnection connection =
                 new DirectoryAwareClientConnection(directoryHost, directoryPort);
 
-        System.out.println("[DEBUG] Creata DirectoryAwareClientConnection");
+        //System.out.println("[DEBUG] Creata DirectoryAwareClientConnection");
 
         try (BufferedReader stdin = new BufferedReader(new InputStreamReader(System.in))) {
 
-            System.out.println("[DEBUG] Chiamo connection.open() (questa contatta il DirectoryService)");
+            //System.out.println("[DEBUG] Chiamo connection.open() (questa contatta il DirectoryService)");
             connection.open();
-            System.out.println("[DEBUG] connection.open() completata → ora dovrei essere connesso al BROKER");
+            //System.out.println("[DEBUG] connection.open() completata → ora dovrei essere connesso al BROKER");
 
             System.out.print("Enter username: ");
-            System.out.println("[DEBUG] In attesa username da console...");
+            //System.out.println("[DEBUG] In attesa username da console...");
             String username = stdin.readLine();
-            System.out.println("[DEBUG] Username inserito: " + username);
+            //System.out.println("[DEBUG] Username inserito: " + username);
 
-            System.out.println("[DEBUG] Invio JOIN al broker...");
+            //System.out.println("[DEBUG] Invio JOIN al broker...");
             connection.getWriter().println(ClientJoinMessage.joinCommand(username));
-            System.out.println("[DEBUG] JOIN inviato.");
+            //System.out.println("[DEBUG] JOIN inviato.");
 
-            System.out.println("[DEBUG] Creo sender...");
+            //System.out.println("[DEBUG] Creo sender...");
             ClientMessageSender sender = new ClientMessageSender(connection.getWriter(), ACK_TIMEOUT_MS);
 
-            System.out.println("[DEBUG] Creo receiver...");
+            //System.out.println("[DEBUG] Creo receiver...");
             ClientMessageReceiver receiver =
                     new ClientMessageReceiver(connection.getReader(), sender, username);
 
@@ -61,43 +61,43 @@ public class ClientMain {
             senderThread.setDaemon(true);
             receiverThread.setDaemon(true);
 
-            System.out.println("[DEBUG] Avvio senderThread...");
+            //System.out.println("[DEBUG] Avvio senderThread...");
             senderThread.start();
 
-            System.out.println("[DEBUG] Avvio receiverThread...");
+            //System.out.println("[DEBUG] Avvio receiverThread...");
             receiverThread.start();
 
-            System.out.println("[DEBUG] Entrato nel main loop, ora attendo input dell’utente.");
+            //System.out.println("[DEBUG] Entrato nel main loop, ora attendo input dell’utente.");
 
             String input;
             while ((input = stdin.readLine()) != null) {
-                System.out.println("[DEBUG] Letta riga da console: \"" + input + "\"");
+                //System.out.println("[DEBUG] Letta riga da console: \"" + input + "\"");
 
                 if (input.equalsIgnoreCase("/quit")) {
-                    System.out.println("[DEBUG] Rilevato comando /quit → invio QUIT al server");
+                    //System.out.println("[DEBUG] Rilevato comando /quit → invio QUIT al server");
                     connection.getWriter().println(ClientQuitMessage.quitCommand());
                     break;
                 } else if (!input.isBlank()) {
-                    System.out.println("[DEBUG] Invio messaggio utente al sender...");
+                    //System.out.println("[DEBUG] Invio messaggio utente al sender...");
                     sender.sendUserMessage(input);
                 } else {
-                    System.out.println("[DEBUG] Riga vuota → ignorata.");
+                    //System.out.println("[DEBUG] Riga vuota → ignorata.");
                 }
             }
 
-            System.out.println("[DEBUG] Uscito dal main loop, inizio shutdown...");
+            //System.out.println("[DEBUG] Uscito dal main loop, inizio shutdown...");
 
             sender.shutdown();
-            System.out.println("[DEBUG] Sender shutdown OK.");
+            //System.out.println("[DEBUG] Sender shutdown OK.");
 
             receiver.shutdown();
-            System.out.println("[DEBUG] Receiver shutdown OK.");
+            //System.out.println("[DEBUG] Receiver shutdown OK.");
 
             connection.close();
-            System.out.println("[DEBUG] Connessione chiusa.");
+            //System.out.println("[DEBUG] Connessione chiusa.");
 
             System.out.println("Goodbye!");
-            System.out.println("[DEBUG] Fine ClientMain");
+            //System.out.println("[DEBUG] Fine ClientMain");
 
         } catch (IOException e) {
             System.err.println("[DEBUG-ERROR] Connection error: " + e.getMessage());

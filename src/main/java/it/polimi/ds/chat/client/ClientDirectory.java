@@ -19,33 +19,33 @@ public class ClientDirectory {
     }
 
     public BrokerInfo getBestBroker() throws IOException, ClassNotFoundException {
-        System.out.println("[DEBUG] DirectoryClient.getBestBroker() - inizio");
-        System.out.println("[DEBUG] Mi collego alla directory " + directoryHost + ":" + directoryPort);
+        //System.out.println("[DEBUG] DirectoryClient.getBestBroker() - inizio");
+        //System.out.println("[DEBUG] Mi collego alla directory " + directoryHost + ":" + directoryPort);
 
         try (Socket socket = new Socket(directoryHost, directoryPort)) {
-            System.out.println("[DEBUG] Socket verso directory aperta");
+            //System.out.println("[DEBUG] Socket verso directory aperta");
 
             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-            System.out.println("[DEBUG] ObjectOutputStream verso directory creato");
+            //System.out.println("[DEBUG] ObjectOutputStream verso directory creato");
 
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
-            System.out.println("[DEBUG] ObjectInputStream verso directory creato");
+            //System.out.println("[DEBUG] ObjectInputStream verso directory creato");
 
             GetBrokerRequestMessage req = new GetBrokerRequestMessage();
-            System.out.println("[DEBUG] Invio GetBrokerRequestMessage alla directory...");
+            //System.out.println("[DEBUG] Invio GetBrokerRequestMessage alla directory...");
             out.writeObject(req);
             out.flush();
-            System.out.println("[DEBUG] Richiesta inviata, attendo risposta...");
+            //System.out.println("[DEBUG] Richiesta inviata, attendo risposta...");
 
             Object obj = in.readObject();
-            System.out.println("[DEBUG] Oggetto risposta ricevuto dalla directory: " + obj);
+            //System.out.println("[DEBUG] Oggetto risposta ricevuto dalla directory: " + obj);
 
             if (!(obj instanceof GetBrokerResponseMessage resp)) {
                 throw new IOException("Risposta directory non riconosciuta: " + obj);
             }
 
             if (!resp.isAvailable()) {
-                System.out.println("[DEBUG] Directory ha risposto !success → nessun broker disponibile");
+                //System.out.println("[DEBUG] Directory ha risposto !success → nessun broker disponibile");
                 return null;
             }
 
@@ -53,8 +53,8 @@ public class ClientDirectory {
             int port = resp.getBrokerPort();
             int id = resp.getBrokerId();
 
-            System.out.println("[DEBUG] Directory ha scelto broker id=" + id + " " + host + ":" + port);
-            System.out.println("[DEBUG] DirectoryClient.getBestBroker() - fine (ritorno BrokerInfo)");
+            //System.out.println("[DEBUG] Directory ha scelto broker id=" + id + " " + host + ":" + port);
+            //System.out.println("[DEBUG] DirectoryClient.getBestBroker() - fine (ritorno BrokerInfo)");
 
             return new BrokerInfo(host, port, id);
         }
