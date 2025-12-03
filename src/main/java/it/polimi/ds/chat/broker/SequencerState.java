@@ -75,14 +75,21 @@ public class SequencerState {
         // Deliver locally to clients connected to the sequencer itself
         // later we'll implement Raft, so the leader will wait for ACKs before
         // delivering message to its clients
-        broker.onChatDeliver(seq, chatReq.getUsername(), chatReq.getText());
+        broker.handleOrderedMessage(new ChatDeliverMessage(
+                seq,
+                chatReq.getBrokerId(),
+                chatReq.getUsername(),
+                chatReq.getText(),
+                chatReq.getVectorClock()
+        ));
 
         // Notify all brokers (including the sender) about the ordered message
         ChatDeliverMessage deliver = new ChatDeliverMessage(
                 seq,
                 chatReq.getBrokerId(),
                 chatReq.getUsername(),
-                chatReq.getText()
+                chatReq.getText(),
+                chatReq.getVectorClock()
         );
         sendToAllBrokers(deliver);
 

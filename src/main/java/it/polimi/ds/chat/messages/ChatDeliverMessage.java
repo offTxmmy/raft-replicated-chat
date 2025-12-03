@@ -1,5 +1,7 @@
 package it.polimi.ds.chat.messages;
 
+import it.polimi.ds.chat.utilities.VectorClock;
+
 /**
  * Message sent by the sequencer to all brokers to deliver an ordered chat
  * message.
@@ -9,12 +11,14 @@ public class ChatDeliverMessage extends BrokerMessage {
     private final int brokerId;
     private final String username;
     private final String text;
+    private final VectorClock vectorClock;
 
-    public ChatDeliverMessage(long seq, int brokerId, String username, String text) {
+    public ChatDeliverMessage(long seq, int brokerId, String username, String text, VectorClock vectorClock) {
         this.seq = seq;
         this.brokerId = brokerId;
         this.username = username;
         this.text = text;
+        this.vectorClock = vectorClock;
     }
 
     public long getSeq() {
@@ -31,5 +35,9 @@ public class ChatDeliverMessage extends BrokerMessage {
 
     public String getText() {
         return text;
+    }
+
+    public VectorClock getVectorClock() {
+        return vectorClock;
     }
 }

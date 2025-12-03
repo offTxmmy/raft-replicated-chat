@@ -2,6 +2,7 @@ package it.polimi.ds.chat.broker;
 
 import it.polimi.ds.chat.client.ClientHandler;
 import it.polimi.ds.chat.messages.*;
+import it.polimi.ds.chat.utilities.VectorClock;
 
 import java.io.*;
 import java.net.ServerSocket;
@@ -40,9 +41,11 @@ public class Broker implements Serializable{
     // Runtime brokerId (may differ from initial config value for followers)
     private int brokerId;
 
+    private final VectorClock vectorClock = new VectorClock();
+    private final List<ChatDeliverMessage> pendingDeliveries = new ArrayList<>();
+
     // All clients currently connected to this broker.
-    private final List<ClientHandler> clients =
-            Collections.synchronizedList(new ArrayList<>());
+    private final List<ClientHandler> clients = Collections.synchronizedList(new ArrayList<>());
 
     // Local sequence counter used in fallback / local mode.
     private long nextSeq = 1;
@@ -164,13 +167,7 @@ public class Broker implements Serializable{
     public void onClientMessage(ClientMessage message) {
         if (config.isSequencer()) {
             // If this broker is the sequencer, handle the message directly
-            String localMsgId = brokerId + "-" + (++localMsgCounter);
-            ChatReqMessage chatReq = new ChatReqMessage(
-                    localMsgId,
-                    brokerId,
-                    message.getUsername(),
-                    message.getText()
-            );
+            ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText());
 
             // Reuse the same ordering path used for follower brokers so that
             // local messages are globally sequenced and delivered to every
@@ -192,6 +189,12 @@ public class Broker implements Serializable{
 
     public void notifyJoin(String username) {
         broadcastToClients("[system]", username + " joined the chat");
+    }
+
+    private synchronized ChatReqMessage buildChatReq(String username, String text) {
+        vectorClock.increment(brokerId);
+        String localMsgId = brokerId + "-" + (++localMsgCounter);
+        return new ChatReqMessage(localMsgId, brokerId, username, text, new VectorClock(vectorClock));
     }
 
     private void connectAndRegisterWithDirectoryService() {
@@ -219,6 +222,9 @@ public class Broker implements Serializable{
         }
     }
 
+    /**
+     * Start the heartbeat loop for both the Directory Service and the Sequencer.
+     */
     private void startHeartbeatLoop() {
         if (directoryOut == null) {
             System.err.println("Heartbeat not started: no connection to Directory Service.");
@@ -266,7 +272,9 @@ public class Broker implements Serializable{
         t.start();
     }
 
-    // Send heartbeat to the sequencer
+    /**
+     * Send heartbeat to the sequencer
+     */
     public void sendHeartbeatToSequencer(HeartbeatMessage heartbeatMessage) {
         try {
             if (sequencerOut != null) {
@@ -368,7 +376,7 @@ public class Broker implements Serializable{
         if (message instanceof ChatReqAck chatReqAck) {
             System.out.println("Received ChatReqAck for message " + chatReqAck.getLocalMsgId() + " with seq " + chatReqAck.getGlobalSeq());
         } else if (message instanceof ChatDeliverMessage chatDeliver) {
-            onChatDeliver(chatDeliver.getSeq(), chatDeliver.getUsername(), chatDeliver.getText());
+            handleOrderedMessage(chatDeliver);
         } else {
             System.out.println("Received broker message from sequencer: " + message.getClass().getSimpleName());
         }
@@ -385,8 +393,7 @@ public class Broker implements Serializable{
             return;
         }
 
-        String localMsgId = brokerId + "-" + (++localMsgCounter);
-        ChatReqMessage msg = new ChatReqMessage(localMsgId, brokerId, username, text);
+        ChatReqMessage msg = buildChatReq(username, text);
 
         try {
             sequencerOut.writeObject(msg);
@@ -397,6 +404,43 @@ public class Broker implements Serializable{
             broadcastToClients(username, text); // fallback
             sendAckToClient(username, timestamp);
         }
+    }
+
+    public synchronized void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
+        pendingDeliveries.add(chatDeliver);
+        attemptDelivery();
+    }
+
+    private void attemptDelivery() {
+        boolean delivered;
+        do {
+            delivered = false;
+            ChatDeliverMessage readyMessage = null;
+
+            for (ChatDeliverMessage pending : pendingDeliveries) {
+                if (canDeliver(pending)) {
+                    readyMessage = pending;
+                    break;
+                }
+            }
+
+            if (readyMessage != null) {
+                pendingDeliveries.remove(readyMessage);
+                vectorClock.update(readyMessage.getVectorClock());
+                onChatDeliver(readyMessage.getSeq(), readyMessage.getUsername(), readyMessage.getText());
+                delivered = true;
+            }
+        } while (delivered && !pendingDeliveries.isEmpty());
+    }
+
+    private boolean canDeliver(ChatDeliverMessage message) {
+        VectorClock messageClock = message.getVectorClock();
+        int senderId = message.getBrokerId();
+
+        if (!vectorClock.happensBefore(messageClock)) {
+            return false;
+        }
+        return messageClock.getTimeStamp(senderId) == vectorClock.getTimeStamp(senderId) + 1;
     }
 
     /* =========================================================
