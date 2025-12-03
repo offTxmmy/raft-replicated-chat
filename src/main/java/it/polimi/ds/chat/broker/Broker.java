@@ -10,6 +10,7 @@ import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Broker node in the replicated chat infrastructure.
@@ -76,6 +77,10 @@ public class Broker implements Serializable{
             }
             sequencerState = new SequencerState(this);
         }
+    }
+
+    public VectorClock getVectorClock() {
+        return vectorClock;
     }
 
     public int getBrokerId() {
@@ -437,10 +442,35 @@ public class Broker implements Serializable{
         VectorClock messageClock = message.getVectorClock();
         int senderId = message.getBrokerId();
 
-        if (!vectorClock.happensBefore(messageClock)) {
-            return false;
+        // Causal delivery condition:
+        // For every process k ≠ sender:
+        //    messageClock[k] <= localClock[k]
+        //    This means: the message must NOT depend on events that this broker
+        //    has not delivered yet.
+        for (Map.Entry<Integer, Integer> entry : messageClock.getClock().entrySet()) {
+            int brokerId = entry.getKey();
+            int msgTs = entry.getValue();
+
+            if (brokerId == senderId) {
+                // Skip the sender here; we check its component separately below.
+                continue;
+            }
+
+            int localTs = vectorClock.getTimeStamp(brokerId);
+            if (msgTs > localTs) {
+                // The message has seen an event from brokerId that this broker
+                // has not yet delivered (causal dependency not satisfied).
+                return false;
+            }
         }
-        return messageClock.getTimeStamp(senderId) == vectorClock.getTimeStamp(senderId) + 1;
+
+        // For the sender process:
+        //    messageClock[sender] == localClock[sender] + 1
+        //    This ensures we deliver the sender's messages in strict per-sender
+        //    order: this must be exactly the "next" message from that sender.
+        int localSenderTs = vectorClock.getTimeStamp(senderId);
+        int msgSenderTs   = messageClock.getTimeStamp(senderId);
+        return msgSenderTs == localSenderTs + 1;
     }
 
     /* =========================================================
