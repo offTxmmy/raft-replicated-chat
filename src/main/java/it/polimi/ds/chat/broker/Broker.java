@@ -2,6 +2,9 @@ package it.polimi.ds.chat.broker;
 
 import it.polimi.ds.chat.client.ClientHandler;
 import it.polimi.ds.chat.messages.*;
+import it.polimi.ds.chat.ordering.OrderingService;
+import it.polimi.ds.chat.ordering.OrderingServiceCallback;
+import it.polimi.ds.chat.ordering.SequencerOrderingService;
 import it.polimi.ds.chat.utilities.HoldBackQueue;
 import it.polimi.ds.chat.utilities.VectorClock;
 
@@ -17,13 +20,10 @@ import java.util.List;
  *
  * Responsibilities:
  * - Accept TCP connections from chat clients.
- * - If it is the sequencer: accept TCP connections from other brokers and
- *   order their messages (and assign brokerIds on join).
- * - If it is NOT the sequencer: connect to the sequencer, obtain a brokerId
- *   and send CHAT_REQ messages.
+ * - Use OrderingService for message ordering (sequencer or Raft in future).
  * - Deliver ordered messages to its local clients.
  */
-public class Broker implements Serializable{
+public class Broker implements Serializable, OrderingServiceCallback {
 
     // Directory Service config (for now hardcoded)
     private static final String DIRECTORY_HOST = "localhost";
@@ -54,12 +54,21 @@ public class Broker implements Serializable{
     // Local sequence counter used in fallback / local mode.
     private long nextSeq = 1;
 
-    // Holds the global sequencing state when this broker acts as sequencer.
+    // Ordering service for message ordering (decoupled from networking)
+    private transient OrderingService orderingService;
+
+    // Legacy: Holds the global sequencing state when this broker acts as sequencer.
+    // Kept for backward compatibility, will be removed once OrderingService is fully integrated.
+    @Deprecated
     private transient SequencerState sequencerState;
 
     // TCP connection from this broker to the sequencer (only if NOT sequencer).
+    // Legacy: will be managed by OrderingService
+    @Deprecated
     private transient Socket sequencerSocket;
+    @Deprecated
     private transient ObjectOutputStream sequencerOut;
+    @Deprecated
     private transient ObjectInputStream sequencerIn;
 
     // Local per-broker message counter to build unique localMsgId values.
@@ -67,19 +76,54 @@ public class Broker implements Serializable{
 
     /**
      * Construct a broker with the given configuration.
-     * If this broker is configured as sequencer, immediately create the SequencerState.
+     * Initializes the OrderingService based on configuration.
      */
     public Broker(BrokerConfig config) {
         this.config = config;
         this.brokerId = config.getBrokerId(); // 0 for leader, -1 for followers at startup
 
+        // Initialize OrderingService
+        initializeOrderingService();
+
+        // Legacy: keep SequencerState for backward compatibility during transition
         if(config.isSequencer()) {
-            // The leader must have a HandlerState (AtomicInteger) to generate broker IDs
             if (config.getHandlerState() == null) {
                 throw new IllegalArgumentException("Sequencer broker must have a HandleState");
             }
             sequencerState = new SequencerState(this);
         }
+    }
+
+    /**
+     * Initialize the ordering service.
+     * Currently uses SequencerOrderingService, can be replaced with RaftOrderingService.
+     */
+    private void initializeOrderingService() {
+        SequencerOrderingService seqService = new SequencerOrderingService(config, brokerId);
+        seqService.setCallback(this);
+        seqService.onDeliver(this::handleOrderedMessage);
+        this.orderingService = seqService;
+    }
+
+    // =========================================================================
+    // OrderingServiceCallback implementation
+    // =========================================================================
+
+    @Override
+    public void onBrokerIdAssigned(int newBrokerId) {
+        System.out.println("[Broker] Broker ID updated from " + this.brokerId + " to " + newBrokerId);
+        this.brokerId = newBrokerId;
+    }
+
+    @Override
+    public void onConnectionLost() {
+        System.err.println("[Broker] Connection to ordering service lost!");
+        // TODO: implement reconnection logic
+    }
+
+    @Override
+    public void onConnectionEstablished() {
+        System.out.println("[Broker] Connected to ordering service");
     }
 
     /**
@@ -102,12 +146,71 @@ public class Broker implements Serializable{
     }
 
     /**
+     * Get the ordering service used by this broker.
+     * Useful for testing and advanced configurations.
+     */
+    public OrderingService getOrderingService() {
+        return orderingService;
+    }
+
+    /**
+     * Set a custom ordering service (useful for testing or switching to Raft).
+     */
+    public void setOrderingService(OrderingService orderingService) {
+        this.orderingService = orderingService;
+        if (orderingService instanceof SequencerOrderingService seqService) {
+            seqService.setCallback(this);
+            seqService.onDeliver(this::handleOrderedMessage);
+        }
+    }
+
+    /**
      * Start the broker:
-     * - open TCP listener for clients,
-     * - if sequencer: start a second TCP listener for brokers (CHAT_REQ),
-     * - if non-sequencer: connect to the sequencer.
+     * - Start the OrderingService (handles sequencer/follower logic)
+     * - Open TCP listener for clients
+     * - Connect to directory service
      */
     public void start() throws IOException {
+        // Start the ordering service (handles sequencer connections)
+        orderingService.start();
+
+        // Wait a bit for follower to get broker ID from sequencer
+        if (!config.isSequencer()) {
+            try {
+                Thread.sleep(500); // Allow time for connection and ID assignment
+            } catch (InterruptedException ignored) {}
+        }
+
+        // Connect to directory service, register, and start sending heartbeats
+        connectAndRegisterWithDirectoryService();
+        startHeartbeatLoop();
+
+        int port = config.getBrokerPort();
+        ServerSocket serverSocket = new ServerSocket(port);
+        System.out.println("Broker " + brokerId + " listening for clients on port " + port);
+
+        // Main loop: accept client TCP connections and spawn a ClientHandler for each.
+        while (true) {
+            Socket clientSocket = serverSocket.accept();
+            System.out.println("New client connected from " + clientSocket.getRemoteSocketAddress());
+
+            // One handler per client, running in its own thread.
+            ClientHandler handler = new ClientHandler(clientSocket, this);
+            clients.add(handler);
+            sendClientCountUpdate();
+
+            Thread t = new Thread(handler);
+            t.setDaemon(true);  // daemon so it doesn't block JVM shutdown
+            t.start();
+        }
+    }
+
+    /**
+     * Legacy start method using old sequencer logic.
+     * @deprecated Use start() which uses OrderingService
+     */
+    @Deprecated
+    public void startLegacy() throws IOException {
         // Followers must first join the sequencer to obtain their brokerId
         if (!config.isSequencer()) {
             connectToSequencer();
@@ -141,7 +244,7 @@ public class Broker implements Serializable{
             sendClientCountUpdate();
 
             Thread t = new Thread(handler);
-            t.setDaemon(true);  // daemon so it doesn't block JVM shutdown
+            t.setDaemon(true);
             t.start();
         }
     }
@@ -182,8 +285,25 @@ public class Broker implements Serializable{
 
     /**
      * Entry point for messages sent by clients connected to THIS broker.
+     * Uses the OrderingService to propose messages for global ordering.
      */
     public void onClientMessage(ClientMessage message) {
+        // Build the chat request with vector clock
+        ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText());
+
+        // Propose to ordering service
+        orderingService.propose(chatReq);
+
+        // Send ACK to client
+        sendAckToClient(message.getUsername(), message.getTimestamp());
+    }
+
+    /**
+     * Legacy method: Entry point for messages using old sequencer pattern.
+     * @deprecated Use onClientMessage which delegates to OrderingService
+     */
+    @Deprecated
+    public void onClientMessageLegacy(ClientMessage message) {
         if (config.isSequencer()) {
             // If this broker is the sequencer, handle the message directly
             ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText());
@@ -264,9 +384,9 @@ public class Broker implements Serializable{
                         directoryOut.flush();
                     }
 
-                    // Send the heartbeat to the Sequencer (if it's not the sequencer itself)
-                    if(config.getSequencerHost() != null && !config.isSequencer()) {
-                        sendHeartbeatToSequencer(hb);
+                    // Send the heartbeat to the Sequencer via OrderingService (if it's not the sequencer itself)
+                    if(!config.isSequencer() && orderingService instanceof SequencerOrderingService seqService) {
+                        seqService.sendHeartbeat(hb);
                     }
 
                     Thread.sleep(HEARTBEAT_INTERVAL_MS);
@@ -293,7 +413,9 @@ public class Broker implements Serializable{
 
     /**
      * Send heartbeat to the sequencer
+     * @deprecated Use OrderingService for heartbeat sending
      */
+    @Deprecated
     public void sendHeartbeatToSequencer(HeartbeatMessage heartbeatMessage) {
         try {
             if (sequencerOut != null) {
@@ -403,7 +525,9 @@ public class Broker implements Serializable{
 
     /**
      * Send a ChatReqMessage to the sequencer when a local client sends a chat message.
+     * @deprecated Use OrderingService.propose() instead
      */
+    @Deprecated
     public void sendChatReqToSequencer(String username, String text, long timestamp) {
         if (sequencerOut == null) {
             System.err.println("No connection to sequencer; falling back to local broadcast.");
