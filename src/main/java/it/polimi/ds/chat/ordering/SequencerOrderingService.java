@@ -124,7 +124,7 @@ public class SequencerOrderingService implements OrderingService {
     @Override
     public void propose(ChatReqMessage request) {
         if (config.isSequencer()) {
-            // Handle locally - assign sequence and deliver
+            // Handle\ locally - assign sequence and deliver
             handleChatRequest(request);
         } else {
             // Forward to sequencer

@@ -28,8 +28,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Directory Service config (for now hardcoded)
     private static final String DIRECTORY_HOST = "localhost";
     private static final int DIRECTORY_PORT = 60000;
-    private static final long HEARTBEAT_INTERVAL_MS = 3000; // Interval to send heartbeats (3 seconds)
-    private static final long HEARTBEAT_TIMEOUT_MS = 5000; // Timeout for broker failure detection (5 seconds)
+    private static final long HEARTBEAT_INTERVAL_MS = 3000;
 
     // Connection to directory service
     private transient Socket directorySocket;
@@ -57,20 +56,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Ordering service for message ordering (decoupled from networking)
     private transient OrderingService orderingService;
 
-    // Legacy: Holds the global sequencing state when this broker acts as sequencer.
-    // Kept for backward compatibility, will be removed once OrderingService is fully integrated.
-    @Deprecated
-    private transient SequencerState sequencerState;
-
-    // TCP connection from this broker to the sequencer (only if NOT sequencer).
-    // Legacy: will be managed by OrderingService
-    @Deprecated
-    private transient Socket sequencerSocket;
-    @Deprecated
-    private transient ObjectOutputStream sequencerOut;
-    @Deprecated
-    private transient ObjectInputStream sequencerIn;
-
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
 
@@ -82,16 +67,13 @@ public class Broker implements Serializable, OrderingServiceCallback {
         this.config = config;
         this.brokerId = config.getBrokerId(); // 0 for leader, -1 for followers at startup
 
+        // Validate config for sequencer
+        if (config.isSequencer() && config.getHandlerState() == null) {
+            throw new IllegalArgumentException("Sequencer broker must have a HandlerState");
+        }
+
         // Initialize OrderingService
         initializeOrderingService();
-
-        // Legacy: keep SequencerState for backward compatibility during transition
-        if(config.isSequencer()) {
-            if (config.getHandlerState() == null) {
-                throw new IllegalArgumentException("Sequencer broker must have a HandleState");
-            }
-            sequencerState = new SequencerState(this);
-        }
     }
 
     /**
@@ -118,7 +100,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     @Override
     public void onConnectionLost() {
         System.err.println("[Broker] Connection to ordering service lost!");
-        // TODO: implement reconnection logic
     }
 
     @Override
@@ -126,16 +107,19 @@ public class Broker implements Serializable, OrderingServiceCallback {
         System.out.println("[Broker] Connected to ordering service");
     }
 
+    // =========================================================================
+    // Getters
+    // =========================================================================
+
     /**
      * Get the vector clock tracking delivered messages.
-     * This returns the delivered clock from the HoldBackQueue for test/debug purposes.
      */
     public VectorClock getVectorClock() {
         return holdBackQueue.getDeliveredClock();
     }
 
     /**
-     * Get the vector clock used for outgoing messages (message sending).
+     * Get the vector clock used for outgoing messages.
      */
     public VectorClock getSendVectorClock() {
         return vectorClock;
@@ -147,7 +131,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     /**
      * Get the ordering service used by this broker.
-     * Useful for testing and advanced configurations.
      */
     public OrderingService getOrderingService() {
         return orderingService;
@@ -163,6 +146,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
             seqService.onDeliver(this::handleOrderedMessage);
         }
     }
+
+    // =========================================================================
+    // Broker lifecycle
+    // =========================================================================
 
     /**
      * Start the broker:
@@ -201,50 +188,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
             Thread t = new Thread(handler);
             t.setDaemon(true);  // daemon so it doesn't block JVM shutdown
-            t.start();
-        }
-    }
-
-    /**
-     * Legacy start method using old sequencer logic.
-     * @deprecated Use start() which uses OrderingService
-     */
-    @Deprecated
-    public void startLegacy() throws IOException {
-        // Followers must first join the sequencer to obtain their brokerId
-        if (!config.isSequencer()) {
-            connectToSequencer();
-        }
-
-        // Connect to directory service, register, and start sending heartbeats
-        connectAndRegisterWithDirectoryService();
-        startHeartbeatLoop();
-
-        int port = config.getBrokerPort();
-        ServerSocket serverSocket = new ServerSocket(port);
-        System.out.println("Broker " + brokerId + " listening for clients on port " + port);
-
-        // If this broker is the sequencer, ensure sequencer state exists
-        // and start the listener for CHAT_REQ from other brokers.
-        if (config.isSequencer()) {
-            if (sequencerState == null) {
-                sequencerState = new SequencerState(this);
-            }
-            startSequencerListener();
-        }
-
-        // Main loop: accept client TCP connections and spawn a ClientHandler for each.
-        while (true) {
-            Socket clientSocket = serverSocket.accept();
-            System.out.println("New client connected from " + clientSocket.getRemoteSocketAddress());
-
-            // One handler per client, running in its own thread.
-            ClientHandler handler = new ClientHandler(clientSocket, this);
-            clients.add(handler);
-            sendClientCountUpdate();
-
-            Thread t = new Thread(handler);
-            t.setDaemon(true);
             t.start();
         }
     }
@@ -299,26 +242,22 @@ public class Broker implements Serializable, OrderingServiceCallback {
     }
 
     /**
-     * Legacy method: Entry point for messages using old sequencer pattern.
-     * @deprecated Use onClientMessage which delegates to OrderingService
+     * Handle an ordered message from the OrderingService.
+     * Uses HoldBackQueue to ensure both total order and causal order.
      */
-    @Deprecated
-    public void onClientMessageLegacy(ClientMessage message) {
-        if (config.isSequencer()) {
-            // If this broker is the sequencer, handle the message directly
-            ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText());
+    public void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
+        // Enqueue message and get all messages ready for delivery
+        List<ChatDeliverMessage> readyMessages = holdBackQueue.enqueue(chatDeliver);
 
-            // Reuse the same ordering path used for follower brokers so that
-            // local messages are globally sequenced and delivered to every
-            // broker (including this one).
-            sequencerState.handleChatFromBroker(chatReq);
+        // Deliver all ready messages to local clients
+        for (ChatDeliverMessage msg : readyMessages) {
+            onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getText());
+        }
 
-            // Confirm reception to the local client after handing the message
-            // to the sequencer pipeline.
-            sendAckToClient(message.getUsername(), message.getTimestamp());
-        } else {
-            // Delegate ordering to the sequencer via CHAT_REQ.
-            sendChatReqToSequencer(message.getUsername(), message.getText(), message.getTimestamp());
+        // Log if messages are being held back
+        if (holdBackQueue.hasPendingMessages()) {
+            System.out.println("[Broker " + brokerId + "] " + holdBackQueue.getPendingCount() +
+                    " message(s) held back, waiting for seq=" + holdBackQueue.getExpectedSeq());
         }
     }
 
@@ -329,6 +268,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
     public void notifyJoin(String username) {
         broadcastToClients("[system]", username + " joined the chat");
     }
+
+    // =========================================================================
+    // Helper methods
+    // =========================================================================
 
     private synchronized ChatReqMessage buildChatReq(String username, String text) {
         vectorClock.increment(brokerId);
@@ -357,13 +300,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
             System.out.println("Registered broker in Directory Service: " + msg);
         } catch (IOException e) {
             System.err.println("Failed to connect/register with Directory Service: " + e.getMessage());
-            // you can decide later if you want to System.exit(1) here
         }
     }
 
-    /**
-     * Start the heartbeat loop for both the Directory Service and the Sequencer.
-     */
     private void startHeartbeatLoop() {
         if (directoryOut == null) {
             System.err.println("Heartbeat not started: no connection to Directory Service.");
@@ -373,26 +312,21 @@ public class Broker implements Serializable, OrderingServiceCallback {
         Thread t = new Thread(() -> {
             while (true) {
                 try {
-                    HeartbeatMessage hb = new HeartbeatMessage(
-                            this.brokerId,
-                            System.currentTimeMillis()
-                    );
+                    HeartbeatMessage hb = new HeartbeatMessage(this.brokerId, System.currentTimeMillis());
 
-                    // Send heartbeat to the DirectoryService
                     synchronized (directoryLock) {
                         directoryOut.writeObject(hb);
                         directoryOut.flush();
                     }
 
-                    // Send the heartbeat to the Sequencer via OrderingService (if it's not the sequencer itself)
-                    if(!config.isSequencer() && orderingService instanceof SequencerOrderingService seqService) {
+                    // Send heartbeat to OrderingService (for sequencer)
+                    if (!config.isSequencer() && orderingService instanceof SequencerOrderingService seqService) {
                         seqService.sendHeartbeat(hb);
                     }
 
                     Thread.sleep(HEARTBEAT_INTERVAL_MS);
                 } catch (IOException e) {
-                    System.err.println("Failed to send heartbeat to Directory Service: " + e.getMessage());
-                    // Connection is probably dead; stop the loop
+                    System.err.println("Failed to send heartbeat: " + e.getMessage());
                     break;
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
@@ -411,29 +345,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
         t.start();
     }
 
-    /**
-     * Send heartbeat to the sequencer
-     * @deprecated Use OrderingService for heartbeat sending
-     */
-    @Deprecated
-    public void sendHeartbeatToSequencer(HeartbeatMessage heartbeatMessage) {
-        try {
-            if (sequencerOut != null) {
-                sequencerOut.writeObject(heartbeatMessage);
-                sequencerOut.flush();
-            }
-        } catch (IOException e) {
-            System.err.println("Failed to send heartbeat to Sequencer: " + e.getMessage());
-        }
-    }
-
     private void sendClientCountUpdate() {
-        if (directoryOut == null) {
-            return;
-        }
+        if (directoryOut == null) return;
 
-        int count = clients.size();
-        ClientCountUpdateMessage msg = new ClientCountUpdateMessage(brokerId, count);
+        ClientCountUpdateMessage msg = new ClientCountUpdateMessage(brokerId, clients.size());
 
         try {
             synchronized (directoryLock) {
@@ -441,198 +356,20 @@ public class Broker implements Serializable, OrderingServiceCallback {
                 directoryOut.flush();
             }
         } catch (IOException e) {
-            System.err.println("Failed to send client count update to Directory Service: " + e.getMessage());
+            System.err.println("Failed to send client count update: " + e.getMessage());
         }
     }
 
-    /* =========================================================
-       1) FOLLOWER SIDE: connect to sequencer and obtain brokerId
-       ========================================================= */
-
-    /**
-     * Open a TCP connection to the sequencer broker and perform a simple
-     * join handshake to obtain a brokerId using object messages:
-     *
-     * Broker → Sequencer:  BrokerJoinMessage(host, port)
-     * Sequencer → Broker:  BrokerJoinAck(brokerId)
-     */
-    private void connectToSequencer() {
-        try {
-            System.out.println("Connecting to the sequencer at " + config.getSequencerHost() + ":" + config.getSequencerPort());
-            sequencerSocket = new Socket(config.getSequencerHost(), config.getSequencerPort());
-
-            // IMPORTANT: always create ObjectOutputStream first, then flush, then ObjectInputStream
-            sequencerOut = new ObjectOutputStream(sequencerSocket.getOutputStream());
-            sequencerOut.flush();
-            sequencerIn = new ObjectInputStream(sequencerSocket.getInputStream());
-
-            System.out.println("Connected to sequencer, sending BrokerJoinMessage...");
-
-            // send join message
-            BrokerJoinMessage join = new BrokerJoinMessage(config.getBrokerHost(), config.getBrokerPort(), brokerId);
-            sequencerOut.writeObject(join);
-            sequencerOut.flush();
-
-            // read ack
-            Object obj = sequencerIn.readObject();
-            if (obj instanceof BrokerJoinAck ack) {
-                this.brokerId = ack.getBrokerId();;
-                System.out.println("Sequencer assigned broker ID: " + this.brokerId);
-
-                startSequencerInboundLoop();
-            } else {
-                throw new IOException("Unexpected response from sequencer: " + obj);
-            }
-
-        } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Failed to connect/join to sequencer: " + e.getMessage());
-            e.printStackTrace();
-            // TODO: retry or exit gracefully
-        }
-    }
-
-    private void startSequencerInboundLoop() {
-        if (sequencerIn == null) {
-            return;
-        }
-
-        Thread t = new Thread(() -> {
-            try {
-                while (true) {
-                    Object obj = sequencerIn.readObject();
-                    if (obj instanceof BrokerMessage brokerMessage) {
-                        handleMessageFromSequencer(brokerMessage);
-                    }
-                }
-            } catch (IOException | ClassNotFoundException e) {
-                System.err.println("Sequencer inbound loop stopped: " + e.getMessage());
-            }
-        }, "SequencerInbound-" + brokerId);
-
-        t.setDaemon(true);
-        t.start();
-    }
-
-    private void handleMessageFromSequencer(BrokerMessage message) {
-        if (message instanceof ChatReqAck chatReqAck) {
-            System.out.println("Received ChatReqAck for message " + chatReqAck.getLocalMsgId() + " with seq " + chatReqAck.getGlobalSeq());
-        } else if (message instanceof ChatDeliverMessage chatDeliver) {
-            handleOrderedMessage(chatDeliver);
-        } else {
-            System.out.println("Received broker message from sequencer: " + message.getClass().getSimpleName());
-        }
-    }
-
-    /**
-     * Send a ChatReqMessage to the sequencer when a local client sends a chat message.
-     * @deprecated Use OrderingService.propose() instead
-     */
-    @Deprecated
-    public void sendChatReqToSequencer(String username, String text, long timestamp) {
-        if (sequencerOut == null) {
-            System.err.println("No connection to sequencer; falling back to local broadcast.");
-            broadcastToClients(username, text);
-            sendAckToClient(username, timestamp);
-            return;
-        }
-
-        ChatReqMessage msg = buildChatReq(username, text);
-
-        try {
-            sequencerOut.writeObject(msg);
-            sequencerOut.flush();
-            sendAckToClient(username, timestamp);
-        } catch (IOException e) {
-            System.err.println("Failed to send ChatReqMessage to sequencer: " + e.getMessage());
-            broadcastToClients(username, text); // fallback
-            sendAckToClient(username, timestamp);
-        }
-    }
-
-    /**
-     * Handle an ordered message from the sequencer.
-     * Uses HoldBackQueue to ensure both total order (by sequence number)
-     * and causal order (by vector clocks) before delivery.
-     */
-    public void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
-        // Enqueue message and get all messages ready for delivery
-        List<ChatDeliverMessage> readyMessages = holdBackQueue.enqueue(chatDeliver);
-
-        // Deliver all ready messages to local clients
-        for (ChatDeliverMessage msg : readyMessages) {
-            onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getText());
-        }
-
-        // Log if messages are being held back
-        if (holdBackQueue.hasPendingMessages()) {
-            System.out.println("[Broker " + brokerId + "] " + holdBackQueue.getPendingCount() +
-                    " message(s) held back, waiting for seq=" + holdBackQueue.getExpectedSeq());
-        }
-    }
-
-    /* =========================================================
-       2) SEQUENCER SIDE: listen for brokers (JOIN + CHAT_REQ)
-       ========================================================= */
-
-    /**
-     * Start a dedicated thread that listens for connections from other brokers.
-     * First message on each connection is expected to be BrokerJoinMessage;
-     * the sequencer responds with ASSIGN_ID using HandlerState (AtomicInteger).
-     */
-    private void startSequencerListener() {
-        new Thread(() -> {
-            try {
-                int port = config.getSequencerPort();
-                ServerSocket serverSocket = new ServerSocket(port);
-                System.out.println("Sequencer " + config.getBrokerId() + " listening for ChatReqMessage on port " + port);
-
-                while (true) {
-                    Socket brokerSocket = serverSocket.accept();
-                    System.out.println("Sequencer accepted connection from broker: " + brokerSocket.getRemoteSocketAddress());
-
-                    // Object streams for this broker connection
-                    ObjectOutputStream out = new ObjectOutputStream(brokerSocket.getOutputStream());
-                    out.flush();
-                    ObjectInputStream in = new ObjectInputStream(brokerSocket.getInputStream());
-
-                    // 1) First message must be BrokerJoinMessage
-                    Object obj = in.readObject();
-                    if (!(obj instanceof BrokerJoinMessage)) {
-                        System.err.println("Unexpected first message from broker: " + obj);
-                        brokerSocket.close();
-                        continue;
-                    }
-
-                    int newBrokerId = config.getHandlerState().getNewBrokerId();
-                    System.out.println("Assigned broker ID " + newBrokerId + " to broker " + brokerSocket.getRemoteSocketAddress());
-
-                    // send ack
-                    BrokerJoinAck ack = new BrokerJoinAck(newBrokerId);
-                    out.writeObject(ack);
-                    out.flush();
-
-                    // 2) Register connection within the sequencer state to listen/send messages
-                    sequencerState.registerBrokerConnection(newBrokerId, brokerSocket, in, out);
-                }
-            } catch (IOException | ClassNotFoundException e) {
-                System.err.println("Sequencer listener failed: " + e.getMessage());
-                e.printStackTrace();
-            }
-        }, "SequencerListener-" + config.getBrokerId()).start();
-    }
-
-    /**
-     * Manda un ACK al client con dato username.
-     */
     private void sendAckToClient(String username, long timestamp) {
         synchronized (clients) {
             for (ClientHandler handler : clients) {
                 if (username.equals(handler.getUsername())) {
-                    String ackLine = ClientAckMessages.buildAck(timestamp, username);
-                    handler.sendLine(ackLine);
+                    handler.sendLine(ClientAckMessages.buildAck(timestamp, username));
                     break;
                 }
             }
         }
     }
 }
+
+
