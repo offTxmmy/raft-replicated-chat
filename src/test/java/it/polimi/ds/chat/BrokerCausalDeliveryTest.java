@@ -4,14 +4,14 @@ import it.polimi.ds.chat.broker.Broker;
 import it.polimi.ds.chat.broker.BrokerConfig;
 import it.polimi.ds.chat.messages.ChatDeliverMessage;
 import it.polimi.ds.chat.utilities.VectorClock;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.*;
 
 public class BrokerCausalDeliveryTest {
 
@@ -39,7 +39,7 @@ public class BrokerCausalDeliveryTest {
 
     private RecordingBroker broker;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         // Broker "normale" (non sequencer), config minimale
         BrokerConfig cfg = new BrokerConfig(
@@ -102,10 +102,10 @@ public class BrokerCausalDeliveryTest {
 
         // Non dovrebbe essere consegnato nulla,
         // perché vectorClock locale è {1:0} e messageClock[1] = 3 -> salta eventi
-        assertTrue("No message should be delivered when only m3 has arrived",
-                broker.getDelivered().isEmpty());
-        assertEquals("Local clock should still be 0 for broker 1 after buffering m3",
-                0, broker.getVectorClock().getTimeStamp(1));
+        assertTrue(broker.getDelivered().isEmpty(),
+                "No message should be delivered when only m3 has arrived");
+        assertEquals(0, broker.getVectorClock().getTimeStamp(1),
+                "Local clock should still be 0 for broker 1 after buffering m3");
 
         // 2) Ora arriva m1 (il primo evento causale)
         broker.handleOrderedMessage(m1);
@@ -114,14 +114,14 @@ public class BrokerCausalDeliveryTest {
         // - vectorClock (ancora vuoto) happensBefore({1:1}) -> true
         // - messageClock[1] == local[1] + 1 -> 1 == 0 + 1 -> ok
         List<String> afterM1 = broker.getDelivered();
-        assertEquals("Exactly one message should have been delivered after m1",
-                1, afterM1.size());
-        assertEquals("First delivered message should be m1",
-                "1:alice:m1", afterM1.get(0));
-        assertEquals("Local clock for broker 1 should now be 1",
-                1, broker.getVectorClock().getTimeStamp(1));
+        assertEquals(1, afterM1.size(),
+                "Exactly one message should have been delivered after m1");
+        assertEquals("1:alice:m1", afterM1.get(0),
+                "First delivered message should be m1");
+        assertEquals(1, broker.getVectorClock().getTimeStamp(1),
+                "Local clock for broker 1 should now be 1");
 
-        // Nota: m3 è ancora in pendingDeliveries e NON è ancora deliverable:
+        // Nota: m3 è ancora in holdBackQueue e NON è ancora deliverable:
         // messageClock[1] = 3, local[1] = 1 -> 3 != 1 + 1
 
         // 3) Ora arriva m2 (il secondo evento causale)
@@ -129,14 +129,13 @@ public class BrokerCausalDeliveryTest {
 
         // Quando m2 arriva:
         // - m2 è deliverable (2 == 1+1) -> vectorClock diventa {1:2}
-        // - attemptDelivery() viene rilanciato e controlla m3:
-        //   happensBefore({1:2}, {1:3}) è true
+        // - holdBackQueue rilascia anche m3:
         //   messageClock[1] = 3 == 2+1 -> m3 diventa deliverable
         List<String> finalDelivered = broker.getDelivered();
 
         // Controlliamo che siano stati consegnati TUTTI i messaggi
-        assertEquals("All three messages should be delivered in the end",
-                3, finalDelivered.size());
+        assertEquals(3, finalDelivered.size(),
+                "All three messages should be delivered in the end");
 
         // E soprattutto che l'ordine di consegna sia quello causale m1, m2, m3
         List<String> expectedOrder = List.of(
@@ -144,11 +143,11 @@ public class BrokerCausalDeliveryTest {
                 "2:alice:m2",
                 "3:alice:m3"
         );
-        assertEquals("Messages must be delivered in causal order, not arrival order",
-                expectedOrder, finalDelivered);
+        assertEquals(expectedOrder, finalDelivered,
+                "Messages must be delivered in causal order, not arrival order");
 
         // Infine il vectorClock locale per broker 1 deve essere 3
-        assertEquals("Local clock for broker 1 should be 3 after all deliveries",
-                3, broker.getVectorClock().getTimeStamp(1));
+        assertEquals(3, broker.getVectorClock().getTimeStamp(1),
+                "Local clock for broker 1 should be 3 after all deliveries");
     }
 }

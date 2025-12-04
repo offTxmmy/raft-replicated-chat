@@ -2,15 +2,15 @@ package it.polimi.ds.chat.broker;
 
 import it.polimi.ds.chat.client.ClientHandler;
 import it.polimi.ds.chat.messages.*;
+import it.polimi.ds.chat.utilities.HoldBackQueue;
 import it.polimi.ds.chat.utilities.VectorClock;
 
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
 import java.util.Collections;
+import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 
 /**
  * Broker node in the replicated chat infrastructure.
@@ -42,8 +42,11 @@ public class Broker implements Serializable{
     // Runtime brokerId (may differ from initial config value for followers)
     private int brokerId;
 
+    // Vector clock for tracking causal dependencies when sending messages
     private final VectorClock vectorClock = new VectorClock();
-    private final List<ChatDeliverMessage> pendingDeliveries = new ArrayList<>();
+
+    // Hold-back queue for ordered delivery (enforces total order + causal order)
+    private final HoldBackQueue holdBackQueue = new HoldBackQueue();
 
     // All clients currently connected to this broker.
     private final List<ClientHandler> clients = Collections.synchronizedList(new ArrayList<>());
@@ -79,7 +82,18 @@ public class Broker implements Serializable{
         }
     }
 
+    /**
+     * Get the vector clock tracking delivered messages.
+     * This returns the delivered clock from the HoldBackQueue for test/debug purposes.
+     */
     public VectorClock getVectorClock() {
+        return holdBackQueue.getDeliveredClock();
+    }
+
+    /**
+     * Get the vector clock used for outgoing messages (message sending).
+     */
+    public VectorClock getSendVectorClock() {
         return vectorClock;
     }
 
@@ -411,66 +425,25 @@ public class Broker implements Serializable{
         }
     }
 
-    public synchronized void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
-        pendingDeliveries.add(chatDeliver);
-        attemptDelivery();
-    }
+    /**
+     * Handle an ordered message from the sequencer.
+     * Uses HoldBackQueue to ensure both total order (by sequence number)
+     * and causal order (by vector clocks) before delivery.
+     */
+    public void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
+        // Enqueue message and get all messages ready for delivery
+        List<ChatDeliverMessage> readyMessages = holdBackQueue.enqueue(chatDeliver);
 
-    private void attemptDelivery() {
-        boolean delivered;
-        do {
-            delivered = false;
-            ChatDeliverMessage readyMessage = null;
-
-            for (ChatDeliverMessage pending : pendingDeliveries) {
-                if (canDeliver(pending)) {
-                    readyMessage = pending;
-                    break;
-                }
-            }
-
-            if (readyMessage != null) {
-                pendingDeliveries.remove(readyMessage);
-                vectorClock.update(readyMessage.getVectorClock());
-                onChatDeliver(readyMessage.getSeq(), readyMessage.getUsername(), readyMessage.getText());
-                delivered = true;
-            }
-        } while (delivered && !pendingDeliveries.isEmpty());
-    }
-
-    private boolean canDeliver(ChatDeliverMessage message) {
-        VectorClock messageClock = message.getVectorClock();
-        int senderId = message.getBrokerId();
-
-        // Causal delivery condition:
-        // For every process k ≠ sender:
-        //    messageClock[k] <= localClock[k]
-        //    This means: the message must NOT depend on events that this broker
-        //    has not delivered yet.
-        for (Map.Entry<Integer, Integer> entry : messageClock.getClock().entrySet()) {
-            int brokerId = entry.getKey();
-            int msgTs = entry.getValue();
-
-            if (brokerId == senderId) {
-                // Skip the sender here; we check its component separately below.
-                continue;
-            }
-
-            int localTs = vectorClock.getTimeStamp(brokerId);
-            if (msgTs > localTs) {
-                // The message has seen an event from brokerId that this broker
-                // has not yet delivered (causal dependency not satisfied).
-                return false;
-            }
+        // Deliver all ready messages to local clients
+        for (ChatDeliverMessage msg : readyMessages) {
+            onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getText());
         }
 
-        // For the sender process:
-        //    messageClock[sender] == localClock[sender] + 1
-        //    This ensures we deliver the sender's messages in strict per-sender
-        //    order: this must be exactly the "next" message from that sender.
-        int localSenderTs = vectorClock.getTimeStamp(senderId);
-        int msgSenderTs   = messageClock.getTimeStamp(senderId);
-        return msgSenderTs == localSenderTs + 1;
+        // Log if messages are being held back
+        if (holdBackQueue.hasPendingMessages()) {
+            System.out.println("[Broker " + brokerId + "] " + holdBackQueue.getPendingCount() +
+                    " message(s) held back, waiting for seq=" + holdBackQueue.getExpectedSeq());
+        }
     }
 
     /* =========================================================

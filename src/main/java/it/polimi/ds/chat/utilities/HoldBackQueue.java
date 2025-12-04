@@ -1,0 +1,179 @@
+package it.polimi.ds.chat.utilities;
+
+import it.polimi.ds.chat.messages.ChatDeliverMessage;
+
+import java.util.*;
+
+/**
+ * Hold-back queue for ordered message delivery.
+ *
+ * Ensures both:
+ * 1. TOTAL ORDER: Messages are delivered in strict sequence number order (assigned by sequencer)
+ * 2. CAUSAL ORDER: Messages respect causal dependencies tracked via vector clocks
+ *
+ * A message can be delivered only when:
+ * - Its sequence number equals the next expected sequence number (total order)
+ * - All its causal dependencies have been delivered (causal order via vector clocks)
+ */
+public class HoldBackQueue {
+
+    // Priority queue ordered by sequence number (lowest first)
+    private final PriorityQueue<ChatDeliverMessage> pendingMessages;
+
+    // Next expected sequence number for total order
+    private long expectedSeq;
+
+    // Vector clock tracking what has been delivered
+    private final VectorClock deliveredClock;
+
+    public HoldBackQueue() {
+        this(1); // Default: expect sequence to start at 1
+    }
+
+    public HoldBackQueue(long initialExpectedSeq) {
+        this.pendingMessages = new PriorityQueue<>(Comparator.comparingLong(ChatDeliverMessage::getSeq));
+        this.expectedSeq = initialExpectedSeq;
+        this.deliveredClock = new VectorClock();
+    }
+
+    /**
+     * Add a message to the hold-back queue and return all messages
+     * that are now ready to be delivered (in order).
+     *
+     * @param message The incoming ChatDeliverMessage
+     * @return List of messages ready for delivery (may be empty), in delivery order
+     */
+    public synchronized List<ChatDeliverMessage> enqueue(ChatDeliverMessage message) {
+        // Ignore duplicate or already-delivered messages
+        if (message.getSeq() < expectedSeq) {
+            System.out.println("[HoldBackQueue] Ignoring duplicate/old message with seq=" + message.getSeq()
+                    + " (expected >= " + expectedSeq + ")");
+            return Collections.emptyList();
+        }
+
+        // Check if message is already in the queue
+        boolean alreadyQueued = pendingMessages.stream()
+                .anyMatch(m -> m.getSeq() == message.getSeq());
+        if (alreadyQueued) {
+            return Collections.emptyList();
+        }
+
+        pendingMessages.add(message);
+        return releaseReadyMessages();
+    }
+
+    /**
+     * Release all messages that satisfy both total and causal order conditions.
+     */
+    private List<ChatDeliverMessage> releaseReadyMessages() {
+        List<ChatDeliverMessage> readyToDeliver = new ArrayList<>();
+
+        while (!pendingMessages.isEmpty()) {
+            ChatDeliverMessage head = pendingMessages.peek();
+
+            // Check total order: must be the next expected sequence
+            if (head.getSeq() != expectedSeq) {
+                // Gap in sequence - must wait for missing message(s)
+                break;
+            }
+
+            // Check causal order: all dependencies must have been delivered
+            if (!canDeliverCausally(head)) {
+                // Causal dependency not yet satisfied - must wait
+                // Note: This shouldn't happen if sequencer orders correctly,
+                // but we keep this check for robustness
+                System.out.println("[HoldBackQueue] Message seq=" + head.getSeq() +
+                        " waiting for causal dependencies");
+                break;
+            }
+
+            // Message is ready: remove from queue and prepare for delivery
+            pendingMessages.poll();
+            readyToDeliver.add(head);
+
+            // Update state: increment expected sequence and merge vector clock
+            expectedSeq++;
+            deliveredClock.update(head.getVectorClock());
+        }
+
+        return readyToDeliver;
+    }
+
+    /**
+     * Check if a message's causal dependencies are satisfied.
+     *
+     * A message M from sender S can be delivered if:
+     * - For all brokers K != S: messageClock[K] <= deliveredClock[K]
+     *   (M doesn't depend on undelivered events from other brokers)
+     * - For sender S: messageClock[S] == deliveredClock[S] + 1
+     *   (M is the next expected message from S)
+     */
+    private boolean canDeliverCausally(ChatDeliverMessage message) {
+        VectorClock messageClock = message.getVectorClock();
+        if (messageClock == null) {
+            // No vector clock attached - allow delivery (for backward compatibility)
+            return true;
+        }
+
+        int senderId = message.getBrokerId();
+
+        // Check dependencies from other brokers
+        for (Map.Entry<Integer, Integer> entry : messageClock.getClock().entrySet()) {
+            int brokerId = entry.getKey();
+            int msgTimestamp = entry.getValue();
+
+            if (brokerId == senderId) {
+                // Check sender's component separately
+                continue;
+            }
+
+            int deliveredTimestamp = deliveredClock.getTimeStamp(brokerId);
+            if (msgTimestamp > deliveredTimestamp) {
+                // Message depends on an event from brokerId that hasn't been delivered yet
+                return false;
+            }
+        }
+
+        // Check sender's component: must be exactly the next message from sender
+        int deliveredSenderTs = deliveredClock.getTimeStamp(senderId);
+        int msgSenderTs = messageClock.getTimeStamp(senderId);
+
+        return msgSenderTs == deliveredSenderTs + 1;
+    }
+
+    /**
+     * Get the current expected sequence number.
+     */
+    public synchronized long getExpectedSeq() {
+        return expectedSeq;
+    }
+
+    /**
+     * Get a copy of the current delivered vector clock.
+     */
+    public synchronized VectorClock getDeliveredClock() {
+        return new VectorClock(deliveredClock);
+    }
+
+    /**
+     * Get the number of messages currently held back.
+     */
+    public synchronized int getPendingCount() {
+        return pendingMessages.size();
+    }
+
+    /**
+     * Check if there are any pending messages waiting for delivery.
+     */
+    public synchronized boolean hasPendingMessages() {
+        return !pendingMessages.isEmpty();
+    }
+
+    @Override
+    public synchronized String toString() {
+        return "HoldBackQueue{expectedSeq=" + expectedSeq +
+               ", pending=" + pendingMessages.size() +
+               ", deliveredClock=" + deliveredClock + "}";
+    }
+}
+
