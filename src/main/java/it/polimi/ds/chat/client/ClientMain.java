@@ -28,8 +28,7 @@ public class ClientMain {
 
         //System.out.println("[DEBUG] Directory host: " + directoryHost + ", port: " + directoryPort);
 
-        ClientConnection connection =
-                new DirectoryAwareClientConnection(directoryHost, directoryPort);
+        ClientConnection connection = new DirectoryAwareClientConnection(directoryHost, directoryPort);
 
         //System.out.println("[DEBUG] Creata DirectoryAwareClientConnection");
 
@@ -55,7 +54,7 @@ public class ClientMain {
             //System.out.println("[DEBUG] Creo heartbeat manager.");
             ClientHeartbeatManager heartbeatManager =
                     new ClientHeartbeatManager(
-                            connection.getWriter(),
+                            connection.getObjectOutputStream(),
                             () -> {
                                 // Callback chiamata quando si superano i MAX_MISSED_HEARTBEATS
                                 System.err.println("[HB] Broker non risponde a " +

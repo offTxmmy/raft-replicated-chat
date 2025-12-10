@@ -2,6 +2,7 @@ package it.polimi.ds.chat.client;
 
 import it.polimi.ds.chat.messages.HeartbeatMessage;
 
+import java.io.ObjectOutputStream;
 import java.io.PrintWriter;
 
 /**
@@ -20,7 +21,7 @@ public class ClientHeartbeatManager implements Runnable {
     // Numero massimo di heartbeat consecutivi mancati
     private static final int MAX_MISSED_HEARTBEATS = 10;
 
-    private final PrintWriter out;
+    private final ObjectOutputStream out;
     private final HeartbeatFailureHandler failureHandler;
 
     private volatile boolean running = true;
@@ -34,7 +35,7 @@ public class ClientHeartbeatManager implements Runnable {
     }
 
 
-    public ClientHeartbeatManager(PrintWriter out, HeartbeatFailureHandler failureHandler) {
+    public ClientHeartbeatManager(ObjectOutputStream out, HeartbeatFailureHandler failureHandler) {
         this.out = out;
         this.failureHandler = failureHandler;
     }
@@ -58,7 +59,7 @@ public class ClientHeartbeatManager implements Runnable {
 
                 HeartbeatMessage hb = new HeartbeatMessage(ts);
 
-                out.println(hb);
+                out.writeObject(hb);
                 boolean triggerFailure = false;
                 synchronized (this) {
                     consecutiveMissed++;
