@@ -1,6 +1,7 @@
 package it.polimi.ds.chat.broker;
 
 import it.polimi.ds.chat.client.ClientHandler;
+import it.polimi.ds.chat.externalservices.LanDiscoveryService;
 import it.polimi.ds.chat.messages.*;
 import it.polimi.ds.chat.ordering.OrderingService;
 import it.polimi.ds.chat.ordering.OrderingServiceCallback;
@@ -11,6 +12,7 @@ import it.polimi.ds.chat.utilities.VectorClock;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.SocketException;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
@@ -60,6 +62,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Ordering service for message ordering (decoupled from networking)
     private transient OrderingService orderingService;
 
+    // Peer discovery over LAN using UDP broadcast
+    private transient LanDiscoveryService lanDiscoveryService;
+
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
 
@@ -79,8 +84,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Initialize OrderingService
         initializeOrderingService();
 
-        // Initialize PeerRegistry (will be started in start())
-        this.peerRegistry = new PeerRegistry(brokerId, DIRECTORY_HOST, DIRECTORY_CLIENT_PORT);
+        // Initialize PeerRegistry (LAN discovery only)
+        this.peerRegistry = new PeerRegistry(brokerId);
+        this.lanDiscoveryService = new LanDiscoveryService(config, peerRegistry);
     }
 
     /**
@@ -112,7 +118,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
         // Update peer registry with new broker ID
         if (this.peerRegistry != null) {
-            this.peerRegistry = new PeerRegistry(newBrokerId, DIRECTORY_HOST, DIRECTORY_CLIENT_PORT);
+            this.peerRegistry = new PeerRegistry(newBrokerId);
         }
     }
 
@@ -194,7 +200,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     /**
      * Start the broker:
-     * - Start the OrderingService (handles sequencer/follower logic)
+     * - Start the OrderingService (handles sequencer or follower logic)
      * - Open TCP listener for clients
      * - Connect to directory service
      * - Start peer discovery
@@ -482,9 +488,21 @@ public class Broker implements Serializable, OrderingServiceCallback {
             }
         });
 
-        // Start the registry
-        peerRegistry.start();
-        System.out.println("[Broker " + brokerId + "] Peer discovery started");
+        // Only LAN discovery is used
+        if (lanDiscoveryService != null) {
+            try {
+                lanDiscoveryService.start();
+                for (int i = 0; i < 3; i++) {
+                    lanDiscoveryService.announcePresence();
+                    try {
+                        Thread.sleep(200);
+                    } catch (InterruptedException e) {}
+                }
+            } catch (SocketException e) {
+                System.err.println("[Broker " + brokerId + "] Failed to start LAN discovery: " + e.getMessage());
+            }
+        }
+        System.out.println("[Broker " + brokerId + "] Peer discovery started (LAN broadcast only)");
     }
 
     /**
@@ -504,4 +522,3 @@ public class Broker implements Serializable, OrderingServiceCallback {
         }
     }
 }
-

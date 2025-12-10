@@ -110,9 +110,9 @@ public class DirectoryService {
 
             if (obj instanceof GetBrokerRequestMessage req) {
                 handleGetBrokerRequest(out);
-            } else if (obj instanceof GetPeerListRequestMessage req) {
+            }/* else if (obj instanceof GetPeerListRequestMessage req) {
                 handleGetPeerListRequest(req, out);
-            } else {
+            }*/ else {
                 System.out.println("Unknown client request object: " + obj);
             }
 
@@ -160,7 +160,7 @@ public class DirectoryService {
      * @param out the output stream to the client
      * @throws IOException if an I/O error occurs
      */
-    private void handleGetPeerListRequest(GetPeerListRequestMessage req, ObjectOutputStream out) throws IOException {
+    /*private void handleGetPeerListRequest(GetPeerListRequestMessage req, ObjectOutputStream out) throws IOException {
         int requestingBrokerId = req.getRequestingBrokerId();
         List<PeerInfo> peers = new ArrayList<>();
 
@@ -182,7 +182,7 @@ public class DirectoryService {
         out.flush();
 
         System.out.println("Returned peer list (" + peers.size() + " brokers) to broker " + requestingBrokerId);
-    }
+    }*/
 
     /**
      * Handles a broker connection, processing registration and heartbeats.

@@ -1,32 +1,19 @@
 package it.polimi.ds.chat.broker;
 
-import it.polimi.ds.chat.messages.GetPeerListRequestMessage;
-import it.polimi.ds.chat.messages.GetPeerListResponseMessage;
 import it.polimi.ds.chat.messages.PeerInfo;
 
-import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.net.Socket;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
  * Registry that maintains the list of known broker peers.
- * Periodically refreshes the peer list from the Directory Service.
- * <p>
+ * Only updated via LAN discovery (no DirectoryService refresh).
  * Essential for Raft implementation where brokers need to communicate directly
  * for leader election and log replication.
  */
 public class PeerRegistry {
-
     private final int localBrokerId;
-    private final String directoryHost;
-    private final int directoryPort;
 
     // Map of brokerId -> PeerInfo for all known peers
     private final Map<Integer, PeerInfo> peers = new ConcurrentHashMap<>();
@@ -34,58 +21,13 @@ public class PeerRegistry {
     // Listeners notified when peer list changes
     private final List<Consumer<List<PeerInfo>>> peerChangeListeners = new ArrayList<>();
 
-    // Scheduled executor for periodic refresh
-    private ScheduledExecutorService scheduler;
-    private volatile boolean running = false;
-
-    // Refresh interval in seconds
-    private static final long REFRESH_INTERVAL_SECONDS = 10;
-
     /**
      * Constructs a PeerRegistry for a broker.
      *
      * @param localBrokerId the ID of the local broker
-     * @param directoryHost the host of the Directory Service
-     * @param directoryPort the port of the Directory Service
      */
-    public PeerRegistry(int localBrokerId, String directoryHost, int directoryPort) {
+    public PeerRegistry(int localBrokerId) {
         this.localBrokerId = localBrokerId;
-        this.directoryHost = directoryHost;
-        this.directoryPort = directoryPort;
-    }
-
-    /**
-     * Starts the peer registry and begins periodic refresh of the peer list.
-     */
-    public void start() {
-        running = true;
-
-        // Initial fetch
-        refreshPeerList();
-
-        // Schedule periodic refresh
-        scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "PeerRegistry-Refresh-" + localBrokerId);
-            t.setDaemon(true);
-            return t;
-        });
-
-        scheduler.scheduleAtFixedRate(
-                this::refreshPeerList,
-                REFRESH_INTERVAL_SECONDS,
-                REFRESH_INTERVAL_SECONDS,
-                TimeUnit.SECONDS
-        );
-    }
-
-    /**
-     * Stops the peer registry and terminates periodic refresh.
-     */
-    public void stop() {
-        running = false;
-        if (scheduler != null) {
-            scheduler.shutdown();
-        }
     }
 
     /**
@@ -172,78 +114,30 @@ public class PeerRegistry {
     }
 
     /**
-     * Refreshes the peer list from the Directory Service.
-     * Notifies listeners if the peer list has changed.
-     */
-    private void refreshPeerList() {
-        try {
-            List<PeerInfo> newPeers = fetchPeerListFromDirectory();
-
-            if (newPeers != null) {
-                // Check for changes
-                Set<Integer> oldIds = new HashSet<>(peers.keySet());
-                Set<Integer> newIds = new HashSet<>();
-
-                for (PeerInfo peer : newPeers) {
-                    newIds.add(peer.getBrokerId());
-                    peers.put(peer.getBrokerId(), peer);
-                }
-
-                // Remove peers that are no longer in the list
-                for (Integer oldId : oldIds) {
-                    if (!newIds.contains(oldId)) {
-                        peers.remove(oldId);
-                    }
-                }
-
-                // Notify listeners if there were changes
-                if (!oldIds.equals(newIds)) {
-                    notifyPeerChange();
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("[PeerRegistry] Failed to refresh peer list: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Fetches the peer list from the Directory Service via TCP.
+     * Adds or updates a peer discovered via LAN broadcast.
+     * If the peer list effectively changes, notifies listeners.
      *
-     * @return list of PeerInfo received from the Directory Service, or null on failure
+     * @param peer the discovered PeerInfo
      */
-    private List<PeerInfo> fetchPeerListFromDirectory() {
-        try (Socket socket = new Socket(directoryHost, directoryPort);
-             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
+    public synchronized void upsertFromDiscovery(PeerInfo peer) {
+        int id = peer.getBrokerId();
 
-            out.flush();
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
-
-            // Send request
-            GetPeerListRequestMessage request = new GetPeerListRequestMessage(localBrokerId);
-            out.writeObject(request);
-            out.flush();
-
-            // Read response
-            Object response = in.readObject();
-            if (response instanceof GetPeerListResponseMessage resp) {
-                if (resp.isSuccess()) {
-                    System.out.println("[PeerRegistry] Received " + resp.getPeers().size() + " peers from Directory Service");
-                    return resp.getPeers();
-                }
-            }
-
-        } catch (IOException | ClassNotFoundException e) {
-            System.err.println("[PeerRegistry] Error fetching peer list: " + e.getMessage());
+        // Ignore our own id (sanity check – already do this in LanDiscoveryService)
+        if (id == localBrokerId) {
+            return;
         }
 
-        return null;
-    }
+        PeerInfo previous = peers.put(id, peer);
 
-    /**
-     * Manually triggers a refresh of the peer list from the Directory Service.
-     */
-    public void forceRefresh() {
-        refreshPeerList();
+        boolean changed = (previous == null)
+                || !Objects.equals(previous.getHost(), peer.getHost())
+                || previous.getPort() != peer.getPort()
+                || previous.isSequencer() != peer.isSequencer();
+
+        if (changed) {
+            System.out.println("[PeerRegistry] Updated peer from LAN discovery: " + peer);
+            notifyPeerChange();
+        }
     }
 
     /**
