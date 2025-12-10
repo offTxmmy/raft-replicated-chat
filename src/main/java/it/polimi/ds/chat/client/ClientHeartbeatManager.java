@@ -58,7 +58,7 @@ public class ClientHeartbeatManager implements Runnable {
 
                 HeartbeatMessage hb = new HeartbeatMessage(ts);
 
-                out.println(hb.toWireString());
+                out.println(hb);
                 boolean triggerFailure = false;
                 synchronized (this) {
                     consecutiveMissed++;
