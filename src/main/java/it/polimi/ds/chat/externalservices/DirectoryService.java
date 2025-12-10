@@ -7,6 +7,8 @@ import it.polimi.ds.chat.messages.*;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -77,26 +79,11 @@ public class DirectoryService {
              ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
             Object obj = in.readObject();
+
             if (obj instanceof GetBrokerRequestMessage req) {
-                BrokerConfig best = chooseBestBroker();
-
-                GetBrokerResponseMessage resp;
-                if (best != null) {
-                    resp = new GetBrokerResponseMessage(
-                            true,
-                            best.getBrokerHost(),
-                            best.getBrokerPort(),
-                            best.getBrokerId()
-                    );
-                    System.out.println("Returned broker " + best.getBrokerId() +
-                            " (" + best.getBrokerHost() + ":" + best.getBrokerPort() + ") to client");
-                } else {
-                    resp = new GetBrokerResponseMessage(false, null, -1, -1);
-                    System.out.println("No brokers available to client request");
-                }
-
-                out.writeObject(resp);
-                out.flush();
+                handleGetBrokerRequest(out);
+            } else if (obj instanceof GetPeerListRequestMessage req) {
+                handleGetPeerListRequest(req, out);
             } else {
                 System.out.println("Unknown client request object: " + obj);
             }
@@ -108,6 +95,52 @@ public class DirectoryService {
                 socket.close();
             } catch (IOException ignored) {}
         }
+    }
+
+    private void handleGetBrokerRequest(ObjectOutputStream out) throws IOException {
+        BrokerConfig best = chooseBestBroker();
+
+        GetBrokerResponseMessage resp;
+        if (best != null) {
+            resp = new GetBrokerResponseMessage(
+                    true,
+                    best.getBrokerHost(),
+                    best.getBrokerPort(),
+                    best.getBrokerId()
+            );
+            System.out.println("Returned broker " + best.getBrokerId() +
+                    " (" + best.getBrokerHost() + ":" + best.getBrokerPort() + ") to client");
+        } else {
+            resp = new GetBrokerResponseMessage(false, null, -1, -1);
+            System.out.println("No brokers available to client request");
+        }
+
+        out.writeObject(resp);
+        out.flush();
+    }
+
+    private void handleGetPeerListRequest(GetPeerListRequestMessage req, ObjectOutputStream out) throws IOException {
+        int requestingBrokerId = req.getRequestingBrokerId();
+        List<PeerInfo> peers = new ArrayList<>();
+
+        for (Map.Entry<Integer, BrokerConfig> entry : brokersById.entrySet()) {
+            int peerId = entry.getKey();
+            BrokerConfig cfg = entry.getValue();
+
+            // Include all brokers (including self, requester can filter if needed)
+            peers.add(new PeerInfo(
+                    peerId,
+                    cfg.getBrokerHost(),
+                    cfg.getBrokerPort(),
+                    cfg.isSequencer()
+            ));
+        }
+
+        GetPeerListResponseMessage resp = new GetPeerListResponseMessage(true, peers);
+        out.writeObject(resp);
+        out.flush();
+
+        System.out.println("Returned peer list (" + peers.size() + " brokers) to broker " + requestingBrokerId);
     }
 
     private void handleConnection(Socket socket) {

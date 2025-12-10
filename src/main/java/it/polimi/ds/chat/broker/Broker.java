@@ -28,12 +28,16 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Directory Service config (for now hardcoded)
     private static final String DIRECTORY_HOST = "localhost";
     private static final int DIRECTORY_PORT = 60000;
+    private static final int DIRECTORY_CLIENT_PORT = 60001; // Port for peer list queries
     private static final long HEARTBEAT_INTERVAL_MS = 3000;
 
     // Connection to directory service
     private transient Socket directorySocket;
     private transient ObjectOutputStream directoryOut;
     private final transient Object directoryLock = new Object();
+
+    // Peer registry for broker-to-broker discovery
+    private transient PeerRegistry peerRegistry;
 
     // Static configuration for this broker (ports, host, isSequencer, etc.)
     private final BrokerConfig config;
@@ -74,6 +78,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
         // Initialize OrderingService
         initializeOrderingService();
+
+        // Initialize PeerRegistry (will be started in start())
+        this.peerRegistry = new PeerRegistry(brokerId, DIRECTORY_HOST, DIRECTORY_CLIENT_PORT);
     }
 
     /**
@@ -95,6 +102,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
     public void onBrokerIdAssigned(int newBrokerId) {
         System.out.println("[Broker] Broker ID updated from " + this.brokerId + " to " + newBrokerId);
         this.brokerId = newBrokerId;
+
+        // Update peer registry with new broker ID
+        if (this.peerRegistry != null) {
+            this.peerRegistry = new PeerRegistry(newBrokerId, DIRECTORY_HOST, DIRECTORY_CLIENT_PORT);
+        }
     }
 
     @Override
@@ -147,6 +159,13 @@ public class Broker implements Serializable, OrderingServiceCallback {
         }
     }
 
+    /**
+     * Get the peer registry for broker-to-broker discovery.
+     */
+    public PeerRegistry getPeerRegistry() {
+        return peerRegistry;
+    }
+
     // =========================================================================
     // Broker lifecycle
     // =========================================================================
@@ -156,6 +175,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * - Start the OrderingService (handles sequencer/follower logic)
      * - Open TCP listener for clients
      * - Connect to directory service
+     * - Start peer discovery
      */
     public void start() throws IOException {
         // Start the ordering service (handles sequencer connections)
@@ -171,6 +191,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Connect to directory service, register, and start sending heartbeats
         connectAndRegisterWithDirectoryService();
         startHeartbeatLoop();
+
+        // Start peer discovery after registration
+        startPeerDiscovery();
 
         int port = config.getBrokerPort();
         ServerSocket serverSocket = new ServerSocket(port);
@@ -358,6 +381,29 @@ public class Broker implements Serializable, OrderingServiceCallback {
         } catch (IOException e) {
             System.err.println("Failed to send client count update: " + e.getMessage());
         }
+    }
+
+    /**
+     * Start the peer discovery mechanism.
+     * Registers for peer list updates and logs changes.
+     */
+    private void startPeerDiscovery() {
+        if (peerRegistry == null) {
+            System.err.println("[Broker] PeerRegistry not initialized");
+            return;
+        }
+
+        // Register listener for peer changes
+        peerRegistry.addPeerChangeListener(peers -> {
+            System.out.println("[Broker " + brokerId + "] Peer list updated: " + peers.size() + " peers");
+            for (PeerInfo peer : peers) {
+                System.out.println("  - " + peer);
+            }
+        });
+
+        // Start the registry
+        peerRegistry.start();
+        System.out.println("[Broker " + brokerId + "] Peer discovery started");
     }
 
     private void sendAckToClient(String username, long timestamp) {
