@@ -1,6 +1,7 @@
 package it.polimi.ds.chat.client;
 
-import java.io.PrintWriter;
+import java.io.ObjectOutputStream;
+import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -11,13 +12,13 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class ClientMessageSender implements Runnable {
 
-    private final PrintWriter out;
+    private final ObjectOutputStream out;
     private final long ackTimeoutMs;
     private final Map<Long, ClientPendingMessage> pendingMessages = new ConcurrentHashMap<>();
 
     private volatile boolean running = true;
 
-    public ClientMessageSender(PrintWriter out, long ackTimeoutMs) {
+    public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs) {
         this.out = out;
         this.ackTimeoutMs = ackTimeoutMs;
     }
@@ -33,8 +34,12 @@ public class ClientMessageSender implements Runnable {
         ClientPendingMessage pm = new ClientPendingMessage(timestamp, wireLine);
         pendingMessages.put(timestamp, pm);
 
-        out.println(wireLine);
-        //System.out.println("[SEND] (" + timestamp + ") " + text);
+        try {
+            out.writeObject(wireLine);
+            out.flush();
+        } catch (IOException e) {
+            System.err.println("[SEND] Errore invio messaggio: " + e.getMessage());
+        }
     }
 
     /**
@@ -70,10 +75,14 @@ public class ClientMessageSender implements Runnable {
                 for (ClientPendingMessage pm : pendingMessages.values()) {
                     long elapsed = now - pm.getLastSendTime();
                     if (elapsed >= ackTimeoutMs) {
-                        // Ritrasmissione
-                        out.println(pm.getWireLine());
-                        pm.updateLastSendTime();
-                        System.out.println("[RETRY] Ritrasmesso messaggio con timestamp " + pm.getTimestamp());
+                        try {
+                            out.writeObject(pm.getWireLine());
+                            out.flush();
+                            pm.updateLastSendTime();
+                            System.out.println("[RETRY] Ritrasmesso messaggio con timestamp " + pm.getTimestamp());
+                        } catch (IOException e) {
+                            System.err.println("[RETRY] Errore ritrasmissione: " + e.getMessage());
+                        }
                     }
                 }
 
@@ -86,7 +95,7 @@ public class ClientMessageSender implements Runnable {
                 }
             }
         } catch (Exception e) {
-            System.err.println("Errore nel MessageSender: " + e.getMessage());
+            System.err.println("[SEND] Errore nel thread sender: " + e.getMessage());
         }
     }
 }

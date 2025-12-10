@@ -9,9 +9,9 @@ public class ClientConnection {
     protected int port;
 
     private Socket socket;
-    private BufferedReader in;
     private PrintWriter out;
     private ObjectOutputStream objectOut;
+    private ObjectInputStream objectIn;
 
     public ClientConnection(String host, int port) {
         this.host = host;
@@ -21,12 +21,8 @@ public class ClientConnection {
     public void open() throws IOException {
         this.socket = new Socket(host, port);
         this.objectOut = new ObjectOutputStream(socket.getOutputStream());
-        this.in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+        this.objectIn = new ObjectInputStream(socket.getInputStream());
         this.out = new PrintWriter(socket.getOutputStream(), true);
-    }
-
-    public BufferedReader getReader() {
-        return in;
     }
 
     public PrintWriter getWriter() {
@@ -35,6 +31,10 @@ public class ClientConnection {
 
     public ObjectOutputStream getObjectOutputStream() {
         return objectOut;
+    }
+
+    public ObjectInputStream getObjectInputStream() {
+        return objectIn;
     }
 
     public boolean isOpen() {

@@ -4,17 +4,19 @@ import it.polimi.ds.chat.broker.Broker;
 import it.polimi.ds.chat.messages.ClientJoinMessage;
 import it.polimi.ds.chat.messages.ClientQuitMessage;
 import it.polimi.ds.chat.messages.ClientMessage;
+import it.polimi.ds.chat.messages.HeartbeatMessage;
+import it.polimi.ds.chat.messages.HeartbeatAckMessage;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.PrintWriter;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.net.Socket;
 
 public class ClientHandler implements Runnable {
     private final Socket socket;
     private final Broker broker;
-    private PrintWriter out;
+    private ObjectOutputStream out;
+    private final Object outLock = new Object();
     private String username = "anonymous";
 
     public ClientHandler(Socket socket, Broker broker) {
@@ -26,25 +28,30 @@ public class ClientHandler implements Runnable {
         return username;
     }
 
-    public void sendLine(String line) {
+    public void sendLine(Object obj) {
         if (out != null) {
-            out.println(line);
+            try {
+                synchronized (outLock) {
+                    out.writeObject(obj);
+                    out.flush();
+                }
+            } catch (IOException e) {
+                System.err.println("Failed to send object to client " + username + ": " + e.getMessage());
+            }
         }
     }
 
     @Override
     public void run() {
         try (
-            BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-            ) {
-            out = new PrintWriter(socket.getOutputStream(), true);
-
-                String line;
-                while((line = in.readLine()) != null) {
-                    handleCommand(line);
-                }
-
-        } catch (IOException e) {
+            ObjectInputStream in = new ObjectInputStream(socket.getInputStream())
+        ) {
+            out = new ObjectOutputStream(socket.getOutputStream());
+            Object obj;
+            while ((obj = in.readObject()) != null) {
+                handleCommand(obj);
+            }
+        } catch (IOException | ClassNotFoundException e) {
             System.out.println("Client disconnected: " + e.getMessage());
         } finally {
             broker.removeClient(this);
@@ -55,26 +62,57 @@ public class ClientHandler implements Runnable {
         }
     }
 
-    private void handleCommand(String line) {
-        if (ClientJoinMessage.isJoin(line)) {
-            username = ClientJoinMessage.parseJoin(line);
-            out.println(ClientJoinMessage.welcome(username));
-            broker.notifyJoin(username);
-        } else if (ClientMessage.isMsg(line)) {
-            ClientMessage message = ClientMessage.fromClientLine(username, line);
-            broker.onClientMessage(message);
-        } else if (ClientQuitMessage.isQuit(line)) {
-            try {
-                socket.close();
-            } catch (IOException ignored) {}
+    private void handleCommand(Object obj) {
+        if (obj instanceof String line) {
+            Object msg = parseLineToMessage(line, username);
+            if (msg instanceof ClientJoinMessage) {
+                username = ClientJoinMessage.parseJoin(line);
+                sendLine(ClientJoinMessage.welcome(username));
+                broker.notifyJoin(username);
+            } else if (msg instanceof ClientQuitMessage) {
+                try {
+                    socket.close();
+                } catch (IOException ignored) {}
+            } else if (msg instanceof ClientMessage) {
+                broker.onClientMessage((ClientMessage) msg);
+            } else if (msg instanceof HeartbeatMessage) {
+                HeartbeatMessage hb = (HeartbeatMessage) msg;
+                HeartbeatAckMessage ack = new HeartbeatAckMessage(hb.getTimestamp(), broker.getBrokerId());
+                sendLine(ack);
+            } else {
+                sendLine("ERROR Unknown command " + line);
+            }
+        } else if (obj instanceof HeartbeatMessage hb) {
+            HeartbeatAckMessage ack = new HeartbeatAckMessage(hb.getTimestamp(), broker.getBrokerId());
+            sendLine(ack);
         } else {
-            out.println("ERROR Unknown command " + line);
+            sendLine("ERROR Unknown object command " + obj);
         }
+    }
+
+    private Object parseLineToMessage(String line, String currentUsername) {
+        if (line == null) return null;
+        if (ClientJoinMessage.isJoin(line)) {
+            String parsed = ClientJoinMessage.parseJoin(line);
+            return new ClientJoinMessage(parsed, "", System.currentTimeMillis());
+        }
+        if (ClientQuitMessage.isQuit(line)) {
+            return new ClientQuitMessage(currentUsername, "", System.currentTimeMillis());
+        }
+        if (ClientMessage.isMsg(line)) {
+            return ClientMessage.fromClientLine(currentUsername, line);
+        }
+        if (HeartbeatMessage.isHeartbeatLine(line)) {
+            long ts = HeartbeatMessage.parseTimestampFromWire(line);
+            return new HeartbeatMessage(ts);
+        }
+
+        return null;
     }
 
     public void sendMessageToClient(long seq, String sender, String text) {
         if (out != null) {
-            out.println(ClientMessage.msgToClient(seq, sender, text));
+            sendLine(ClientMessage.msgToClient(seq, sender, text));
         }
     }
 }

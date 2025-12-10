@@ -1,14 +1,16 @@
 package it.polimi.ds.chat.client;
 
 import it.polimi.ds.chat.messages.ClientAckMessages;
+import it.polimi.ds.chat.messages.HeartbeatMessage;
+import it.polimi.ds.chat.messages.HeartbeatAckMessage;
 
-import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.ObjectInputStream;
 
 
 public class ClientMessageReceiver implements Runnable {
 
-    private final BufferedReader in;
+    private final ObjectInputStream in;
     private final ClientMessageSender sender;
     private final String username;
     private final ClientHeartbeatManager heartbeatManager;
@@ -16,7 +18,7 @@ public class ClientMessageReceiver implements Runnable {
     private volatile boolean running = true;
 
 
-    public ClientMessageReceiver(BufferedReader in,
+    public ClientMessageReceiver(ObjectInputStream in,
                                  ClientMessageSender sender,
                                  String username,
                                  ClientHeartbeatManager heartbeatManager) {
@@ -38,57 +40,44 @@ public class ClientMessageReceiver implements Runnable {
     @Override
     public void run() {
         try {
-            String line;
-            while (running && (line = in.readLine()) != null) {
-
-                if (isHeartbeatAck(line)) {
-                    try {
-                        long ts = parseHeartbeatTimestamp(line);
-                        if (heartbeatManager != null) {
-                            heartbeatManager.onHeartbeatAck(ts);
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Errore parsing HEARTBEAT_ACK: " + e.getMessage());
+            while (running) {
+                Object obj = in.readObject();
+                if (obj instanceof HeartbeatAckMessage) {
+                    HeartbeatAckMessage ack = (HeartbeatAckMessage) obj;
+                    if (heartbeatManager != null) {
+                        heartbeatManager.onHeartbeatAck(ack.getTimestamp());
                     }
-                    // non stampo a video l'heartbeat
                     continue;
                 }
-
-                if (ClientAckMessages.isAck(line)) {
-                    try {
-                        long ts = ClientAckMessages.parseTimestamp(line);
-                        String ackUser = ClientAckMessages.parseUsername(line);
-
-                        if (username.equals(ackUser)) {
-                            sender.handleAck(ts);
-                        } else {
-                            // System.out.println("[INFO] ACK per utente " + ackUser + ": " + ts);
-                        }
-                    } catch (Exception e) {
-                        System.err.println("Errore parsing ACK: " + e.getMessage());
+                if (obj instanceof HeartbeatMessage) {
+                    HeartbeatMessage hb = (HeartbeatMessage) obj;
+                    if (heartbeatManager != null) {
+                        heartbeatManager.onHeartbeatAck(hb.getTimestamp());
                     }
-                } else {
-                    System.out.println(line);
+                    continue;
+                }
+                if (obj instanceof String) {
+                    String line = (String) obj;
+                    if (ClientAckMessages.isAck(line)) {
+                        try {
+                            long ts = ClientAckMessages.parseTimestamp(line);
+                            String ackUser = ClientAckMessages.parseUsername(line);
+
+                            if (username.equals(ackUser)) {
+                                sender.handleAck(ts);
+                            }
+                        } catch (Exception e) {
+                            System.err.println("Errore parsing ACK: " + e.getMessage());
+                        }
+                    } else {
+                        System.out.println(line);
+                    }
                 }
             }
-        } catch (IOException e) {
+        } catch (IOException | ClassNotFoundException e) {
             if (running) {
                 System.err.println("Connection error (receiver): " + e.getMessage());
             }
         }
-    }
-
-
-    private boolean isHeartbeatAck(String line) {
-        return line != null && line.startsWith("HEARTBEAT_ACK ");
-    }
-
-
-    private long parseHeartbeatTimestamp(String line) {
-        String[] parts = line.trim().split("\\s+");
-        if (parts.length < 2) {
-            throw new IllegalArgumentException("Formato HEARTBEAT_ACK non valido: " + line);
-        }
-        return Long.parseLong(parts[1]);
     }
 }
