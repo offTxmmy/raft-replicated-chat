@@ -8,12 +8,15 @@ import java.util.*;
  * Hold-back queue for ordered message delivery.
  *
  * Ensures both:
- * 1. TOTAL ORDER: Messages are delivered in strict sequence number order (assigned by sequencer)
- * 2. CAUSAL ORDER: Messages respect causal dependencies tracked via vector clocks
- *
+ * <ul>
+ *   <li><b>Total Order:</b> Messages are delivered in strict sequence number order (assigned by sequencer)</li>
+ *   <li><b>Causal Order:</b> Messages respect causal dependencies tracked via vector clocks</li>
+ * </ul>
  * A message can be delivered only when:
- * - Its sequence number equals the next expected sequence number (total order)
- * - All its causal dependencies have been delivered (causal order via vector clocks)
+ * <ul>
+ *   <li>Its sequence number equals the next expected sequence number (total order)</li>
+ *   <li>All its causal dependencies have been delivered (causal order via vector clocks)</li>
+ * </ul>
  */
 public class HoldBackQueue {
 
@@ -26,10 +29,18 @@ public class HoldBackQueue {
     // Vector clock tracking what has been delivered
     private final VectorClock deliveredClock;
 
+    /**
+     * Constructs a HoldBackQueue with the default initial expected sequence number (1).
+     */
     public HoldBackQueue() {
         this(1); // Default: expect sequence to start at 1
     }
 
+    /**
+     * Constructs a HoldBackQueue with a specified initial expected sequence number.
+     *
+     * @param initialExpectedSeq the initial expected sequence number
+     */
     public HoldBackQueue(long initialExpectedSeq) {
         this.pendingMessages = new PriorityQueue<>(Comparator.comparingLong(ChatDeliverMessage::getSeq));
         this.expectedSeq = initialExpectedSeq;
@@ -64,6 +75,8 @@ public class HoldBackQueue {
 
     /**
      * Release all messages that satisfy both total and causal order conditions.
+     *
+     * @return List of messages ready for delivery
      */
     private List<ChatDeliverMessage> releaseReadyMessages() {
         List<ChatDeliverMessage> readyToDeliver = new ArrayList<>();
@@ -103,10 +116,13 @@ public class HoldBackQueue {
      * Check if a message's causal dependencies are satisfied.
      *
      * A message M from sender S can be delivered if:
-     * - For all brokers K != S: messageClock[K] <= deliveredClock[K]
-     *   (M doesn't depend on undelivered events from other brokers)
-     * - For sender S: messageClock[S] == deliveredClock[S] + 1
-     *   (M is the next expected message from S)
+     * <ul>
+     *   <li>For all brokers K != S: messageClock[K] <= deliveredClock[K]</li>
+     *   <li>For sender S: messageClock[S] == deliveredClock[S] + 1</li>
+     * </ul>
+     *
+     * @param message the message to check
+     * @return true if causal dependencies are satisfied, false otherwise
      */
     private boolean canDeliverCausally(ChatDeliverMessage message) {
         VectorClock messageClock = message.getVectorClock();
@@ -143,6 +159,8 @@ public class HoldBackQueue {
 
     /**
      * Get the current expected sequence number.
+     *
+     * @return the next expected sequence number
      */
     public synchronized long getExpectedSeq() {
         return expectedSeq;
@@ -150,6 +168,8 @@ public class HoldBackQueue {
 
     /**
      * Get a copy of the current delivered vector clock.
+     *
+     * @return a copy of the delivered vector clock
      */
     public synchronized VectorClock getDeliveredClock() {
         return new VectorClock(deliveredClock);
@@ -157,6 +177,8 @@ public class HoldBackQueue {
 
     /**
      * Get the number of messages currently held back.
+     *
+     * @return the number of pending messages
      */
     public synchronized int getPendingCount() {
         return pendingMessages.size();
@@ -164,11 +186,19 @@ public class HoldBackQueue {
 
     /**
      * Check if there are any pending messages waiting for delivery.
+     *
+     * @return true if there are pending messages, false otherwise
      */
     public synchronized boolean hasPendingMessages() {
         return !pendingMessages.isEmpty();
     }
 
+    /**
+     * Returns a string representation of the HoldBackQueue, including expected sequence,
+     * number of pending messages, and the delivered vector clock.
+     *
+     * @return string representation of the HoldBackQueue
+     */
     @Override
     public synchronized String toString() {
         return "HoldBackQueue{expectedSeq=" + expectedSeq +
@@ -176,4 +206,3 @@ public class HoldBackQueue {
                ", deliveredClock=" + deliveredClock + "}";
     }
 }
-

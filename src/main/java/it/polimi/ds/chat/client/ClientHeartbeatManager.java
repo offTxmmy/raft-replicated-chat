@@ -6,12 +6,10 @@ import java.io.ObjectOutputStream;
 import java.io.PrintWriter;
 
 /**
- * Gestisce l'heartbeat lato client.
- *
- * - Invia HEARTBEAT <timestamp> al broker ogni HEARTBEAT_INTERVAL_MS.
- * - Si aspetta che il broker risponda con HEARTBEAT_ACK <stessoTimestamp>.
- * - Se vengono persi MAX_MISSED_HEARTBEATS consecutivi, invoca la callback
- *   di failure (es. per scatenare la riconnessione via DirectoryService).
+ * Manages the heartbeat mechanism on the client side.
+ * <p>
+ * Periodically sends a {@link HeartbeatMessage} to the broker and expects an ACK in response.
+ * If a configured number of consecutive heartbeats are missed, triggers a failure callback.
  */
 public class ClientHeartbeatManager implements Runnable {
 
@@ -30,27 +28,51 @@ public class ClientHeartbeatManager implements Runnable {
     private int consecutiveMissed = 0;
 
 
+    /**
+     * Handler interface for heartbeat failure events.
+     */
     public interface HeartbeatFailureHandler {
+        /**
+         * Called when the maximum number of missed heartbeats is reached.
+         */
         void onHeartbeatFailure();
     }
 
 
+    /**
+     * Constructs a ClientHeartbeatManager.
+     *
+     * @param out            the ObjectOutputStream to send heartbeat messages to the broker
+     * @param failureHandler the handler to invoke on heartbeat failure
+     */
     public ClientHeartbeatManager(ObjectOutputStream out, HeartbeatFailureHandler failureHandler) {
         this.out = out;
         this.failureHandler = failureHandler;
     }
 
 
+    /**
+     * Stops the heartbeat manager.
+     */
     public void stop() {
         running = false;
     }
 
 
+    /**
+     * Resets the missed heartbeat counter upon receiving an ACK for a heartbeat.
+     *
+     * @param timestamp the timestamp of the acknowledged heartbeat
+     */
     public synchronized void onHeartbeatAck(long timestamp) {
         // System.out.println("[HB] ACK ricevuto per heartbeat " + timestamp);
         consecutiveMissed = 0;
     }
 
+    /**
+     * Main loop for sending heartbeat messages and monitoring ACKs.
+     * Triggers the failure handler if too many heartbeats are missed.
+     */
     @Override
     public void run() {
         try {

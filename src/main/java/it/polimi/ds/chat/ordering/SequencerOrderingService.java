@@ -17,18 +17,19 @@ import java.util.function.Consumer;
 
 /**
  * Sequencer-based implementation of OrderingService.
- *
+ * <p>
  * This implementation uses a single sequencer (leader) to assign
  * global sequence numbers to messages. All brokers send their
  * ChatReqMessages to the sequencer, which orders them and broadcasts
  * ChatDeliverMessages back to all brokers.
- *
+ * <p>
  * Architecture:
- * - One broker is designated as the sequencer (isSequencer=true in config)
- * - Non-sequencer brokers connect to the sequencer via TCP
- * - The sequencer assigns monotonically increasing sequence numbers
- * - Ordered messages are broadcast to all connected brokers
- *
+ * <ul>
+ *     <li>One broker is designated as the sequencer (isSequencer=true in config)</li>
+ *     <li>Non-sequencer brokers connect to the sequencer via TCP</li>
+ *     <li>The sequencer assigns monotonically increasing sequence numbers</li>
+ *     <li>Ordered messages are broadcast to all connected brokers</li>
+ * </ul>
  * This will be replaced by RaftOrderingService for fault tolerance.
  */
 public class SequencerOrderingService implements OrderingService {
@@ -59,25 +60,40 @@ public class SequencerOrderingService implements OrderingService {
     private volatile boolean running = false;
     private ServerSocket serverSocket;
 
+    /**
+     * Constructs a SequencerOrderingService with the given configuration and local broker ID.
+     *
+     * @param config        the broker configuration
+     * @param localBrokerId the local broker's ID
+     */
     public SequencerOrderingService(BrokerConfig config, int localBrokerId) {
         this.config = config;
         this.localBrokerId = localBrokerId;
     }
 
     /**
-     * Set a callback to be notified of ordering service events.
+     * Sets a callback to be notified of ordering service events.
+     *
+     * @param callback the callback to set
      */
     public void setCallback(OrderingServiceCallback callback) {
         this.callback = callback;
     }
 
     /**
-     * Get the current broker ID (may be updated after connecting to sequencer).
+     * Gets the current broker ID (may be updated after connecting to sequencer).
+     *
+     * @return the broker ID
      */
     public int getBrokerId() {
         return localBrokerId;
     }
 
+    /**
+     * Starts the ordering service.
+     * If this broker is the sequencer, starts the sequencer listener and heartbeat reaper.
+     * Otherwise, connects to the sequencer as a follower.
+     */
     @Override
     public void start() {
         running = true;
@@ -90,6 +106,9 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
+    /**
+     * Stops the ordering service and closes all network connections.
+     */
     @Override
     public void stop() {
         running = false;
@@ -121,6 +140,12 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
+    /**
+     * Proposes a chat request message for global ordering.
+     * If sequencer, handles locally; otherwise, forwards to sequencer.
+     *
+     * @param request the chat request message
+     */
     @Override
     public void propose(ChatReqMessage request) {
         if (config.isSequencer()) {
@@ -132,16 +157,31 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
+    /**
+     * Registers a callback to be notified when messages are ready for delivery.
+     *
+     * @param callback the delivery callback
+     */
     @Override
     public void onDeliver(Consumer<ChatDeliverMessage> callback) {
         deliveryCallbacks.add(callback);
     }
 
+    /**
+     * Checks if this broker is the leader (sequencer).
+     *
+     * @return true if leader, false otherwise
+     */
     @Override
     public boolean isLeader() {
         return config.isSequencer();
     }
 
+    /**
+     * Gets the leader's broker ID.
+     *
+     * @return leader broker ID
+     */
     @Override
     public int getLeaderId() {
         return config.isSequencer() ? localBrokerId : 0; // Sequencer is always broker 0
@@ -154,6 +194,8 @@ public class SequencerOrderingService implements OrderingService {
     /**
      * Handle an incoming chat request by assigning a sequence number
      * and delivering to all brokers.
+     *
+     * @param chatReq the chat request message
      */
     private synchronized void handleChatRequest(ChatReqMessage chatReq) {
         long seq = ++globalSeq;
@@ -176,6 +218,11 @@ public class SequencerOrderingService implements OrderingService {
         sendToBroker(chatReq.getBrokerId(), new ChatReqAck(chatReq.getLocalMsgId(), seq));
     }
 
+    /**
+     * Notifies all registered delivery callbacks with the given message.
+     *
+     * @param message the chat deliver message
+     */
     private void notifyDelivery(ChatDeliverMessage message) {
         for (Consumer<ChatDeliverMessage> callback : deliveryCallbacks) {
             try {
@@ -186,6 +233,11 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
+    /**
+     * Broadcasts a message to all connected brokers.
+     *
+     * @param message the broker message to broadcast
+     */
     private void broadcastToAllBrokers(BrokerMessage message) {
         synchronized (brokerOutStreams) {
             for (Map.Entry<Integer, ObjectOutputStream> entry : brokerOutStreams.entrySet()) {
@@ -199,6 +251,12 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
+    /**
+     * Sends a message to a specific broker by broker ID.
+     *
+     * @param brokerId the broker ID
+     * @param message  the message to send
+     */
     private void sendToBroker(int brokerId, BrokerMessage message) {
         ObjectOutputStream out;
         synchronized (brokerOutStreams) {
@@ -222,6 +280,9 @@ public class SequencerOrderingService implements OrderingService {
     // SEQUENCER NETWORK LISTENER
     // =========================================================================
 
+    /**
+     * Starts the TCP listener for incoming broker connections (sequencer only).
+     */
     private void startSequencerListener() {
         Thread listenerThread = new Thread(() -> {
             try {
@@ -246,6 +307,11 @@ public class SequencerOrderingService implements OrderingService {
         listenerThread.start();
     }
 
+    /**
+     * Handles a new broker connection to the sequencer.
+     *
+     * @param brokerSocket the socket of the connecting broker
+     */
     private void handleNewBrokerConnection(Socket brokerSocket) {
         try {
             ObjectOutputStream out = new ObjectOutputStream(brokerSocket.getOutputStream());
@@ -288,6 +354,12 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
+    /**
+     * Starts a thread to handle incoming messages from a connected broker.
+     *
+     * @param brokerId the broker ID
+     * @param in       the input stream from the broker
+     */
     private void startBrokerMessageHandler(int brokerId, ObjectInputStream in) {
         Thread handler = new Thread(() -> {
             try {
@@ -317,6 +389,11 @@ public class SequencerOrderingService implements OrderingService {
         handler.start();
     }
 
+    /**
+     * Removes a broker from the sequencer's connection lists.
+     *
+     * @param brokerId the broker ID to remove
+     */
     private void removeBroker(int brokerId) {
         synchronized (brokerConnections) {
             Socket socket = brokerConnections.remove(brokerId);
@@ -333,10 +410,9 @@ public class SequencerOrderingService implements OrderingService {
         System.out.println("[OrderingService] Broker " + brokerId + " removed");
     }
 
-    // =========================================================================
-    // HEARTBEAT REAPER (for sequencer)
-    // =========================================================================
-
+    /**
+     * Starts the heartbeat reaper thread to remove brokers that have timed out.
+     */
     private void startHeartbeatReaper() {
         Thread reaper = new Thread(() -> {
             while (running) {
@@ -367,6 +443,9 @@ public class SequencerOrderingService implements OrderingService {
     // FOLLOWER LOGIC - Connect to sequencer
     // =========================================================================
 
+    /**
+     * Connects this broker to the sequencer as a follower.
+     */
     private void connectToSequencer() {
         try {
             String host = config.getSequencerHost();
@@ -408,6 +487,9 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
+    /**
+     * Starts a thread to handle inbound messages from the sequencer.
+     */
     private void startSequencerInboundHandler() {
         Thread handler = new Thread(() -> {
             try {
@@ -434,6 +516,11 @@ public class SequencerOrderingService implements OrderingService {
         handler.start();
     }
 
+    /**
+     * Sends a chat request message to the sequencer.
+     *
+     * @param request the chat request message
+     */
     private void sendToSequencer(ChatReqMessage request) {
         if (sequencerOut == null) {
             System.err.println("[OrderingService] Not connected to sequencer");
@@ -448,12 +535,10 @@ public class SequencerOrderingService implements OrderingService {
         }
     }
 
-    // =========================================================================
-    // HEARTBEAT SENDING (for followers)
-    // =========================================================================
-
     /**
-     * Send a heartbeat to the sequencer (called by Broker's heartbeat loop).
+     * Sends a heartbeat to the sequencer (called by Broker's heartbeat loop).
+     *
+     * @param heartbeat the heartbeat message
      */
     public void sendHeartbeat(HeartbeatMessage heartbeat) {
         if (sequencerOut != null) {
@@ -467,8 +552,11 @@ public class SequencerOrderingService implements OrderingService {
     }
 
     /**
-     * Get the assigned broker ID after connecting to sequencer.
-     * This is used by followers to update their broker ID.
+     * Gets the assigned broker ID after connecting to sequencer.
+     * For sequencer, returns local broker ID.
+     * For followers, should be called after connection is established.
+     *
+     * @return the assigned broker ID
      */
     public int getAssignedBrokerId() {
         // For sequencer, return local broker ID

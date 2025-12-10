@@ -2,12 +2,28 @@ package it.polimi.ds.chat.client;
 
 import java.io.IOException;
 
+/**
+ * A client connection that first queries the Directory Service to discover the best broker,
+ * then connects to that broker for chat communication.
+ */
 public class DirectoryAwareClientConnection extends ClientConnection {
 
+    /**
+     * Constructs a DirectoryAwareClientConnection using the Directory Service host and port.
+     *
+     * @param directoryHost the host of the Directory Service
+     * @param directoryPort the port of the Directory Service
+     */
     public DirectoryAwareClientConnection(String directoryHost, int directoryPort) {
         super(directoryHost, directoryPort);
     }
 
+    /**
+     * Opens the connection by querying the Directory Service for the best broker,
+     * then connects to the selected broker.
+     *
+     * @throws IOException if no broker is available or a protocol error occurs
+     */
     @Override
     public void open() throws IOException {
         //System.out.println("[DEBUG] DirectoryAwareClientConnection.open() - inizio");

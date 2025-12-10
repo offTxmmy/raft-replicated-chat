@@ -1,5 +1,9 @@
 package it.polimi.ds.chat.broker;
 
+/**
+ * Configuration class for a broker instance.
+ * Holds network parameters, role information, and handler state.
+ */
 public class BrokerConfig {
 
     private final int brokerId;          // 0 for leader, -1 for followers at startup
@@ -16,6 +20,19 @@ public class BrokerConfig {
     // Only non-null on the sequencer (leader); null for followers
     private final HandlerState handlerState;
 
+    /**
+     * Constructs a BrokerConfig with all required parameters.
+     *
+     * @param brokerId      the broker's identifier (0 for leader, -1 for followers at startup)
+     * @param isSequencer   true if this broker is the sequencer (leader)
+     * @param brokerHost    hostname or IP address of the broker
+     * @param brokerPort    TCP port for broker communication
+     * @param clientPort    TCP port for client connections
+     * @param sequencerHost hostname or IP address of the sequencer
+     * @param sequencerPort TCP port of the sequencer
+     * @param udpPort       UDP port for broker communication
+     * @param handlerState  handler state (non-null only for sequencer)
+     */
     public BrokerConfig(int brokerId,
                         boolean isSequencer,
                         String brokerHost,
@@ -36,42 +53,93 @@ public class BrokerConfig {
         this.handlerState = handlerState;
     }
 
+    /**
+     * Gets the broker's identifier.
+     *
+     * @return broker id
+     */
     public int getBrokerId() {
         return brokerId;
     }
 
+    /**
+     * Checks if this broker is the sequencer (leader).
+     *
+     * @return true if sequencer, false otherwise
+     */
     public boolean isSequencer() {
         return isSequencer;
     }
 
+    /**
+     * Gets the broker's hostname or IP address.
+     *
+     * @return broker host
+     */
     public String getBrokerHost() {
         return brokerHost;
     }
 
+    /**
+     * Gets the broker's TCP port.
+     *
+     * @return broker port
+     */
     public int getBrokerPort() {
         return brokerPort;
     }
 
+    /**
+     * Gets the TCP port for client connections.
+     *
+     * @return client port
+     */
     public int getClientPort() {
         return clientPort;
     }
 
+    /**
+     * Gets the sequencer's hostname or IP address.
+     *
+     * @return sequencer host
+     */
     public String getSequencerHost() {
         return sequencerHost;
     }
 
+    /**
+     * Gets the sequencer's TCP port.
+     *
+     * @return sequencer port
+     */
     public int getSequencerPort() {
         return sequencerPort;
     }
 
+    /**
+     * Gets the UDP port for broker communication.
+     *
+     * @return UDP port
+     */
     public int getUdpPort() {
         return udpPort;
     }
 
+    /**
+     * Gets the handler state (non-null only for sequencer).
+     *
+     * @return handler state
+     */
     public HandlerState getHandlerState() {
         return handlerState;
     }
 
+    /**
+     * Checks equality based on broker host, port, and sequencer role.
+     *
+     * @param o the object to compare
+     * @return true if equal, false otherwise
+     */
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -83,6 +151,11 @@ public class BrokerConfig {
         return brokerHost.equals(that.brokerHost);
     }
 
+    /**
+     * Computes hash code based on broker host, port, and sequencer role.
+     *
+     * @return hash code
+     */
     @Override
     public int hashCode() {
         int result = brokerHost.hashCode();

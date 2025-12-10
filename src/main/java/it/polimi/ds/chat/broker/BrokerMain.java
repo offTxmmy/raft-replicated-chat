@@ -6,10 +6,20 @@ import java.net.UnknownHostException;
 import java.util.InputMismatchException;
 import java.util.Scanner;
 
+/**
+ * Entry point for starting a broker in the replicated chat infrastructure.
+ * Handles configuration, role selection (sequencer/follower), and broker startup.
+ */
 public class BrokerMain {
 
     private static final Scanner scanner = new Scanner(System.in);
 
+    /**
+     * Main method to start the broker process.
+     * Determines broker role, collects configuration, and launches the broker.
+     *
+     * @param args command-line arguments; if "first" is present, starts as sequencer
+     */
     public static void main(String[] args) {
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: BROKER---");
 
@@ -62,6 +72,11 @@ public class BrokerMain {
         }
     }
 
+    /**
+     * Retrieves the IP address of the local host for broker configuration.
+     *
+     * @return local host IP address, or "localhost" if unavailable
+     */
     public static String takeBrokerIp() {
         try{
             return InetAddress.getLocalHost().getHostAddress();
@@ -70,6 +85,12 @@ public class BrokerMain {
         }
     }
 
+    /**
+     * Prompts the user to enter a valid port number for the broker to listen on.
+     * Ensures the port is within the allowed range (1024-65535).
+     *
+     * @return the chosen broker port
+     */
     public static Integer askForBrokerPort() {
         Integer brokerPort = null;
         while (brokerPort == null) {
@@ -92,6 +113,12 @@ public class BrokerMain {
         return brokerPort;
     }
 
+    /**
+     * Prompts the user to enter the sequencer host address.
+     * Returns "localhost" if input is empty.
+     *
+     * @return sequencer host address
+     */
     private static String askForSequencerHost() {
         System.out.println("Insert sequencer host (press ENTER for localhost):");
         String line = scanner.nextLine().trim();

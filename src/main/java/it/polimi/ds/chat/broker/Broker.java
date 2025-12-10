@@ -98,6 +98,13 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // OrderingServiceCallback implementation
     // =========================================================================
 
+    /**
+     * Callback invoked when the ordering service assigns a broker ID to this instance.
+     *
+     * Updates internal brokerId, logs the change, and reinitializes the PeerRegistry with the new id.
+     *
+     * @param newBrokerId the broker id assigned by the ordering service
+     */
     @Override
     public void onBrokerIdAssigned(int newBrokerId) {
         System.out.println("[Broker] Broker ID updated from " + this.brokerId + " to " + newBrokerId);
@@ -109,11 +116,21 @@ public class Broker implements Serializable, OrderingServiceCallback {
         }
     }
 
+    /**
+     * Callback invoked when the connection to the ordering service is lost.
+     *
+     * This method should perform any required cleanup or reconnection logic (currently logs an error).
+     */
     @Override
     public void onConnectionLost() {
         System.err.println("[Broker] Connection to ordering service lost!");
     }
 
+    /**
+     * Callback invoked when the connection to the ordering service is established.
+     *
+     * Can be used to notify the operator or trigger follow-up actions.
+     */
     @Override
     public void onConnectionEstablished() {
         System.out.println("[Broker] Connected to ordering service");
@@ -137,6 +154,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
         return vectorClock;
     }
 
+    /**
+     * Get the broker identifier assigned to this broker instance.
+     *
+     * @return current broker id
+     */
     public int getBrokerId() {
         return brokerId;
     }
@@ -176,6 +198,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * - Open TCP listener for clients
      * - Connect to directory service
      * - Start peer discovery
+     *
+     * This method blocks in a loop accepting client connections.
+     *
+     * @throws IOException if the server socket cannot be opened
      */
     public void start() throws IOException {
         // Start the ordering service (handles sequencer connections)
@@ -217,6 +243,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     /**
      * Remove a client from the internal list (called by ClientHandler when the client disconnects).
+     *
+     * @param handler the client handler to remove
      */
     public void removeClient(ClientHandler handler) {
         clients.remove(handler);
@@ -224,8 +252,12 @@ public class Broker implements Serializable, OrderingServiceCallback {
     }
 
     /**
-     * Assign a sequence number to a message and deliver it to local clients.
-     * Currently used in local/fallback mode.
+     * Notify local clients with a broadcast assigned locally (fallback/local mode).
+     *
+     * Assigns a local sequence number and delivers the message to local clients.
+     *
+     * @param sender username of the sender (will not receive the message)
+     * @param text   message text to broadcast
      */
     public void broadcastToClients(String sender, String text) {
         long seq;
@@ -238,6 +270,12 @@ public class Broker implements Serializable, OrderingServiceCallback {
     /**
      * Deliver a message that has already been assigned a global sequence number
      * to all locally connected clients.
+     *
+     * The sender will not receive the message back.
+     *
+     * @param seq    global sequence number
+     * @param sender username of the sender
+     * @param text   message text
      */
     public void onChatDeliver(long seq, String sender, String text) {
         synchronized (clients) {
@@ -251,7 +289,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     /**
      * Entry point for messages sent by clients connected to THIS broker.
-     * Uses the OrderingService to propose messages for global ordering.
+     *
+     * Wraps the client message into a ChatReqMessage (including vector clock) and proposes it
+     * to the OrderingService for global sequencing. Also sends an immediate ACK to the client.
+     *
+     * @param message raw client message received by this broker
      */
     public void onClientMessage(ClientMessage message) {
         // Build the chat request with vector clock
@@ -266,7 +308,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     /**
      * Handle an ordered message from the OrderingService.
-     * Uses HoldBackQueue to ensure both total order and causal order.
+     *
+     * Enqueues the delivered ChatDeliverMessage into the HoldBackQueue to enforce causal +
+     * total order, obtains all messages that are now ready, and delivers them locally.
+     *
+     * @param chatDeliver message delivered by the ordering service (contains global seq)
      */
     public void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
         // Enqueue message and get all messages ready for delivery
@@ -284,10 +330,20 @@ public class Broker implements Serializable, OrderingServiceCallback {
         }
     }
 
+    /**
+     * Notify local clients that a user has left the chat.
+     *
+     * @param username username of the user who left
+     */
     public void notifyLeave(String username) {
         broadcastToClients("[system]", username + " left the chat");
     }
 
+    /**
+     * Notify local clients that a user has joined the chat.
+     *
+     * @param username username of the user who joined
+     */
     public void notifyJoin(String username) {
         broadcastToClients("[system]", username + " joined the chat");
     }
@@ -296,12 +352,26 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Helper methods
     // =========================================================================
 
+    /**
+     * Build a ChatReqMessage including an updated vector clock and a unique local message id.
+     *
+     * This method increments the local vector clock for this broker and generates a localMsgId.
+     *
+     * @param username sender username
+     * @param text     message text
+     * @return constructed ChatReqMessage ready for proposing to the ordering service
+     */
     private synchronized ChatReqMessage buildChatReq(String username, String text) {
         vectorClock.increment(brokerId);
         String localMsgId = brokerId + "-" + (++localMsgCounter);
         return new ChatReqMessage(localMsgId, brokerId, username, text, new VectorClock(vectorClock));
     }
 
+    /**
+     * Connect to the Directory Service and register this broker.
+     *
+     * Establishes a TCP connection and sends a DirectoryRegisterMessage. Errors are logged.
+     */
     private void connectAndRegisterWithDirectoryService() {
         System.out.println("Connecting to Directory Service at " + DIRECTORY_HOST + ":" + DIRECTORY_PORT + "...");
         try {
@@ -326,6 +396,12 @@ public class Broker implements Serializable, OrderingServiceCallback {
         }
     }
 
+    /**
+     * Start a background thread that periodically sends heartbeats to the Directory Service.
+     *
+     * If the ordering service is a SequencerOrderingService, also forward the heartbeat to it.
+     * The thread runs until an IO error occurs or it is interrupted.
+     */
     private void startHeartbeatLoop() {
         if (directoryOut == null) {
             System.err.println("Heartbeat not started: no connection to Directory Service.");
@@ -368,6 +444,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
         t.start();
     }
 
+    /**
+     * Send an update message to the Directory Service reporting the current number of connected clients.
+     *
+     * Errors while sending are logged.
+     */
     private void sendClientCountUpdate() {
         if (directoryOut == null) return;
 
@@ -406,6 +487,12 @@ public class Broker implements Serializable, OrderingServiceCallback {
         System.out.println("[Broker " + brokerId + "] Peer discovery started");
     }
 
+    /**
+     * Send an ACK line to a specific connected client (by username).
+     *
+     * @param username  recipient username
+     * @param timestamp original client message timestamp to include in the ACK
+     */
     private void sendAckToClient(String username, long timestamp) {
         synchronized (clients) {
             for (ClientHandler handler : clients) {
@@ -417,5 +504,4 @@ public class Broker implements Serializable, OrderingServiceCallback {
         }
     }
 }
-
 

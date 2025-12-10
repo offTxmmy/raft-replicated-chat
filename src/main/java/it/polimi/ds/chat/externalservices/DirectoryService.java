@@ -12,6 +12,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * DirectoryService manages broker registration, heartbeats, and client/broker lookup requests.
+ * It listens for broker and client connections, maintains broker liveness, and provides peer information.
+ */
 public class DirectoryService {
 
     private static final long HEARTBEAT_TIMEOUT_MS = 10_000;
@@ -24,6 +28,12 @@ public class DirectoryService {
     // index by brokerId for fast lookup
     private final Map<Integer, BrokerConfig> brokersById = new ConcurrentHashMap<>();
 
+    /**
+     * Main entry point for the Directory Service.
+     * Starts listeners for broker and client connections.
+     *
+     * @param args command-line arguments (unused)
+     */
     public static void main(String[] args) {
         int brokerPort = 60000;
         int clientPort = 60001;
@@ -38,10 +48,18 @@ public class DirectoryService {
         new Thread(() -> service.startClientsListener(clientPort), "Dir-ClientListener").start();
     }
 
+    /**
+     * Constructs a DirectoryService and starts the reaper thread for broker liveness.
+     */
     public DirectoryService() {
         startReaperThread();
     }
 
+    /**
+     * Starts a TCP listener for broker connections (registration and heartbeat).
+     *
+     * @param port the port to listen on for broker connections
+     */
     public void startBrokersListener(int port) {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             System.out.println("Directory Service listening on port " + port);
@@ -58,6 +76,11 @@ public class DirectoryService {
         }
     }
 
+    /**
+     * Starts a TCP listener for client connections (broker lookup requests).
+     *
+     * @param port the port to listen on for client connections
+     */
     public void startClientsListener(int port) {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
             System.out.println("Directory Service listening for CLIENTS on port " + port);
@@ -74,6 +97,11 @@ public class DirectoryService {
         }
     }
 
+    /**
+     * Handles a client connection, processing broker or peer list requests.
+     *
+     * @param socket the client socket
+     */
     private void handleClientConnection(Socket socket) {
         try (ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
              ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
@@ -97,6 +125,12 @@ public class DirectoryService {
         }
     }
 
+    /**
+     * Handles a client request for the best broker and sends a response.
+     *
+     * @param out the output stream to the client
+     * @throws IOException if an I/O error occurs
+     */
     private void handleGetBrokerRequest(ObjectOutputStream out) throws IOException {
         BrokerConfig best = chooseBestBroker();
 
@@ -119,6 +153,13 @@ public class DirectoryService {
         out.flush();
     }
 
+    /**
+     * Handles a client request for the peer list and sends a response.
+     *
+     * @param req the peer list request message
+     * @param out the output stream to the client
+     * @throws IOException if an I/O error occurs
+     */
     private void handleGetPeerListRequest(GetPeerListRequestMessage req, ObjectOutputStream out) throws IOException {
         int requestingBrokerId = req.getRequestingBrokerId();
         List<PeerInfo> peers = new ArrayList<>();
@@ -143,6 +184,11 @@ public class DirectoryService {
         System.out.println("Returned peer list (" + peers.size() + " brokers) to broker " + requestingBrokerId);
     }
 
+    /**
+     * Handles a broker connection, processing registration and heartbeats.
+     *
+     * @param socket the broker socket
+     */
     private void handleConnection(Socket socket) {
         try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
@@ -182,6 +228,11 @@ public class DirectoryService {
         }
     }
 
+    /**
+     * Updates the client count for a broker based on a received message.
+     *
+     * @param cc the client count update message
+     */
     public void updateClientCount(ClientCountUpdateMessage cc) {
         int brokerId = cc.getBrokerId();
         int clientCount = cc.getClientCount();
@@ -195,6 +246,12 @@ public class DirectoryService {
         }
     }
 
+    /**
+     * Registers a broker in the directory based on the registration message.
+     *
+     * @param msg the registration message from the broker
+     * @return the created BrokerConfig
+     */
     private BrokerConfig registerBroker(DirectoryRegisterMessage msg) {
         int brokerId = msg.getBrokerId();
         String host = msg.getBrokerHost();
@@ -230,6 +287,9 @@ public class DirectoryService {
         return config;
     }
 
+    /**
+     * Starts the reaper thread that periodically removes dead brokers based on heartbeat timeouts.
+     */
     private void startReaperThread() {
         Thread t = new Thread(() -> {
             while (true) {
@@ -266,6 +326,11 @@ public class DirectoryService {
         t.start();
     }
 
+    /**
+     * Chooses the best broker to assign to a client, preferring the broker with the fewest clients.
+     *
+     * @return the selected BrokerConfig, or null if none available
+     */
     private BrokerConfig chooseBestBroker() {
         BrokerConfig best = null;
         int bestCount = Integer.MAX_VALUE;

@@ -6,9 +6,8 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Gestisce:
- *  - l'invio dei messaggi utente al server
- *  - la ritrasmissione dei messaggi non ancora ACKati
+ * Handles sending user messages to the server and retransmitting messages that have not yet been acknowledged (ACKed).
+ * Maintains a pending message queue and manages retransmission based on ACK timeouts.
  */
 public class ClientMessageSender implements Runnable {
 
@@ -18,14 +17,21 @@ public class ClientMessageSender implements Runnable {
 
     private volatile boolean running = true;
 
+    /**
+     * Constructs a ClientMessageSender.
+     *
+     * @param out         the ObjectOutputStream to send messages to the server
+     * @param ackTimeoutMs the timeout in milliseconds to wait for an ACK before retransmitting
+     */
     public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs) {
         this.out = out;
         this.ackTimeoutMs = ackTimeoutMs;
     }
 
     /**
-     * Invia un messaggio utente al server, assegnando un timestamp
-     * e inserendolo tra i pendenti.
+     * Sends a user message to the server, assigning a timestamp and adding it to the pending queue.
+     *
+     * @param text the message text to send
      */
     public void sendUserMessage(String text) {
         long timestamp = System.currentTimeMillis();
@@ -43,15 +49,22 @@ public class ClientMessageSender implements Runnable {
     }
 
     /**
-     * Costruisce la linea per il server.
-     * Formato deciso: "MSG <timestamp> <text>"
+     * Builds the wire format line for the server.
+     * Format: "MSG &lt;timestamp&gt; &lt;text&gt;"
+     *
+     * @param timestamp the message timestamp
+     * @param text      the message text
+     * @return the formatted wire line
      */
     private String buildMsgWire(long timestamp, String text) {
         return "MSG " + timestamp + " " + text;
     }
 
     /**
-     * Chiamato dal MessageReceiver quando arriva un ACK valido.
+     * Called by the MessageReceiver when a valid ACK is received.
+     * Removes the acknowledged message from the pending queue.
+     *
+     * @param timestamp the timestamp of the acknowledged message
      */
     public void handleAck(long timestamp) {
         ClientPendingMessage removed = pendingMessages.remove(timestamp);
@@ -62,10 +75,17 @@ public class ClientMessageSender implements Runnable {
         }
     }
 
+    /**
+     * Shuts down the sender thread.
+     */
     public void shutdown() {
         running = false;
     }
 
+    /**
+     * Main loop for retransmitting pending messages if ACKs are not received within the timeout.
+     * Retransmits messages and manages the pending queue.
+     */
     @Override
     public void run() {
         try {

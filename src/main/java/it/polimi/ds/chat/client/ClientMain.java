@@ -6,10 +6,26 @@ import it.polimi.ds.chat.messages.ClientQuitMessage;
 import java.io.IOException;
 import java.io.InputStreamReader;
 
+/**
+ * Entry point for the chat client application.
+ * <p>
+ * Handles user interaction, connection to the broker via the directory service,
+ * and manages the client-side message and heartbeat threads.
+ */
 public class ClientMain {
 
     private static final long ACK_TIMEOUT_MS = 2000L;
 
+    /**
+     * Main method to start the chat client.
+     * <ul>
+     *   <li>Connects to the directory service to find a broker</li>
+     *   <li>Handles user input and message sending</li>
+     *   <li>Manages message receiving and heartbeat monitoring</li>
+     * </ul>
+     *
+     * @param args command-line arguments: [directoryHost] [directoryPort]
+     */
     public static void main(String[] args) {
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: CLIENT---");
 

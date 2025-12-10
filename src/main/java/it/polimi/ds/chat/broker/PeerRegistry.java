@@ -18,11 +18,9 @@ import java.util.function.Consumer;
 /**
  * Registry that maintains the list of known broker peers.
  * Periodically refreshes the peer list from the Directory Service.
- *
- * This is essential for Raft implementation where brokers need to
- * communicate directly with each other for:
- * - Leader election (RequestVote)
- * - Log replication (AppendEntries)
+ * <p>
+ * Essential for Raft implementation where brokers need to communicate directly
+ * for leader election and log replication.
  */
 public class PeerRegistry {
 
@@ -43,6 +41,13 @@ public class PeerRegistry {
     // Refresh interval in seconds
     private static final long REFRESH_INTERVAL_SECONDS = 10;
 
+    /**
+     * Constructs a PeerRegistry for a broker.
+     *
+     * @param localBrokerId the ID of the local broker
+     * @param directoryHost the host of the Directory Service
+     * @param directoryPort the port of the Directory Service
+     */
     public PeerRegistry(int localBrokerId, String directoryHost, int directoryPort) {
         this.localBrokerId = localBrokerId;
         this.directoryHost = directoryHost;
@@ -50,7 +55,7 @@ public class PeerRegistry {
     }
 
     /**
-     * Start the peer registry and begin periodic refresh.
+     * Starts the peer registry and begins periodic refresh of the peer list.
      */
     public void start() {
         running = true;
@@ -74,7 +79,7 @@ public class PeerRegistry {
     }
 
     /**
-     * Stop the peer registry.
+     * Stops the peer registry and terminates periodic refresh.
      */
     public void stop() {
         running = false;
@@ -84,14 +89,18 @@ public class PeerRegistry {
     }
 
     /**
-     * Register a listener to be notified when the peer list changes.
+     * Registers a listener to be notified when the peer list changes.
+     *
+     * @param listener a Consumer that accepts the updated list of PeerInfo
      */
     public void addPeerChangeListener(Consumer<List<PeerInfo>> listener) {
         peerChangeListeners.add(listener);
     }
 
     /**
-     * Get all known peers (excluding self).
+     * Returns all known peers, excluding the local broker itself.
+     *
+     * @return list of PeerInfo for all peers except self
      */
     public List<PeerInfo> getPeers() {
         List<PeerInfo> result = new ArrayList<>();
@@ -104,21 +113,28 @@ public class PeerRegistry {
     }
 
     /**
-     * Get all known peers including self.
+     * Returns all known peers, including the local broker.
+     *
+     * @return list of PeerInfo for all peers
      */
     public List<PeerInfo> getAllPeers() {
         return new ArrayList<>(peers.values());
     }
 
     /**
-     * Get a specific peer by ID.
+     * Returns the PeerInfo for a specific broker ID, if present.
+     *
+     * @param brokerId the broker ID to look up
+     * @return Optional containing PeerInfo if found, otherwise empty
      */
     public Optional<PeerInfo> getPeer(int brokerId) {
         return Optional.ofNullable(peers.get(brokerId));
     }
 
     /**
-     * Get the sequencer/leader peer.
+     * Returns the PeerInfo for the sequencer/leader broker, if present.
+     *
+     * @return Optional containing PeerInfo of the sequencer, otherwise empty
      */
     public Optional<PeerInfo> getSequencer() {
         return peers.values().stream()
@@ -127,7 +143,9 @@ public class PeerRegistry {
     }
 
     /**
-     * Get the number of known peers (excluding self).
+     * Returns the number of known peers, excluding the local broker.
+     *
+     * @return peer count excluding self
      */
     public int getPeerCount() {
         return (int) peers.values().stream()
@@ -136,21 +154,26 @@ public class PeerRegistry {
     }
 
     /**
-     * Get the total cluster size (including self).
+     * Returns the total cluster size, including the local broker.
+     *
+     * @return total number of brokers in the cluster
      */
     public int getClusterSize() {
         return peers.size();
     }
 
     /**
-     * Calculate the quorum size (majority) for Raft.
+     * Calculates the quorum size (majority) for Raft consensus.
+     *
+     * @return quorum size
      */
     public int getQuorumSize() {
         return (getClusterSize() / 2) + 1;
     }
 
     /**
-     * Refresh the peer list from the Directory Service.
+     * Refreshes the peer list from the Directory Service.
+     * Notifies listeners if the peer list has changed.
      */
     private void refreshPeerList() {
         try {
@@ -184,7 +207,9 @@ public class PeerRegistry {
     }
 
     /**
-     * Fetch the peer list from the Directory Service.
+     * Fetches the peer list from the Directory Service via TCP.
+     *
+     * @return list of PeerInfo received from the Directory Service, or null on failure
      */
     private List<PeerInfo> fetchPeerListFromDirectory() {
         try (Socket socket = new Socket(directoryHost, directoryPort);
@@ -215,14 +240,14 @@ public class PeerRegistry {
     }
 
     /**
-     * Manually trigger a refresh of the peer list.
+     * Manually triggers a refresh of the peer list from the Directory Service.
      */
     public void forceRefresh() {
         refreshPeerList();
     }
 
     /**
-     * Notify all listeners of peer list change.
+     * Notifies all registered listeners of a peer list change.
      */
     private void notifyPeerChange() {
         List<PeerInfo> currentPeers = getPeers();
@@ -235,6 +260,11 @@ public class PeerRegistry {
         }
     }
 
+    /**
+     * Returns a string representation of the PeerRegistry, including cluster size and quorum.
+     *
+     * @return string describing the PeerRegistry
+     */
     @Override
     public String toString() {
         return "PeerRegistry{" +
@@ -245,4 +275,3 @@ public class PeerRegistry {
                 '}';
     }
 }
-

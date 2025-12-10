@@ -7,7 +7,10 @@ import it.polimi.ds.chat.messages.HeartbeatAckMessage;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 
-
+/**
+ * Receives and processes messages from the broker for the chat client.
+ * Handles incoming chat messages, ACKs, and heartbeat messages.
+ */
 public class ClientMessageReceiver implements Runnable {
 
     private final ObjectInputStream in;
@@ -17,7 +20,14 @@ public class ClientMessageReceiver implements Runnable {
 
     private volatile boolean running = true;
 
-
+    /**
+     * Constructs a ClientMessageReceiver.
+     *
+     * @param in               the ObjectInputStream to receive messages from the broker
+     * @param sender           the ClientMessageSender to handle ACKs
+     * @param username         the username of the client
+     * @param heartbeatManager the heartbeat manager to notify on heartbeat ACKs
+     */
     public ClientMessageReceiver(ObjectInputStream in,
                                  ClientMessageSender sender,
                                  String username,
@@ -28,7 +38,9 @@ public class ClientMessageReceiver implements Runnable {
         this.heartbeatManager = heartbeatManager;
     }
 
-
+    /**
+     * Shuts down the receiver and closes the input stream.
+     */
     public void shutdown() {
         running = false;
         try {
@@ -37,6 +49,10 @@ public class ClientMessageReceiver implements Runnable {
         }
     }
 
+    /**
+     * Main loop for receiving and processing messages from the broker.
+     * Handles chat messages, ACKs, and heartbeat messages.
+     */
     @Override
     public void run() {
         try {
