@@ -40,32 +40,50 @@ public class ClientMain {
             //System.out.println("[DEBUG] connection.open() completata → ora dovrei essere connesso al BROKER");
 
             System.out.print("Enter username: ");
-            //System.out.println("[DEBUG] In attesa username da console...");
+            //System.out.println("[DEBUG] In attesa username da console.");
             String username = stdin.readLine();
             //System.out.println("[DEBUG] Username inserito: " + username);
 
-            //System.out.println("[DEBUG] Invio JOIN al broker...");
+            //System.out.println("[DEBUG] Invio JOIN al broker.");
             connection.getWriter().println(ClientJoinMessage.joinCommand(username));
             //System.out.println("[DEBUG] JOIN inviato.");
 
-            //System.out.println("[DEBUG] Creo sender...");
-            ClientMessageSender sender = new ClientMessageSender(connection.getWriter(), ACK_TIMEOUT_MS);
+            //System.out.println("[DEBUG] Creo sender.");
+            ClientMessageSender sender =
+                    new ClientMessageSender(connection.getWriter(), ACK_TIMEOUT_MS);
 
-            //System.out.println("[DEBUG] Creo receiver...");
+            //System.out.println("[DEBUG] Creo heartbeat manager.");
+            ClientHeartbeatManager heartbeatManager =
+                    new ClientHeartbeatManager(
+                            connection.getWriter(),
+                            () -> {
+                                // Callback chiamata quando si superano i MAX_MISSED_HEARTBEATS
+                                System.err.println("[HB] Broker non risponde a " +
+                                        "troppi heartbeat consecutivi → sospetto crash.");
+                                // TODO qui implementerò la logica di riconnessione
+                            }
+                    );
+
+            //System.out.println("[DEBUG] Creo receiver.");
             ClientMessageReceiver receiver =
-                    new ClientMessageReceiver(connection.getReader(), sender, username);
+                    new ClientMessageReceiver(connection.getReader(), sender, username, heartbeatManager);
 
             Thread senderThread = new Thread(sender, "MessageSender");
             Thread receiverThread = new Thread(receiver, "MessageReceiver");
+            Thread heartbeatThread = new Thread(heartbeatManager, "HeartbeatThread");
 
             senderThread.setDaemon(true);
             receiverThread.setDaemon(true);
+            heartbeatThread.setDaemon(true);
 
-            //System.out.println("[DEBUG] Avvio senderThread...");
+            //System.out.println("[DEBUG] Avvio senderThread.");
             senderThread.start();
 
-            //System.out.println("[DEBUG] Avvio receiverThread...");
+            //System.out.println("[DEBUG] Avvio receiverThread.");
             receiverThread.start();
+
+            //System.out.println("[DEBUG] Avvio heartbeatThread.");
+            heartbeatThread.start();
 
             //System.out.println("[DEBUG] Entrato nel main loop, ora attendo input dell’utente.");
 
@@ -92,6 +110,9 @@ public class ClientMain {
 
             receiver.shutdown();
             //System.out.println("[DEBUG] Receiver shutdown OK.");
+
+            heartbeatManager.stop();
+            //System.out.println("[DEBUG] HeartbeatManager shutdown OK.");
 
             connection.close();
             //System.out.println("[DEBUG] Connessione chiusa.");
