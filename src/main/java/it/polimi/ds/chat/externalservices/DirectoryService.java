@@ -328,19 +328,23 @@ public class DirectoryService {
 
     /**
      * Chooses the best broker to assign to a client, preferring the broker with the fewest clients.
+     * If multiple brokers have the same client count, chooses the one with the lowest broker id.
      *
      * @return the selected BrokerConfig, or null if none available
      */
     private BrokerConfig chooseBestBroker() {
         BrokerConfig best = null;
         int bestCount = Integer.MAX_VALUE;
+        int bestId = Integer.MAX_VALUE;
 
         for (Map.Entry<BrokerConfig, Integer> entry : registeredBrokers.entrySet()) {
             BrokerConfig cfg = entry.getKey();
             int count = entry.getValue();
+            int id = cfg.getBrokerId();
 
-            if (count < bestCount) {
+            if (count < bestCount || (count == bestCount && id < bestId)) {
                 bestCount = count;
+                bestId = id;
                 best = cfg;
             }
         }

@@ -120,6 +120,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
         if (this.peerRegistry != null) {
             this.peerRegistry = new PeerRegistry(newBrokerId);
         }
+
+        if (this.lanDiscoveryService != null) {
+            this.lanDiscoveryService.setBrokerId(newBrokerId);
+        }
     }
 
     /**

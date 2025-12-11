@@ -29,12 +29,20 @@ public class LanDiscoveryService {
     private final PeerRegistry peerRegistry;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    private volatile int currentBrokerId;
+
     private DatagramSocket socket;
     private Thread listenerThread;
 
     public LanDiscoveryService(BrokerConfig brokerConfig, PeerRegistry peerRegistry) {
         this.brokerConfig = brokerConfig;
         this.peerRegistry = peerRegistry;
+        this.currentBrokerId = brokerConfig.getBrokerId();
+    }
+
+    public void setBrokerId(int brokerId) {
+        this.currentBrokerId = brokerId;
+        System.out.println("[LanDiscovery] Updated local brokerId to " + brokerId);
     }
 
     /**
@@ -139,7 +147,7 @@ public class LanDiscoveryService {
             "%s;%s;%d;%s;%d;%s",
             MAGIC,
             TYPE_HELLO,
-            brokerConfig.getBrokerId(),
+            this.currentBrokerId,
             brokerConfig.getBrokerHost(),
             brokerConfig.getBrokerPort(),
             brokerConfig.isSequencer()
