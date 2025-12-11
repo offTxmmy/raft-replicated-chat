@@ -3,7 +3,6 @@ package it.polimi.ds.chat.client;
 import it.polimi.ds.chat.messages.HeartbeatMessage;
 
 import java.io.ObjectOutputStream;
-import java.io.PrintWriter;
 
 /**
  * Manages the heartbeat mechanism on the client side.
@@ -65,7 +64,7 @@ public class ClientHeartbeatManager implements Runnable {
      * @param timestamp the timestamp of the acknowledged heartbeat
      */
     public synchronized void onHeartbeatAck(long timestamp) {
-        // System.out.println("[HB] ACK ricevuto per heartbeat " + timestamp);
+        //System.out.println("[HB] ACK ricevuto per heartbeat " + timestamp + " → azzero contatore (consecutiveMissed da " + consecutiveMissed + " a 0)");
         consecutiveMissed = 0;
     }
 
@@ -81,10 +80,14 @@ public class ClientHeartbeatManager implements Runnable {
 
                 HeartbeatMessage hb = new HeartbeatMessage(ts);
 
+                //System.out.println("[HB] Invio heartbeat ts=" + ts);
                 out.writeObject(hb);
+                out.flush();
+
                 boolean triggerFailure = false;
                 synchronized (this) {
                     consecutiveMissed++;
+                    //System.out.println("[HB] Heartbeat inviato. consecutiveMissed = " + consecutiveMissed);
                     if (consecutiveMissed >= MAX_MISSED_HEARTBEATS) {
                         triggerFailure = true;
                         running = false;
@@ -109,6 +112,12 @@ public class ClientHeartbeatManager implements Runnable {
             }
         } catch (Exception e) {
             System.err.println("[HB] Errore nel thread heartbeat: " + e.getMessage());
+            //e.printStackTrace(); //PROVO A NON PRINTARE LO STACKTRACEQUI
+            if (failureHandler != null) {
+                //System.err.println("[HB] Invoco failureHandler a causa di eccezione nel heartbeat.");
+                failureHandler.onHeartbeatFailure();
+            }
         }
     }
+
 }

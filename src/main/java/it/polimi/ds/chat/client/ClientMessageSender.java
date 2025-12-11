@@ -1,17 +1,23 @@
 package it.polimi.ds.chat.client;
 
-import java.io.ObjectOutputStream;
 import java.io.IOException;
+import java.io.ObjectOutputStream;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Handles sending user messages to the server and retransmitting messages that have not yet been acknowledged (ACKed).
+ * Handles sending user messages to the server and retransmitting messages that have not yet been
+ * acknowledged (ACKed).
  * Maintains a pending message queue and manages retransmission based on ACK timeouts.
  */
 public class ClientMessageSender implements Runnable {
 
-    private final ObjectOutputStream out;
+    /**
+     * Output stream verso il broker corrente.
+     * Può cambiare nel tempo in caso di riconnessione a un nuovo broker.
+     */
+    private volatile ObjectOutputStream out;
+
     private final long ackTimeoutMs;
     private final Map<Long, ClientPendingMessage> pendingMessages = new ConcurrentHashMap<>();
 
@@ -20,12 +26,25 @@ public class ClientMessageSender implements Runnable {
     /**
      * Constructs a ClientMessageSender.
      *
-     * @param out         the ObjectOutputStream to send messages to the server
+     * @param out          the ObjectOutputStream to send messages to the server
      * @param ackTimeoutMs the timeout in milliseconds to wait for an ACK before retransmitting
      */
     public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs) {
         this.out = out;
         this.ackTimeoutMs = ackTimeoutMs;
+    }
+
+    /**
+     * Updates the ObjectOutputStream used to send messages.
+     * <p>
+     * Questo metodo viene chiamato dopo una riconnessione a un nuovo broker.
+     * I messaggi pendenti rimangono nella mappa e saranno ritrasmessi usando il nuovo stream.
+     *
+     * @param newOut the new ObjectOutputStream to use
+     */
+    public synchronized void updateOutputStream(ObjectOutputStream newOut) {
+        System.out.println("[SEND] Aggiornato ObjectOutputStream verso nuovo broker.");
+        this.out = newOut;
     }
 
     /**
@@ -40,9 +59,15 @@ public class ClientMessageSender implements Runnable {
         ClientPendingMessage pm = new ClientPendingMessage(timestamp, wireLine);
         pendingMessages.put(timestamp, pm);
 
+        ObjectOutputStream currentOut = this.out;
+        if (currentOut == null) {
+            System.err.println("[SEND] Impossibile inviare: stream nullo (nessun broker connesso).");
+            return;
+        }
+
         try {
-            out.writeObject(wireLine);
-            out.flush();
+            currentOut.writeObject(wireLine);
+            currentOut.flush();
         } catch (IOException e) {
             System.err.println("[SEND] Errore invio messaggio: " + e.getMessage());
         }
@@ -68,11 +93,10 @@ public class ClientMessageSender implements Runnable {
      */
     public void handleAck(long timestamp) {
         ClientPendingMessage removed = pendingMessages.remove(timestamp);
-        if (removed != null) {
-            //System.out.println("[ACK] Confermato messaggio con timestamp " + timestamp);
-        } else {
+        if (removed == null) {
             System.out.println("[ACK] Ricevuto ACK per timestamp sconosciuto: " + timestamp);
         }
+        // Se removed != null, il messaggio è stato confermato e rimosso dai pendenti.
     }
 
     /**
@@ -95,9 +119,15 @@ public class ClientMessageSender implements Runnable {
                 for (ClientPendingMessage pm : pendingMessages.values()) {
                     long elapsed = now - pm.getLastSendTime();
                     if (elapsed >= ackTimeoutMs) {
+                        ObjectOutputStream currentOut = this.out;
+                        if (currentOut == null) {
+                            System.err.println("[RETRY] Impossibile ritrasmettere: stream nullo.");
+                            continue;
+                        }
+
                         try {
-                            out.writeObject(pm.getWireLine());
-                            out.flush();
+                            currentOut.writeObject(pm.getWireLine());
+                            currentOut.flush();
                             pm.updateLastSendTime();
                             System.out.println("[RETRY] Ritrasmesso messaggio con timestamp " + pm.getTimestamp());
                         } catch (IOException e) {
@@ -109,7 +139,6 @@ public class ClientMessageSender implements Runnable {
                 try {
                     Thread.sleep(100); // intervallo di polling
                 } catch (InterruptedException e) {
-                    // interrompiamo il thread
                     running = false;
                     Thread.currentThread().interrupt();
                 }

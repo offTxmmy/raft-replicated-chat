@@ -60,6 +60,9 @@ public class ClientMessageReceiver implements Runnable {
                 Object obj = in.readObject();
                 if (obj instanceof HeartbeatAckMessage) {
                     HeartbeatAckMessage ack = (HeartbeatAckMessage) obj;
+
+                    //System.out.println("[HB] ACK ricevuto dal broker (ts=" + ack.getTimestamp() + ", brokerId=" + ack.getBrokerId() + ")");
+
                     if (heartbeatManager != null) {
                         heartbeatManager.onHeartbeatAck(ack.getTimestamp());
                     }
