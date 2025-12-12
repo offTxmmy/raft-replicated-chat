@@ -16,6 +16,8 @@ import java.net.SocketException;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Broker node in the replicated chat infrastructure.
@@ -67,6 +69,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
+
+    // Latch to synchronize startup with ID assignment
+    private final CountDownLatch brokerIdLatch = new CountDownLatch(1);
 
     /**
      * Construct a broker with the given configuration.
@@ -124,6 +129,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
         if (this.lanDiscoveryService != null) {
             this.lanDiscoveryService.setBrokerId(newBrokerId);
         }
+
+        // Signal that thet ID is assigned, allowing start() to proceed
+        brokerIdLatch.countDown();
     }
 
     /**
@@ -214,14 +222,22 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @throws IOException if the server socket cannot be opened
      */
     public void start() throws IOException {
-        // Start the ordering service (handles sequencer connections)
+        // Start the ordering service
         orderingService.start();
 
-        // Wait a bit for follower to get broker ID from sequencer
+        // Wait for follower to get broker ID from sequencer
         if (!config.isSequencer()) {
+            System.out.println("[Broker] Waiting for ID assignment from Sequencer...");
             try {
-                Thread.sleep(500); // Allow time for connection and ID assignment
-            } catch (InterruptedException ignored) {}
+                boolean assigned = brokerIdLatch.await(10, TimeUnit.SECONDS);
+
+                if (!assigned){
+                    throw new IOException("Failed to obtain Broker ID from Sequencer within timeout. Cannot start.");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Interrupted while waiting for Broker ID.", e);
+            }
         }
 
         // Connect to directory service, register, and start sending heartbeats
@@ -331,6 +347,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Deliver all ready messages to local clients
         for (ChatDeliverMessage msg : readyMessages) {
             onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getText());
+        }
+
+        synchronized(this) {
+            this.vectorClock.update(chatDeliver.getVectorClock());
         }
 
         // Log if messages are being held back

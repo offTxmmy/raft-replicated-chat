@@ -5,11 +5,9 @@ import it.polimi.ds.chat.broker.PeerRegistry;
 import it.polimi.ds.chat.messages.PeerInfo;
 
 import java.io.IOException;
-import java.net.DatagramPacket;
-import java.net.DatagramSocket;
-import java.net.InetAddress;
-import java.net.SocketException;
+import java.net.*;
 import java.nio.charset.StandardCharsets;
+import java.util.Enumeration;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -129,7 +127,7 @@ public class LanDiscoveryService {
             return;
         }
 
-        String host = parts[5];
+        String host = parts[3];
         int port = Integer.parseInt(parts[4]);
         boolean isSequencer = Boolean.parseBoolean(parts[5]);
 
@@ -160,18 +158,39 @@ public class LanDiscoveryService {
             ds.setBroadcast(true);
             byte[] data = msg.getBytes(StandardCharsets.UTF_8);
 
-            // Simple global broadcast
-            DatagramPacket packet = new DatagramPacket(
-                    data,
-                    data.length,
-                    InetAddress.getByName("255.255.255.255"),
-                    brokerConfig.getUdpPort()
-            );
+            // Iterate over all network interfaces
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                NetworkInterface networkInterface = interfaces.nextElement();
 
-            ds.send(packet);
-            System.out.println("[LanDiscovery] Sent HELLO broadcast: " + msg);
+                // Skip loopback (localhost) or down interfaces
+                if (networkInterface.isLoopback() || !networkInterface.isUp()) {
+                    continue;
+                }
+
+                // Iterate over addresses associated with this interface
+                for (InterfaceAddress interfaceAddress : networkInterface.getInterfaceAddresses()) {
+                    InetAddress broadcast = interfaceAddress.getBroadcast();
+
+                    // If this interface has a valid broadcast address, send the packet
+                    if (broadcast != null) {
+                        try {
+                            DatagramPacket packet = new DatagramPacket(
+                                    data,
+                                    data.length,
+                                    broadcast,
+                                    brokerConfig.getUdpPort()
+                            );
+                            ds.send(packet);
+                        } catch (IOException e) {
+                            System.err.println("[LanDiscovery] Failed to send to " + broadcast + ": " + e.getMessage());
+                        }
+                    }
+                }
+            }
+            System.out.println("[LanDiscovery] Sent HELLO broadcast to all interfaces: " + msg);
         } catch (IOException e) {
-            System.err.println("[LanDiscovery] Failed to send broadcast: " + e.getMessage());
+            System.err.println("[LanDiscovery] Failed to initialize broadcast socket: " + e.getMessage());
         }
     }
 }
