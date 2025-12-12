@@ -4,11 +4,10 @@ import it.polimi.ds.chat.broker.BrokerConfig;
 import it.polimi.ds.chat.broker.HandlerState;
 import it.polimi.ds.chat.messages.*;
 
-import java.io.IOException;
-import java.io.ObjectInputStream;
-import java.io.ObjectOutputStream;
-import java.net.ServerSocket;
-import java.net.Socket;
+import javax.xml.crypto.Data;
+import java.io.*;
+import java.net.*;
+import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -57,6 +56,11 @@ public class SequencerOrderingService implements OrderingService {
     private ObjectOutputStream sequencerOut;
     private ObjectInputStream sequencerIn;
 
+    // UDP Data Channel
+    private DatagramSocket dataUdpSocket;
+    private final int dataUdpPort;
+    private static final int MAX_UDP_PACKET_SIZE = 65507;
+
     private volatile boolean running = false;
     private ServerSocket serverSocket;
 
@@ -69,6 +73,8 @@ public class SequencerOrderingService implements OrderingService {
     public SequencerOrderingService(BrokerConfig config, int localBrokerId) {
         this.config = config;
         this.localBrokerId = localBrokerId;
+        // Use a distinct port for data to avoid conflict with LanDiscovery (udpPort)
+        this.dataUdpPort = config.getUdpPort() + 1;
     }
 
     /**
@@ -98,11 +104,24 @@ public class SequencerOrderingService implements OrderingService {
     public void start() {
         running = true;
 
+        // Initialize UDP Socket for Data
+        try {
+            this.dataUdpSocket = new DatagramSocket(null);
+            this.dataUdpSocket.setReuseAddress(true);
+            this.dataUdpSocket.bind(new InetSocketAddress(dataUdpPort));
+            this.dataUdpSocket.setBroadcast(true);
+            System.out.println("[OrderingService] UDP Data channel bound to port " + dataUdpPort);
+        } catch (SocketException e) {
+            System.err.println("[OrderingService] Failed to bind UDP Data socket: " + e.getMessage());
+        }
+
         if (config.isSequencer()) {
             startSequencerListener();
             startHeartbeatReaper();
         } else {
             connectToSequencer();
+            // Followers must listen for UDP broadcasts
+            startUdpDataListener();
         }
     }
 
@@ -127,6 +146,11 @@ public class SequencerOrderingService implements OrderingService {
             } catch (IOException ignored) {}
         }
 
+        // Close UDP
+        if (dataUdpSocket != null) {
+            dataUdpSocket.close();
+        }
+
         // Close all broker connections if sequencer
         synchronized (brokerConnections) {
             for (Socket socket : brokerConnections.values()) {
@@ -149,10 +173,8 @@ public class SequencerOrderingService implements OrderingService {
     @Override
     public void propose(ChatReqMessage request) {
         if (config.isSequencer()) {
-            // Handle\ locally - assign sequence and deliver
             handleChatRequest(request);
         } else {
-            // Forward to sequencer
             sendToSequencer(request);
         }
     }
@@ -211,8 +233,8 @@ public class SequencerOrderingService implements OrderingService {
         // Deliver locally first
         notifyDelivery(deliver);
 
-        // Broadcast to all connected brokers
-        broadcastToAllBrokers(deliver);
+        // Broadcast via UDP to all brokers
+        broadcastViaUdp(deliver);
 
         // Send ACK to the originating broker
         sendToBroker(chatReq.getBrokerId(), new ChatReqAck(chatReq.getLocalMsgId(), seq));
@@ -234,20 +256,38 @@ public class SequencerOrderingService implements OrderingService {
     }
 
     /**
-     * Broadcasts a message to all connected brokers.
-     *
-     * @param message the broker message to broadcast
+     * Serializes the message and broadcasts it to all network interfaces.
      */
-    private void broadcastToAllBrokers(BrokerMessage message) {
-        synchronized (brokerOutStreams) {
-            for (Map.Entry<Integer, ObjectOutputStream> entry : brokerOutStreams.entrySet()) {
-                try {
-                    entry.getValue().writeObject(message);
-                    entry.getValue().flush();
-                } catch (IOException e) {
-                    System.err.println("Failed to send message to broker " + entry.getKey() + ": " + e.getMessage());
+    private void broadcastViaUdp(ChatDeliverMessage message) {
+        if (dataUdpSocket == null) return;
+
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream();
+             ObjectOutputStream out = new ObjectOutputStream(bos)) {
+
+            out.writeObject(message);
+            out.flush();
+            byte[] data = bos.toByteArray();
+
+            // Send to all broadcast addresses found on interfaces
+            Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+            while (interfaces.hasMoreElements()) {
+                NetworkInterface networkInterface = interfaces.nextElement();
+                if (networkInterface.isLoopback() || !networkInterface.isUp()) continue;
+
+                for (InterfaceAddress interfaceAddress : networkInterface.getInterfaceAddresses()) {
+                    InetAddress broadcast = interfaceAddress.getBroadcast();
+                    if (broadcast != null) {
+                        try {
+                            DatagramPacket packet = new DatagramPacket(data, data.length, broadcast, dataUdpPort);
+                            dataUdpSocket.send(packet);
+                        } catch (IOException e) {
+                        }
+                    }
                 }
             }
+
+        } catch (IOException e) {
+            System.err.println("[Sequencer] Failed to broadcast UDP packet: " + e.getMessage());
         }
     }
 
@@ -277,6 +317,45 @@ public class SequencerOrderingService implements OrderingService {
     }
 
     // =========================================================================
+    // FOLLOWER LOGIC (UDP LISTENER)
+    // =========================================================================
+
+    private void startUdpDataListener() {
+        Thread udpThread = new Thread(() -> {
+            byte[] buffer = new byte[MAX_UDP_PACKET_SIZE];
+            System.out.println("[OrderingService] Started UDP Data Listener...");
+
+            while (running) {
+                try {
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                    dataUdpSocket.receive(packet);
+
+                    try (ByteArrayInputStream bis = new ByteArrayInputStream(packet.getData(), 0, packet.getLength());
+                         ObjectInputStream in = new ObjectInputStream(bis)) {
+
+                        Object obj = in.readObject();
+                        if (obj instanceof ChatDeliverMessage deliver) {
+                            notifyDelivery(deliver);
+                        } else {
+                            System.err.println("[OrderingService] Received unknown UDP message: " + obj);
+                        }
+                    } catch (ClassNotFoundException e) {
+                        System.err.println("[OrderingService] Failed to deserialize UDP message: " + e.getMessage());
+
+                    }
+                } catch (IOException e) {
+                    if (running) {
+                        System.err.println("[OrderingService] UDP Receive error: " + e.getMessage());
+                    }
+                }
+            }
+        }, "OrderingService-UDPListener");
+
+        udpThread.setDaemon(true);
+        udpThread.start();
+    }
+
+    // =========================================================================
     // SEQUENCER NETWORK LISTENER
     // =========================================================================
 
@@ -292,8 +371,6 @@ public class SequencerOrderingService implements OrderingService {
 
                 while (running) {
                     Socket brokerSocket = serverSocket.accept();
-                    System.out.println("[OrderingService] New broker connection from " + brokerSocket.getRemoteSocketAddress());
-
                     handleNewBrokerConnection(brokerSocket);
                 }
             } catch (IOException e) {
@@ -321,7 +398,6 @@ public class SequencerOrderingService implements OrderingService {
             // First message must be BrokerJoinMessage
             Object obj = in.readObject();
             if (!(obj instanceof BrokerJoinMessage joinMsg)) {
-                System.err.println("[OrderingService] Unexpected first message: " + obj);
                 brokerSocket.close();
                 return;
             }
@@ -372,8 +448,6 @@ public class SequencerOrderingService implements OrderingService {
                         }
                     } else if (msg instanceof ChatReqMessage chatReq) {
                         handleChatRequest(chatReq);
-                    } else {
-                        System.out.println("[OrderingService] Unknown message from broker " + brokerId + ": " + msg);
                     }
                 }
             } catch (IOException | ClassNotFoundException e) {
@@ -400,7 +474,6 @@ public class SequencerOrderingService implements OrderingService {
             brokerOutStreams.remove(brokerId);
             brokerInStreams.remove(brokerId);
             lastHeartbeats.remove(brokerId);
-
             if (socket != null) {
                 try {
                     socket.close();
@@ -418,7 +491,6 @@ public class SequencerOrderingService implements OrderingService {
             while (running) {
                 try {
                     TimeUnit.SECONDS.sleep(5);
-
                     long now = System.currentTimeMillis();
                     synchronized (lastHeartbeats) {
                         for (Map.Entry<Integer, Long> entry : Map.copyOf(lastHeartbeats).entrySet()) {
@@ -453,7 +525,6 @@ public class SequencerOrderingService implements OrderingService {
 
             System.out.println("[OrderingService] Connecting to sequencer at " + host + ":" + port);
             sequencerSocket = new Socket(host, port);
-
             sequencerOut = new ObjectOutputStream(sequencerSocket.getOutputStream());
             sequencerOut.flush();
             sequencerIn = new ObjectInputStream(sequencerSocket.getInputStream());
@@ -496,10 +567,12 @@ public class SequencerOrderingService implements OrderingService {
                 while (running) {
                     Object msg = sequencerIn.readObject();
 
-                    if (msg instanceof ChatDeliverMessage deliver) {
-                        notifyDelivery(deliver);
-                    } else if (msg instanceof ChatReqAck ack) {
-                        System.out.println("[OrderingService] Received ACK for " + ack.getLocalMsgId());
+                    if (msg instanceof ChatReqAck ack) {
+                        // Received confirmation that my request was ordered
+                        // System.out.println("Ack for msg: " + ack.getLocalMsgId());
+                    } else if (msg instanceof ChatDeliverMessage) {
+                        // Just in case we receive it via TCP (legacy fallback support?)
+                        notifyDelivery((ChatDeliverMessage)msg);
                     }
                 }
             } catch (IOException | ClassNotFoundException e) {
