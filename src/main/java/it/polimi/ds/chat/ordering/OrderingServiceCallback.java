@@ -12,7 +12,7 @@ public interface OrderingServiceCallback {
      *
      * @param brokerId The assigned broker ID
      */
-    void onBrokerIdAssigned(int brokerId);
+    void onBrokerIdAssigned(int brokerId, long currentSeq);
 
     /**
      * Called when connection to the ordering service is lost.

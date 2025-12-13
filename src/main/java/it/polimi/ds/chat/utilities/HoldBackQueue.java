@@ -158,6 +158,17 @@ public class HoldBackQueue {
     }
 
     /**
+     * Updates the expected sequence number directly.
+     * Used when a broker joins an existing cluster and needs to sync state.
+     *
+     * @param seq the current global sequence number (next expected will be seq + 1)
+     */
+    public synchronized void syncToSequence(long seq) {
+        this.expectedSeq = seq + 1;
+        System.out.println("[HoldBackQueue] Synced state. Fast-forwarding expectedSeq to " + expectedSeq);
+    }
+
+    /**
      * Get the current expected sequence number.
      *
      * @return the next expected sequence number

@@ -117,9 +117,12 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param newBrokerId the broker id assigned by the ordering service
      */
     @Override
-    public void onBrokerIdAssigned(int newBrokerId) {
+    public void onBrokerIdAssigned(int newBrokerId, long currentSeq) {
         System.out.println("[Broker] Broker ID updated from " + this.brokerId + " to " + newBrokerId);
+        System.out.println("[Broker] Syncing sequence number to " + currentSeq);
+
         this.brokerId = newBrokerId;
+        this.holdBackQueue.syncToSequence(currentSeq);
 
         // Update peer registry with new broker ID
         if (this.peerRegistry != null) {
@@ -341,6 +344,24 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param chatDeliver message delivered by the ordering service (contains global seq)
      */
     public void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
+        long incomingSeq = chatDeliver.getSeq();
+        long expectedSeq = holdBackQueue.getExpectedSeq();
+
+        // Check for Gaps (Reliability Layer)
+        if (incomingSeq > expectedSeq) {
+            System.out.println("[Broker " + brokerId + "] Gap detected! Received seq = " + incomingSeq + ", expected = " + expectedSeq);
+
+            if (orderingService instanceof SequencerOrderingService) {
+                SequencerOrderingService seqService = (SequencerOrderingService) orderingService;
+
+                // Ask for all missing messages
+                for (long seq = expectedSeq; seq < incomingSeq; seq++) {
+                    System.out.println("[Broker " + brokerId + "] Requesting retransmission for missing seq = " + seq);
+                    seqService.requestRetransmission(seq);
+                }
+            }
+        }
+
         // Enqueue message and get all messages ready for delivery
         List<ChatDeliverMessage> readyMessages = holdBackQueue.enqueue(chatDeliver);
 
@@ -351,12 +372,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
         synchronized(this) {
             this.vectorClock.update(chatDeliver.getVectorClock());
-        }
-
-        // Log if messages are being held back
-        if (holdBackQueue.hasPendingMessages()) {
-            System.out.println("[Broker " + brokerId + "] " + holdBackQueue.getPendingCount() +
-                    " message(s) held back, waiting for seq=" + holdBackQueue.getExpectedSeq());
         }
     }
 

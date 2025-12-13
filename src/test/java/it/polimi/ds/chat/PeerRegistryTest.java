@@ -48,7 +48,7 @@ public class PeerRegistryTest {
     @Test
     @DisplayName("PeerRegistry initializes correctly")
     void testPeerRegistryInitialization() {
-        PeerRegistry registry = new PeerRegistry(1, "localhost", 60001);
+        PeerRegistry registry = new PeerRegistry(1);
 
         assertEquals(0, registry.getPeerCount(), "Initially no peers");
         assertEquals(0, registry.getClusterSize(), "Initially cluster size is 0");
@@ -65,7 +65,7 @@ public class PeerRegistryTest {
         // 4 nodes: quorum = 3
         // 5 nodes: quorum = 3
 
-        PeerRegistry registry = new PeerRegistry(0, "localhost", 60001);
+        PeerRegistry registry = new PeerRegistry( 1);
 
         // With 0 nodes, quorum is 1 (0/2 + 1)
         assertEquals(1, registry.getQuorumSize());
@@ -85,7 +85,7 @@ public class PeerRegistryTest {
     @Test
     @DisplayName("PeerRegistry listener registration works")
     void testPeerChangeListener() {
-        PeerRegistry registry = new PeerRegistry(1, "localhost", 60001);
+        PeerRegistry registry = new PeerRegistry(1);
 
         final boolean[] listenerCalled = {false};
         registry.addPeerChangeListener(peers -> listenerCalled[0] = true);

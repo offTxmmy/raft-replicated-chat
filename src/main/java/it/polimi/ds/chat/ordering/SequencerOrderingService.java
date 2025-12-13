@@ -10,6 +10,7 @@ import java.net.*;
 import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
@@ -39,19 +40,19 @@ public class SequencerOrderingService implements OrderingService {
     // Callback for broker events
     private OrderingServiceCallback callback;
 
-    // Global sequence counter (only used if this is the sequencer)
+    // Global sequence counter
     private long globalSeq = 0;
 
     // Callbacks to notify when messages are ready for delivery
     private final CopyOnWriteArrayList<Consumer<ChatDeliverMessage>> deliveryCallbacks = new CopyOnWriteArrayList<>();
 
-    // Broker connections (only used by sequencer)
+    // TCP Connections
     private final Map<Integer, Socket> brokerConnections = new HashMap<>();
     private final Map<Integer, ObjectOutputStream> brokerOutStreams = new HashMap<>();
     private final Map<Integer, ObjectInputStream> brokerInStreams = new HashMap<>();
     private final Map<Integer, Long> lastHeartbeats = new HashMap<>();
 
-    // Connection to sequencer (only used by non-sequencer brokers)
+    // // Follower connection to sequencer
     private Socket sequencerSocket;
     private ObjectOutputStream sequencerOut;
     private ObjectInputStream sequencerIn;
@@ -60,6 +61,10 @@ public class SequencerOrderingService implements OrderingService {
     private DatagramSocket dataUdpSocket;
     private final int dataUdpPort;
     private static final int MAX_UDP_PACKET_SIZE = 65507;
+
+    // Reliability layer: message history
+    private final Map<Long, ChatDeliverMessage> messageHistory = new ConcurrentHashMap<>();
+    private static final int HISTORY_SIZE = 1000;
 
     private volatile boolean running = false;
     private ServerSocket serverSocket;
@@ -136,14 +141,16 @@ public class SequencerOrderingService implements OrderingService {
         if (serverSocket != null) {
             try {
                 serverSocket.close();
-            } catch (IOException ignored) {}
+            } catch (IOException ignored) {
+            }
         }
 
         // Close sequencer connection if follower
         if (sequencerSocket != null) {
             try {
                 sequencerSocket.close();
-            } catch (IOException ignored) {}
+            } catch (IOException ignored) {
+            }
         }
 
         // Close UDP
@@ -156,7 +163,8 @@ public class SequencerOrderingService implements OrderingService {
             for (Socket socket : brokerConnections.values()) {
                 try {
                     socket.close();
-                } catch (IOException ignored) {}
+                } catch (IOException ignored) {
+                }
             }
             brokerConnections.clear();
             brokerOutStreams.clear();
@@ -209,6 +217,25 @@ public class SequencerOrderingService implements OrderingService {
         return config.isSequencer() ? localBrokerId : 0; // Sequencer is always broker 0
     }
 
+    /**
+     * Called by the Broker when it detects a gap in sequence numbers.
+     * Sends a NACK to the Sequencer via TCP.
+     */
+    public void requestRetransmission(long missingSeq) {
+        if (config.isSequencer()) return;
+
+        RetransmissionRequestMessage nack = new RetransmissionRequestMessage(missingSeq);
+
+        if (sequencerOut != null) {
+            try {
+                sequencerOut.writeObject(nack);
+                sequencerOut.flush();
+            } catch (IOException e) {
+                System.err.println("[OrderingService] Failed to send NACK: " + e.getMessage());
+            }
+        }
+    }
+
     // =========================================================================
     // SEQUENCER LOGIC
     // =========================================================================
@@ -230,14 +257,45 @@ public class SequencerOrderingService implements OrderingService {
                 chatReq.getVectorClock()
         );
 
-        // Deliver locally first
+        // Save to history for NACKs
+        addToHistory(seq, deliver);
+
+        // Deliver locally, Broadcast UDP and ACK TCP
         notifyDelivery(deliver);
-
-        // Broadcast via UDP to all brokers
         broadcastViaUdp(deliver);
-
-        // Send ACK to the originating broker
         sendToBroker(chatReq.getBrokerId(), new ChatReqAck(chatReq.getLocalMsgId(), seq));
+    }
+
+    /**
+     * Adds a message to the history for potential retransmission.
+     *
+     * @param seq the sequence number
+     * @param msg the chat deliver message
+     */
+    private void addToHistory(long seq, ChatDeliverMessage msg) {
+        messageHistory.put(seq, msg);
+
+        // Simple cleanup
+        if (seq % 100 == 0) {
+            long cutoff = seq - HISTORY_SIZE;
+            messageHistory.keySet().removeIf(key -> key < cutoff);
+        }
+    }
+
+    /**
+     * Handles a retransmission request (NACK) from a broker.
+     *
+     * @param brokerId   the requesting broker ID
+     * @param missingSeq the missing sequence number
+     */
+    private void handleRetransmissionRequest(int brokerId, long missingSeq) {
+        ChatDeliverMessage msg = messageHistory.get(missingSeq);
+        if (msg != null) {
+            System.out.println("[Reliability] Resending seq = " + missingSeq + " to broker " + brokerId + " (TCP)");
+            sendToBroker(brokerId, msg);
+        } else {
+            System.err.println("[Reliability] Cannot satisfy NACK for seq=" + missingSeq + " (not in history)");
+        }
     }
 
     /**
@@ -280,7 +338,7 @@ public class SequencerOrderingService implements OrderingService {
                         try {
                             DatagramPacket packet = new DatagramPacket(data, data.length, broadcast, dataUdpPort);
                             dataUdpSocket.send(packet);
-                        } catch (IOException e) {
+                        } catch (IOException ignored) {
                         }
                     }
                 }
@@ -408,7 +466,7 @@ public class SequencerOrderingService implements OrderingService {
             System.out.println("[OrderingService] Assigned broker ID " + newBrokerId);
 
             // Send acknowledgment
-            out.writeObject(new BrokerJoinAck(newBrokerId));
+            out.writeObject(new BrokerJoinAck(newBrokerId, globalSeq));
             out.flush();
 
             // Register connection
@@ -426,7 +484,8 @@ public class SequencerOrderingService implements OrderingService {
             System.err.println("[OrderingService] Error handling broker connection: " + e.getMessage());
             try {
                 brokerSocket.close();
-            } catch (IOException ignored) {}
+            } catch (IOException ignored) {
+            }
         }
     }
 
@@ -448,12 +507,12 @@ public class SequencerOrderingService implements OrderingService {
                         }
                     } else if (msg instanceof ChatReqMessage chatReq) {
                         handleChatRequest(chatReq);
+                    } else if (msg instanceof RetransmissionRequestMessage nack) {
+                        handleRetransmissionRequest(brokerId, nack.getMissingSeq());
                     }
                 }
             } catch (IOException | ClassNotFoundException e) {
-                if (running) {
-                    System.err.println("[OrderingService] Broker " + brokerId + " disconnected: " + e.getMessage());
-                }
+                removeBroker(brokerId);
             } finally {
                 removeBroker(brokerId);
             }
@@ -477,7 +536,8 @@ public class SequencerOrderingService implements OrderingService {
             if (socket != null) {
                 try {
                     socket.close();
-                } catch (IOException ignored) {}
+                } catch (IOException ignored) {
+                }
             }
         }
         System.out.println("[OrderingService] Broker " + brokerId + " removed");
@@ -545,7 +605,7 @@ public class SequencerOrderingService implements OrderingService {
 
                 // Notify callback of broker ID assignment
                 if (callback != null) {
-                    callback.onBrokerIdAssigned(ack.getBrokerId());
+                    callback.onBrokerIdAssigned(ack.getBrokerId(), ack.getCurrentSequenceNumber());
                     callback.onConnectionEstablished();
                 }
             }
@@ -572,7 +632,7 @@ public class SequencerOrderingService implements OrderingService {
                         // System.out.println("Ack for msg: " + ack.getLocalMsgId());
                     } else if (msg instanceof ChatDeliverMessage) {
                         // Just in case we receive it via TCP (legacy fallback support?)
-                        notifyDelivery((ChatDeliverMessage)msg);
+                        notifyDelivery((ChatDeliverMessage) msg);
                     }
                 }
             } catch (IOException | ClassNotFoundException e) {
@@ -623,18 +683,4 @@ public class SequencerOrderingService implements OrderingService {
             }
         }
     }
-
-    /**
-     * Gets the assigned broker ID after connecting to sequencer.
-     * For sequencer, returns local broker ID.
-     * For followers, should be called after connection is established.
-     *
-     * @return the assigned broker ID
-     */
-    public int getAssignedBrokerId() {
-        // For sequencer, return local broker ID
-        // For followers, this should be called after connection is established
-        return localBrokerId;
-    }
 }
-
