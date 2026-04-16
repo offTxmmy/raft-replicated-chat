@@ -1,0 +1,35 @@
+package it.polimi.ds.chat.messages.raft;
+
+/**
+ * Raft RPC sent by a candidate to request a vote.
+ */
+public class RequestVoteRequestMessage {
+
+    private final long term;
+    private final int candidateId;
+    private final long lastLogIndex;
+    private final long lastLogTerm;
+
+    public RequestVoteRequestMessage(long term, int candidateId, long lastLogIndex, long lastLogTerm) {
+        this.term = term;
+        this.candidateId = candidateId;
+        this.lastLogIndex = lastLogIndex;
+        this.lastLogTerm = lastLogTerm;
+    }
+
+    public long getTerm() {
+        return term;
+    }
+
+    public int getCandidateId() {
+        return candidateId;
+    }
+
+    public long getLastLogIndex() {
+        return lastLogIndex;
+    }
+
+    public long getLastLogTerm() {
+        return lastLogTerm;
+    }
+}
