@@ -236,8 +236,8 @@ public class RaftNode {
     private boolean isCandidateLogUpToDate(RequestVoteRequestMessage request, RaftLogMetadata logMetadata) {
         // PERSON B INTEGRATION:
         // Here we are using the two methods that must come from Person B's log implementation:
-        // - getLastLogTerm()
-        // - getLastLogIndex()
+        // - lastLogTerm()
+        // - lastLogIndex()
         long localLastLogTerm = logMetadata.lastLogTerm();
         long localLastLogIndex = logMetadata.lastLogIndex();
 
