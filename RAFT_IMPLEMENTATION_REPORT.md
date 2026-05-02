@@ -431,6 +431,20 @@ This section should be treated as the practical implementation guide for the 3-p
 - **~40% of total**
 - Most critical part for global order correctness
 
+### Person B – progress update (May 2, 2026)
+
+**Implemented so far:**
+- `RaftLog` with append, conflict handling, log metadata, and consistent log-tip snapshot via `snapshotMetadata()`.
+- `RaftCommitManager` with ordered apply and leader commit rule (current-term requirement).
+- `RaftPeerReplicationState` (per-follower `nextIndex`/`matchIndex` tracking).
+- Raft RPC DTOs for `AppendEntriesRequest` / `AppendEntriesResponse`.
+- `ChatCommand` payload and `RaftLogEntry` updated to carry it.
+- Unit tests for `RaftLog`, `RaftCommitManager`, `RaftPeerReplicationState`, and AppendEntries DTOs.
+
+**Still missing (core replication logic):**
+- Follower-side AppendEntries handling that validates `prevLogIndex`/`prevLogTerm`, appends entries, updates commit index, and returns a correct `AppendEntriesResponse`.
+- Leader-side replication driver that uses `RaftPeerReplicationState`, sends AppendEntries, backtracks on conflicts, updates `matchIndex`, and advances commit with majority.
+
 ---
 
 ## Person C – **Integration, Persistence & QA Owner**
