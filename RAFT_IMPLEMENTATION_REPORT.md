@@ -441,9 +441,16 @@ This section should be treated as the practical implementation guide for the 3-p
 - `ChatCommand` payload and `RaftLogEntry` updated to carry it.
 - Unit tests for `RaftLog`, `RaftCommitManager`, `RaftPeerReplicationState`, and AppendEntries DTOs.
 
-**Still missing (core replication logic):**
-- Follower-side AppendEntries handling that validates `prevLogIndex`/`prevLogTerm`, appends entries, updates commit index, and returns a correct `AppendEntriesResponse`.
-- Leader-side replication driver that uses `RaftPeerReplicationState`, sends AppendEntries, backtracks on conflicts, updates `matchIndex`, and advances commit with majority.
+### Person B – progress update (May 5, 2026)
+
+**Implemented today:**
+- `RaftReplicationManager` with follower-side AppendEntries handling and leader-side replication driver.
+- Commit advancement driven by follower match indexes.
+- Unit tests for `RaftReplicationManager` plus a minimal `RaftCoreTest` to validate election/replication wiring.
+
+**Remaining (optional improvements):**
+- Conflict-optimized backtracking hints in AppendEntries responses (term/index hints).
+- Richer nextIndex backtracking strategy beyond decrement-by-one (M2 hardening).
 
 ---
 
@@ -466,6 +473,15 @@ This section should be treated as the practical implementation guide for the 3-p
 - do not compute quorum from `PeerRegistry` discovery state
 - do not leak sockets/TCP details into election logic
 - treat discovery as addressing/support, not as Raft membership authority
+
+**Replication integration steps (Person C):**
+- Create and start `RaftReplicationManager` alongside `RaftElectionManager` using the static voter set from config.
+- Register `RaftReplicationManager` as a `RaftElectionListener` to receive `onLeaderElected`, `onSteppedDown`, and `onHeartbeatRoundDue`.
+- Provide a `RaftLeaderActivityObserver` that forwards to `RaftElectionManager.onValidLeaderActivityObserved(...)`.
+- Route incoming AppendEntries RPCs to `RaftReplicationManager.handleAppendEntries(...)` and return the response to the caller.
+- Route AppendEntries responses to `RaftReplicationManager.handleAppendEntriesResponse(...)` on the leader.
+- Call `RaftReplicationManager.appendCommandAsLeader(...)` for leader proposals, then rely on heartbeat rounds to replicate.
+- Ensure `RaftCommitManager` apply callbacks feed the ordering service/state machine adapter.
 
 **Estimated workload:**
 - **~25% of total**
