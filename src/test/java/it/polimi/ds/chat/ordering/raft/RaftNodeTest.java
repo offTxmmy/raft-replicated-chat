@@ -142,4 +142,51 @@ class RaftNodeTest {
 
         assertThrows(IllegalStateException.class, () -> node.recordVoteFor(9));
     }
+
+    // §1.3 — getLeaderId() invariant: while CANDIDATE and after step-down without
+    // an observed leader, getLeaderId() must report NO_LEADER. Only after a real
+    // leader is observed (becomeFollower with a concrete leader id) the local
+    // node may expose that id.
+
+    @Test
+    void leaderIdShouldBeNoLeaderWhileCandidate() {
+        RaftNode node = new RaftNode(1);
+
+        node.startElection();
+
+        assertEquals(RaftRole.CANDIDATE, node.getRole());
+        assertEquals(RaftNode.NO_LEADER, node.getLeaderId());
+    }
+
+    @Test
+    void leaderIdShouldStayNoLeaderAcrossLostElectionWalk() {
+        // FOLLOWER -> CANDIDATE -> FOLLOWER (lost election, no leader observed yet)
+        RaftNode node = new RaftNode(1);
+        assertEquals(RaftNode.NO_LEADER, node.getLeaderId());
+
+        node.startElection(); // CANDIDATE, term=1
+        assertEquals(RaftNode.NO_LEADER, node.getLeaderId());
+
+        // Step down because a higher term was observed somewhere, but no leader
+        // is known yet for that term.
+        boolean steppedDown = node.stepDownIfHigherTerm(2L);
+        assertTrue(steppedDown);
+        assertEquals(RaftRole.FOLLOWER, node.getRole());
+        assertEquals(RaftNode.NO_LEADER, node.getLeaderId());
+    }
+
+    @Test
+    void leaderIdShouldReflectLeaderOnceObserved() {
+        RaftNode node = new RaftNode(1);
+
+        node.startElection(); // CANDIDATE, term=1
+        assertEquals(RaftNode.NO_LEADER, node.getLeaderId());
+
+        // Valid leader activity observed for the same term.
+        boolean accepted = node.becomeFollower(1L, 7);
+
+        assertTrue(accepted);
+        assertEquals(RaftRole.FOLLOWER, node.getRole());
+        assertEquals(7, node.getLeaderId());
+    }
 }

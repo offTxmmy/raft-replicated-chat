@@ -146,6 +146,39 @@ class RaftVoteHandlingTest {
         assertNull(node.getVotedFor());
     }
 
+    // §1.4 — Idempotence under broadcast/duplicate delivery.
+    // RequestVote may be re-delivered (UDP broadcast + retry). Two requests with
+    // the same (term, candidateId) must produce the same decision: the second
+    // delivery must not change votedFor and must still report granted=true.
+    @Test
+    void duplicateRequestVoteFromSameCandidateInSameTermShouldYieldSameDecision() {
+        RaftNode node = new RaftNode(1);
+
+        RequestVoteRequestMessage request = new RequestVoteRequestMessage(
+                2L,
+                7,
+                10L,
+                4L
+        );
+        FakeLogMetadata log = new FakeLogMetadata(8L, 4L);
+
+        RequestVoteResponseMessage first = node.handleRequestVote(request, log);
+        Integer votedForAfterFirst = node.getVotedFor();
+        long termAfterFirst = node.getCurrentTerm();
+
+        // Replay of the exact same request (duplicate broadcast).
+        RequestVoteResponseMessage second = node.handleRequestVote(request, log);
+
+        assertTrue(first.isVoteGranted());
+        assertTrue(second.isVoteGranted());
+        assertEquals(first.getTerm(), second.getTerm());
+        assertEquals(first.getVoterId(), second.getVoterId());
+
+        assertEquals(Integer.valueOf(7), votedForAfterFirst);
+        assertEquals(Integer.valueOf(7), node.getVotedFor());
+        assertEquals(termAfterFirst, node.getCurrentTerm());
+    }
+
     /**
          * Test-only fake implementation.
          * In production, Person B's RaftLog should implement RaftLogMetadata.

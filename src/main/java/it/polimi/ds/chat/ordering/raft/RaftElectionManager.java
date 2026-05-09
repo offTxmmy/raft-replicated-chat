@@ -326,6 +326,7 @@ public class RaftElectionManager {
 
         long localCurrentTerm = raftNode.getCurrentTerm();
         RaftRole localRole = raftNode.getRole();
+        int previousLeaderId = raftNode.getLeaderId();
 
         if (term < localCurrentTerm) {
             return;
@@ -337,6 +338,7 @@ public class RaftElectionManager {
             stopHeartbeatSchedule();
             resetElectionTimeout();
             electionListener.onSteppedDown(term, leaderId);
+            notifyLeaderObservedIfChanged(previousLeaderId, leaderId, term);
             return;
         }
 
@@ -346,17 +348,25 @@ public class RaftElectionManager {
             stopHeartbeatSchedule();
             resetElectionTimeout();
             electionListener.onSteppedDown(term, leaderId);
+            notifyLeaderObservedIfChanged(previousLeaderId, leaderId, term);
             return;
         }
 
         if (localRole == RaftRole.FOLLOWER) {
             raftNode.becomeFollower(term, leaderId);
             resetElectionTimeout();
+            notifyLeaderObservedIfChanged(previousLeaderId, leaderId, term);
         }
 
         // If localRole == LEADER and term == localCurrentTerm,
         // this should normally not happen in a correct Raft flow.
         // We ignore it for now.
+    }
+
+    private void notifyLeaderObservedIfChanged(int previousLeaderId, int newLeaderId, long term) {
+        if (previousLeaderId != newLeaderId) {
+            electionListener.onLeaderObserved(newLeaderId, term);
+        }
     }
 
     /**

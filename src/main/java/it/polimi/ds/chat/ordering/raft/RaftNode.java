@@ -24,6 +24,7 @@ public class RaftNode {
     public static final int NO_LEADER = -1;
 
     private final int nodeId;
+    private final RaftPersistence persistence;
 
     private long currentTerm;
     private Integer votedFor;
@@ -31,19 +32,41 @@ public class RaftNode {
     private RaftRole role;
 
     /**
-     * Creates a new Raft node.
-     * Initial Raft state:
-     * - term = 0
-     * - role = FOLLOWER
-     * - votedFor = null
-     * - leaderId = unknown
+     * Creates a new Raft node with no persistence (test convenience).
+     * Equivalent to {@code new RaftNode(nodeId, RaftPersistence.NO_OP)}.
      *
      * @param nodeId local broker/node id
      */
     public RaftNode(int nodeId) {
+        this(nodeId, RaftPersistence.NO_OP);
+    }
+
+    /**
+     * Creates a new Raft node from a clean state (term 0, no vote, no leader).
+     *
+     * @param nodeId local broker/node id
+     * @param persistence durable storage hook for {@code (currentTerm, votedFor)}
+     */
+    public RaftNode(int nodeId, RaftPersistence persistence) {
+        this(nodeId, persistence, 0L, null);
+    }
+
+    /**
+     * Creates a Raft node restored from previously persisted state. Used at
+     * broker startup after a crash. The role is always {@link RaftRole#FOLLOWER}
+     * on restart (Raft does not persist role). The known leader is unknown until
+     * a heartbeat is observed.
+     *
+     * @param nodeId local broker/node id
+     * @param persistence durable storage hook
+     * @param persistedTerm term loaded from stable storage
+     * @param persistedVotedFor vote loaded from stable storage, or {@code null}
+     */
+    public RaftNode(int nodeId, RaftPersistence persistence, long persistedTerm, Integer persistedVotedFor) {
         this.nodeId = nodeId;
-        this.currentTerm = 0L;
-        this.votedFor = null;
+        this.persistence = persistence;
+        this.currentTerm = persistedTerm;
+        this.votedFor = persistedVotedFor;
         this.leaderId = NO_LEADER;
         this.role = RaftRole.FOLLOWER;
     }
@@ -87,6 +110,7 @@ public class RaftNode {
         role = RaftRole.CANDIDATE;
         votedFor = nodeId;
         leaderId = NO_LEADER;
+        persistence.persistTermAndVote(currentTerm, votedFor);
         return currentTerm;
     }
 
@@ -124,13 +148,19 @@ public class RaftNode {
             return false;
         }
 
+        boolean termChanged = false;
         if (observedTerm > currentTerm) {
             currentTerm = observedTerm;
             votedFor = null;
+            termChanged = true;
         }
 
         role = RaftRole.FOLLOWER;
         leaderId = knownLeaderId;
+
+        if (termChanged) {
+            persistence.persistTermAndVote(currentTerm, votedFor);
+        }
         return true;
     }
 
@@ -150,6 +180,7 @@ public class RaftNode {
         votedFor = null;
         role = RaftRole.FOLLOWER;
         leaderId = NO_LEADER;
+        persistence.persistTermAndVote(currentTerm, votedFor);
         return true;
     }
 
@@ -212,9 +243,16 @@ public class RaftNode {
         }
 
         // Grant vote
+        boolean voteChanged = votedFor == null || votedFor != request.getCandidateId();
         votedFor = request.getCandidateId();
         role = RaftRole.FOLLOWER;
         leaderId = NO_LEADER;
+
+        if (voteChanged) {
+            // Persist the vote BEFORE returning the response: a granted vote must
+            // be durable before it becomes observable to the candidate.
+            persistence.persistTermAndVote(currentTerm, votedFor);
+        }
 
         return new RequestVoteResponseMessage(currentTerm, true, nodeId);
     }

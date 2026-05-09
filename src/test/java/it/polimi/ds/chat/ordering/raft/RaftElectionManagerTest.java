@@ -779,6 +779,221 @@ class RaftElectionManagerTest {
         assertEquals(2L, listener.lastLeaderTerm);
     }
 
+    /**
+     * §1.2 — onLeaderObserved fires when a follower learns a new leader id from
+     * NO_LEADER. This is the case the previous listener API did not signal.
+     */
+    @Test
+    void leaderObservedShouldFireWhenFollowerLearnsLeaderForTheFirstTime() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+        RaftElectionManager manager = newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+
+        manager.start(); // FOLLOWER, leaderId = NO_LEADER, term = 0
+
+        manager.onValidLeaderActivityObserved(1L, 1);
+
+        assertEquals(RaftRole.FOLLOWER, managerNode(manager).getRole());
+        assertEquals(1, managerNode(manager).getLeaderId());
+        assertEquals(1L, managerNode(manager).getCurrentTerm());
+
+        assertEquals(1, listener.leaderObservedCount);
+        assertEquals(1, listener.lastObservedLeaderId);
+        assertEquals(1L, listener.lastObservedLeaderTerm);
+    }
+
+    /**
+     * §1.2 — onLeaderObserved is NOT fired when subsequent heartbeats from the
+     * same leader in the same term are observed. Only changes of leader id matter.
+     */
+    @Test
+    void leaderObservedShouldNotFireOnRepeatedHeartbeatsFromSameLeader() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+        RaftElectionManager manager = newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+
+        manager.start();
+
+        manager.onValidLeaderActivityObserved(1L, 1);
+        manager.onValidLeaderActivityObserved(1L, 1);
+        manager.onValidLeaderActivityObserved(1L, 1);
+
+        assertEquals(1, listener.leaderObservedCount);
+        assertEquals(1, listener.lastObservedLeaderId);
+    }
+
+    /**
+     * §1.2 — onLeaderObserved fires again when the locally known leader id
+     * changes within the same term (e.g. cluster re-routed activity to a
+     * different leader after a transient anomaly).
+     */
+    @Test
+    void leaderObservedShouldFireAgainWhenLeaderIdChangesWithinSameTerm() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+        RaftElectionManager manager = newManager(2, setOf(1, 2, 3, 4), fakeClock, sender, listener);
+
+        manager.start();
+
+        manager.onValidLeaderActivityObserved(3L, 1);
+        manager.onValidLeaderActivityObserved(3L, 4);
+
+        assertEquals(2, listener.leaderObservedCount);
+        assertEquals(4, listener.lastObservedLeaderId);
+        assertEquals(3L, listener.lastObservedLeaderTerm);
+    }
+
+    /**
+     * §1.2 — A higher-term leader activity observed by a CANDIDATE causes both
+     * onSteppedDown and onLeaderObserved (the locally known leader id changes
+     * from NO_LEADER to the new real leader). Upper layers will deduplicate.
+     */
+    @Test
+    void leaderObservedShouldFireAlsoOnHigherTermStepDownFromCandidate() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+        RaftElectionManager manager = newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire(); // becomes CANDIDATE in term 1, leaderId = NO_LEADER
+
+        manager.onValidLeaderActivityObserved(5L, 3);
+
+        assertEquals(RaftRole.FOLLOWER, managerNode(manager).getRole());
+        assertEquals(5L, managerNode(manager).getCurrentTerm());
+        assertEquals(3, managerNode(manager).getLeaderId());
+
+        assertEquals(1, listener.steppedDownCount);
+        assertEquals(1, listener.leaderObservedCount);
+        assertEquals(3, listener.lastObservedLeaderId);
+        assertEquals(5L, listener.lastObservedLeaderTerm);
+    }
+
+    /**
+     * §1.5 — Tolerance to lost vote requests/responses.
+     * With a sender that drops every RequestVote (no response ever returns), the
+     * candidate must keep starting fresh elections at strictly increasing terms,
+     * and its internal state must stay consistent (CANDIDATE, self-vote only,
+     * tracked election term equal to currentTerm). This is the liveness guarantee
+     * under UDP packet loss.
+     */
+    @Test
+    void lossyVoteRequestSenderShouldKeepStartingElectionsAtIncreasingTerms() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RaftElectionManager manager = newManager(2, setOf(1, 2, 3, 4, 5), fakeClock, sender);
+
+        manager.start();
+
+        final int rounds = 5;
+        for (long expectedTerm = 1L; expectedTerm <= rounds; expectedTerm++) {
+            fakeClock.lastOneShotTask.fire(); // election timeout, no responses ever arrive
+
+            assertEquals(RaftRole.CANDIDATE, managerNode(manager).getRole());
+            assertEquals(expectedTerm, managerNode(manager).getCurrentTerm());
+            assertEquals(Integer.valueOf(2), managerNode(manager).getVotedFor());
+            assertEquals(Long.valueOf(expectedTerm), manager.getCurrentElectionTerm());
+            assertEquals(setOf(2), manager.getGrantedVotersSnapshot());
+        }
+
+        // Each election round broadcasts to all 4 peers; with 5 rounds we expect 20 sends.
+        assertEquals(rounds * 4, sender.sentRequests.size());
+        for (int i = 0; i < sender.sentRequests.size(); i++) {
+            long expectedTerm = (i / 4) + 1L;
+            assertEquals(expectedTerm, sender.sentRequests.get(i).request().getTerm());
+            assertEquals(2, sender.sentRequests.get(i).request().getCandidateId());
+        }
+    }
+
+    /**
+     * §1.6 — Crash-and-rejoin: a node restored from persisted state must come
+     * up as FOLLOWER and accept the first valid heartbeat from the current
+     * leader without triggering a spurious election. This test simulates a node
+     * that crashed at term=7 and is restarted: an early heartbeat arrives
+     * before the election timeout fires, and no election must start.
+     */
+    @Test
+    void restartFromPersistedStateWithEarlyHeartbeatShouldNotTriggerElection() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+
+        // Restored RaftNode: term=7, no vote (e.g. previous term ended cleanly).
+        RaftNode restoredNode = new RaftNode(2, RaftPersistence.NO_OP, 7L, null);
+        RaftElectionManager manager = new RaftElectionManager(
+                2,
+                setOf(1, 2, 3),
+                150L,
+                300L,
+                50L,
+                restoredNode,
+                new FakeLogMetadata(0L, 0L),
+                sender,
+                fakeClock,
+                listener
+        );
+
+        manager.start(); // arms a follower election timeout
+        FakeScheduledTask initialTimeout = fakeClock.lastOneShotTask;
+
+        // Heartbeat from the legitimate leader for the persisted term arrives early.
+        manager.onValidLeaderActivityObserved(7L, 1);
+
+        assertEquals(RaftRole.FOLLOWER, restoredNode.getRole());
+        assertEquals(7L, restoredNode.getCurrentTerm());
+        assertEquals(1, restoredNode.getLeaderId());
+
+        // No election started: no RequestVote was sent, the manager has no
+        // current election term, and the originally-armed timeout was reset.
+        assertTrue(sender.sentRequests.isEmpty());
+        assertNull(manager.getCurrentElectionTerm());
+        assertEquals(0, listener.leaderElectedCount);
+        assertTrue(initialTimeout.cancelled);
+    }
+
+    /**
+     * §1.6 — Crash-and-rejoin: a node restored from persisted state with no
+     * heartbeat arriving must eventually start a fresh election with
+     * term = persistedTerm + 1, preserving Raft's monotonic term invariant.
+     */
+    @Test
+    void restartFromPersistedStateWithoutHeartbeatShouldStartElectionAtPersistedTermPlusOne() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+
+        RaftNode restoredNode = new RaftNode(2, RaftPersistence.NO_OP, 7L, null);
+        RaftElectionManager manager = new RaftElectionManager(
+                2,
+                setOf(1, 2, 3),
+                150L,
+                300L,
+                50L,
+                restoredNode,
+                new FakeLogMetadata(0L, 0L),
+                sender,
+                fakeClock,
+                null
+        );
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire(); // election timeout, no heartbeat ever arrived
+
+        assertEquals(RaftRole.CANDIDATE, restoredNode.getRole());
+        assertEquals(8L, restoredNode.getCurrentTerm());
+        assertEquals(Integer.valueOf(2), restoredNode.getVotedFor());
+        assertEquals(Long.valueOf(8L), manager.getCurrentElectionTerm());
+
+        assertEquals(2, sender.sentRequests.size());
+        for (SentVoteRequest sent : sender.sentRequests) {
+            assertEquals(8L, sent.request().getTerm());
+            assertEquals(2, sent.request().getCandidateId());
+        }
+    }
+
     private static RaftElectionManager newManager(
             int localNodeId,
             Set<Integer> votingSet,
@@ -859,6 +1074,9 @@ class RaftElectionManagerTest {
         private int lastKnownLeaderId;
         private int heartbeatRoundDueCount;
         private long lastHeartbeatTerm;
+        private int leaderObservedCount;
+        private int lastObservedLeaderId;
+        private long lastObservedLeaderTerm;
 
         @Override
         public void onLeaderElected(int leaderId, long term) {
@@ -872,6 +1090,13 @@ class RaftElectionManagerTest {
             steppedDownCount++;
             lastSteppedDownTerm = newTerm;
             lastKnownLeaderId = knownLeaderId;
+        }
+
+        @Override
+        public void onLeaderObserved(int leaderId, long term) {
+            leaderObservedCount++;
+            lastObservedLeaderId = leaderId;
+            lastObservedLeaderTerm = term;
         }
 
         @Override
