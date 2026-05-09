@@ -405,6 +405,26 @@ This section should be treated as the practical implementation guide for the 3-p
 - **~35% of total**
 - High complexity (concurrency + timing)
 
+### Person A – progress update (May 9, 2026)
+
+**Implemented so far:**
+- `RaftElectionManager` with full election orchestration:
+    - election timeout lifecycle (start / reset / cancel) with per-election randomization
+    - election start with term bump, self-vote and `RequestVote` broadcast
+    - incoming `RequestVoteRequest` handling with log-freshness check (Contract B)
+    - vote response processing with majority promotion and higher-term step-down
+    - valid leader activity handling via `onValidLeaderActivityObserved(...)` (Contract C)
+    - leader heartbeat tick scheduling emitted through `RaftElectionListener.onHeartbeatRoundDue(...)`
+- `RaftClock` / `RaftScheduledTask` abstractions (Contract D) to keep scheduling out of the election logic.
+- `RaftVoteRequestSender` seam so the manager only emits vote-request events, with no transport knowledge (Contract C).
+- `RaftElectionListener` outward callback (`onLeaderElected`, `onSteppedDown`, `onHeartbeatRoundDue`) consumed by the replication layer.
+- Full unit test coverage in `RaftElectionManagerTest` (32 tests), including self-vote accounting, duplicate/stale response handling, split-vote retry, higher-term step-down, and leader-activity reset.
+- `RaftCoreTest` (shared with Person B) validates election + replication wiring end-to-end.
+
+**Remaining (optional / post-MVP):**
+- Persistence hook for `currentTerm` / `votedFor` once Person C's `RaftPersistence` lands (currently a no-op seam).
+- Emit an explicit `onLeaderChanged` event to `OrderingServiceCallback` once Person C wires the ordering service.
+
 ---
 
 ## Person B – **Replication & Commit Owner**
