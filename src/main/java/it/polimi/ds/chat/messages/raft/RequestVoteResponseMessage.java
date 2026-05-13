@@ -1,10 +1,12 @@
 package it.polimi.ds.chat.messages.raft;
 
+import java.io.Serializable;
 /**
  * Raft RPC response to a RequestVote request.
  */
-public class RequestVoteResponseMessage {
+public class RequestVoteResponseMessage implements Serializable {
 
+    //private static final long serialVersionUID = 1L;
     private final long term;
     private final boolean voteGranted;
     private final int voterId;

@@ -20,6 +20,10 @@ public class BrokerConfig {
     // Only non-null on the sequencer (leader); null for followers
     private final HandlerState handlerState;
 
+    //aggiungo qui tomma
+    private final OrderingMode orderingMode;
+    private final RaftConfig raftConfig;
+
     /**
      * Constructs a BrokerConfig with all required parameters.
      *
@@ -33,6 +37,7 @@ public class BrokerConfig {
      * @param udpPort       UDP port for broker communication
      * @param handlerState  handler state (non-null only for sequencer)
      */
+
     public BrokerConfig(int brokerId,
                         boolean isSequencer,
                         String brokerHost,
@@ -42,6 +47,32 @@ public class BrokerConfig {
                         int sequencerPort,
                         int udpPort,
                         HandlerState handlerState) {
+        this(brokerId, isSequencer, brokerHost, brokerPort, clientPort,
+                sequencerHost, sequencerPort, udpPort, handlerState,
+                OrderingMode.SEQUENCER, null);
+    }
+    //aggiungo pure nel costruttore
+    public BrokerConfig(int brokerId,
+                        boolean isSequencer,
+                        String brokerHost,
+                        int brokerPort,
+                        int clientPort,
+                        String sequencerHost,
+                        int sequencerPort,
+                        int udpPort,
+                        HandlerState handlerState,
+                        OrderingMode orderingMode,
+                        RaftConfig raftConfig) {
+
+        if (orderingMode == null) {
+            throw new IllegalArgumentException("orderingMode must not be null");
+        }
+        if (orderingMode == OrderingMode.RAFT && raftConfig == null) {
+            throw new IllegalArgumentException("raftConfig is required when orderingMode == RAFT");
+        }
+        if (orderingMode == OrderingMode.SEQUENCER && raftConfig != null) {
+            throw new IllegalArgumentException("raftConfig must be null when orderingMode == SEQUENCER");
+        }
         this.brokerId = brokerId;
         this.isSequencer = isSequencer;
         this.brokerHost = brokerHost;
@@ -51,6 +82,8 @@ public class BrokerConfig {
         this.sequencerPort = sequencerPort;
         this.udpPort = udpPort;
         this.handlerState = handlerState;
+        this.orderingMode = orderingMode;
+        this.raftConfig = raftConfig;
     }
 
     /**
@@ -132,6 +165,20 @@ public class BrokerConfig {
      */
     public HandlerState getHandlerState() {
         return handlerState;
+    }
+
+    /**
+     * Ordering mode selected at startup. Never null.
+     */
+    public OrderingMode getOrderingMode() {
+        return orderingMode;
+    }
+
+    /**
+     * Raft configuration block. Non-null iff {@link #getOrderingMode()} == {@link OrderingMode#RAFT}.
+     */
+    public RaftConfig getRaftConfig() {
+        return raftConfig;
     }
 
     /**

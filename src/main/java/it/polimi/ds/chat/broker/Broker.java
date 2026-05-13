@@ -82,7 +82,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
         this.brokerId = config.getBrokerId(); // 0 for leader, -1 for followers at startup
 
         // Validate config for sequencer
-        if (config.isSequencer() && config.getHandlerState() == null) {
+        if (config.isSequencer() && config.getHandlerState() == null && config.getOrderingMode() == OrderingMode.SEQUENCER) {
             throw new IllegalArgumentException("Sequencer broker must have a HandlerState");
         }
 
@@ -95,14 +95,30 @@ public class Broker implements Serializable, OrderingServiceCallback {
     }
 
     /**
-     * Initialize the ordering service.
-     * Currently uses SequencerOrderingService, can be replaced with RaftOrderingService.
+     * Initialize the ordering service based on {@link BrokerConfig#getOrderingMode()}.
+     *
+     * <ul>
+     *   <li>{@link OrderingMode#SEQUENCER}: legacy single-sequencer ordering with
+     *       dynamic broker-id assignment from the leader (latch waited in start()).
+     *   <li>{@link OrderingMode#RAFT}: Raft-replicated ordering with static voter
+     *       set and pre-assigned broker ids (latch counted down immediately).
+     * </ul>
      */
     private void initializeOrderingService() {
-        SequencerOrderingService seqService = new SequencerOrderingService(config, brokerId);
-        seqService.setCallback(this);
-        seqService.onDeliver(this::handleOrderedMessage);
-        this.orderingService = seqService;
+        if (config.getOrderingMode() == OrderingMode.RAFT) {
+            it.polimi.ds.chat.ordering.raft.RaftOrderingService raftService =
+                    new it.polimi.ds.chat.ordering.raft.RaftOrderingService(config);
+            raftService.onDeliver(this::handleOrderedMessage);
+            this.orderingService = raftService;
+            // Raft uses the static voter set from config: broker id is known
+            // at startup and no Sequencer-assigned id is awaited.
+            brokerIdLatch.countDown();
+        } else {
+            SequencerOrderingService seqService = new SequencerOrderingService(config, brokerId);
+            seqService.setCallback(this);
+            seqService.onDeliver(this::handleOrderedMessage);
+            this.orderingService = seqService;
+        }
     }
 
     // =========================================================================
