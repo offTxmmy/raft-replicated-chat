@@ -25,6 +25,7 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * End-to-end integration test for {@link RaftOrderingService}.
@@ -109,6 +110,64 @@ class RaftOrderingServiceIntegrationTest {
             assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected username");
             assertEquals(leaderIdx, d.get(0).getBrokerId(), "node " + i + " unexpected brokerId");
         }
+    }
+
+    @Test
+    void followerRejectsClientProposalWithoutDeliveringMessage(@TempDir Path baseDir) throws Exception {
+        int[] ports = pickFreePorts(3);
+
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i]));
+        }
+
+        nodes = new RaftOrderingService[3];
+        List<List<ChatDeliverMessage>> deliveries = new ArrayList<>();
+
+        for (int i = 0; i < 3; i++) {
+            nodes[i] = buildService(i, ports[i], voters, baseDir.resolve("n" + i));
+
+            List<ChatDeliverMessage> d = new CopyOnWriteArrayList<>();
+            deliveries.add(d);
+            nodes[i].onDeliver(d::add);
+        }
+
+        for (RaftOrderingService n : nodes) {
+            n.start();
+        }
+
+        int leaderIdx = waitForSingleLeader();
+        assertTrue(leaderIdx >= 0, "no leader elected within "
+                + LEADER_ELECTION_DEADLINE_MS + " ms");
+
+        int followerIdx = -1;
+        for (int i = 0; i < nodes.length; i++) {
+            if (i != leaderIdx) {
+                followerIdx = i;
+                break;
+            }
+        }
+
+        assertTrue(followerIdx >= 0, "no follower found");
+
+        ChatReqMessage rejectedReq = new ChatReqMessage(
+                "msg-follower",
+                followerIdx,
+                "alice",
+                "this should not be accepted by a follower",
+                new VectorClock()
+        );
+
+        boolean accepted = nodes[followerIdx].propose(rejectedReq);
+
+        assertFalse(accepted, "a follower must reject client proposals");
+
+        boolean delivered = waitFor(
+                () -> deliveries.stream().anyMatch(d -> !d.isEmpty()),
+                600
+        );
+
+        assertFalse(delivered, "a proposal rejected by a follower must not be delivered");
     }
 
     // --- helpers ----------------------------------------------------------
