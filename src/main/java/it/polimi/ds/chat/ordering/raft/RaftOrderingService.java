@@ -131,7 +131,7 @@ public final class RaftOrderingService implements OrderingService {
                 raftConfig.getElectionTimeoutMaxMs(),
                 raftConfig.getHeartbeatIntervalMs(),
                 raftNode,
-                raftLog.snapshotMetadata(),
+                raftLog,
                 rpcClient,
                 raftClock,
                 replicationManager
