@@ -336,7 +336,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * Entry point for messages sent by clients connected to THIS broker.
      *
      * Wraps the client message into a ChatReqMessage (including vector clock) and proposes it
-     * to the OrderingService for global sequencing. Also sends an immediate ACK to the client.
+     * to the OrderingService for global sequencing.
      *
      * @param message raw client message received by this broker
      */
@@ -353,6 +353,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
                 + ": not Raft leader. Known leader = " + leaderId);
 
             sendNotLeaderToClient(message.getUsername(), message.getTimestamp(), leaderId);
+            return;
         }
 
         // Build the chat request with vector clock only when this broker can try to propose it.

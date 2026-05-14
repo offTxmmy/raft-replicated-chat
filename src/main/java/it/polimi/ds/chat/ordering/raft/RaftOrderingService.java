@@ -41,7 +41,8 @@ import java.util.function.Consumer;
  * </ol>
  *
  * <p>{@link #propose(ChatReqMessage)}: only the current leader appends the
- * command to the local log; followers drop the proposal silently for now.
+ * command to the local log; followers reject proposals by returning false;
+ * the broker can use leaderId to redirect the client.
  * Replication to peers happens on the next heartbeat tick. Client-side
  * redirect via {@link #getLeaderId()} can be added at the application layer.
  *
@@ -109,7 +110,7 @@ public final class RaftOrderingService implements OrderingService {
         RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
         commitManager = new RaftCommitManager(raftLog, entry -> {
             applyHook.accept(entry);
-            completePendingCommint(entry);
+            completePendingCommit(entry);
         });
 
         // 4. RPC client (outbound transport). Response handlers are attached
@@ -276,7 +277,7 @@ public final class RaftOrderingService implements OrderingService {
         }
     }
 
-    private void completePendingCommint(RaftLogEntry entry) {
+    private void completePendingCommit(RaftLogEntry entry) {
         if (entry == null || entry.getCommand() == null) {
             return;
         }

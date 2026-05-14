@@ -183,14 +183,13 @@ public class SequencerOrderingService implements OrderingService {
         if (config.isSequencer()) {
             handleChatRequest(request);
             return true;
-        } else {
-            sendToSequencer(request);
         }
         
         if (!running) {
             return false;
         }
 
+        sendToSequencer(request);
         return true;
     }
 
