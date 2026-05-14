@@ -7,6 +7,14 @@ import it.polimi.ds.chat.messages.ChatReqMessage;
 import it.polimi.ds.chat.messages.raft.ChatCommand;
 import it.polimi.ds.chat.ordering.OrderingService;
 
+import it.polimi.ds.chat.messages.raft.RaftLogEntry;
+
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
 import java.io.IOException;
 import java.util.HashSet;
 import java.util.Set;
@@ -62,6 +70,11 @@ public final class RaftOrderingService implements OrderingService {
 
     private volatile boolean running;
 
+    private static final long PROPOSE_COMMIT_TIMEOUT_MS = 5_000L;
+
+    private final ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits = 
+        new ConcurrentHashMap<>();
+
     public RaftOrderingService(BrokerConfig brokerConfig) {
         this.brokerConfig = brokerConfig;
         if (brokerConfig.getRaftConfig() == null) {
@@ -94,7 +107,10 @@ public final class RaftOrderingService implements OrderingService {
 
         // 3. State machine: deliver committed entries as ChatDeliverMessage.
         RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
-        commitManager = new RaftCommitManager(raftLog, applyHook);
+        commitManager = new RaftCommitManager(raftLog, entry -> {
+            applyHook.accept(entry);
+            completePendingCommint(entry);
+        });
 
         // 4. RPC client (outbound transport). Response handlers are attached
         //    once the election/replication managers exist.
@@ -177,6 +193,9 @@ public final class RaftOrderingService implements OrderingService {
         }
         running = false;
 
+        pendingCommits.forEach((id, future) -> future.complete(false));
+        pendingCommits.clear();
+
         if (electionManager   != null) electionManager.stop();
         if (replicationManager != null) replicationManager.stop();
         if (rpcClient         != null) rpcClient.stop();
@@ -203,11 +222,28 @@ public final class RaftOrderingService implements OrderingService {
                 request.getText(),
                 request.getVectorClock()
         );
-        replicationManager.appendCommandAsLeader(command);
+
+        CompletableFuture<Boolean> committed = new CompletableFuture<>();
+        pendingCommits.put(command.getLocalMsgId(), committed);
+
+        RaftLogEntry appended = replicationManager.appendCommandAsLeader(command);
+        if (appended == null) {
+            pendingCommits.remove(command.getLocalMsgId());
+            return false;
+        }
         
-        // For now, true means "accepted by the local leader".
-        // TODO: A later fix should move the client ACK to the commit/apply path.
-        return true;
+        try {
+            return committed.get(PROPOSE_COMMIT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            pendingCommits.remove(command.getLocalMsgId());
+            return false;
+        } catch (ExecutionException | TimeoutException e) {
+            pendingCommits.remove(command.getLocalMsgId());
+            System.err.println("[RaftOrderingService] propose timed out waiting for commit: "
+                + command.getLocalMsgId());
+            return false;
+        }
     }
 
     @Override
@@ -237,6 +273,19 @@ public final class RaftOrderingService implements OrderingService {
                 System.err.println("[RaftOrderingService] delivery callback error: "
                         + e.getMessage());
             }
+        }
+    }
+
+    private void completePendingCommint(RaftLogEntry entry) {
+        if (entry == null || entry.getCommand() == null) {
+            return;
+        }
+
+        String localMsgId = entry.getCommand().getLocalMsgId();
+        CompletableFuture<Boolean> pending = pendingCommits.remove(localMsgId);
+        
+        if (pending != null) {
+            pending.complete(true);
         }
     }
 }
