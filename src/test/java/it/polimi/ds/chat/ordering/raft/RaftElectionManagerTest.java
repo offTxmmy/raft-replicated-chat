@@ -1,7 +1,9 @@
 package it.polimi.ds.chat.ordering.raft;
 
+import it.polimi.ds.chat.messages.raft.ChatCommand;
 import it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.messages.raft.RequestVoteResponseMessage;
+import it.polimi.ds.chat.utilities.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -203,6 +205,49 @@ class RaftElectionManagerTest {
         for (SentVoteRequest sent : sender.sentRequests) {
             assertEquals(12L, sent.request().getLastLogIndex());
             assertEquals(5L, sent.request().getLastLogTerm());
+        }
+    }
+
+    @Test
+    void electionTimeoutShouldReadLiveRaftLogMetadataAtElectionTime() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RaftNode raftNode = new RaftNode(7);
+        RaftLog raftLog = new RaftLog();
+
+        RaftElectionManager manager = new RaftElectionManager(
+                7,
+                setOf(7, 8, 9),
+                150L,
+                300L,
+                50L,
+                raftNode,
+                raftLog,
+                sender,
+                fakeClock,
+                null
+        );
+
+        manager.start();
+
+        // The manager was already created when the log was empty.
+        // These appends happen later, before the election actually starts.
+        raftLog.append(2L, new ChatCommand("m1", 7, "alice", "one", new VectorClock()));
+        raftLog.append(2L, new ChatCommand("m2", 7, "alice", "two", new VectorClock()));
+        raftLog.append(3L, new ChatCommand("m3", 7, "alice", "three", new VectorClock()));
+
+        fakeClock.lastOneShotTask.fire();
+
+        assertEquals(2, sender.sentRequests.size());
+
+        for (SentVoteRequest sent : sender.sentRequests) {
+            assertEquals(1L, sent.request().getTerm());
+            assertEquals(7, sent.request().getCandidateId());
+
+            // Critical assertion:
+            // RequestVote must contain the current log tip, not the empty startup snapshot.
+            assertEquals(3L, sent.request().getLastLogIndex());
+            assertEquals(3L, sent.request().getLastLogTerm());
         }
     }
 
