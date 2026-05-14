@@ -208,6 +208,10 @@ class RaftElectionManagerTest {
         }
     }
 
+    /**
+     * Verifies that RequestVote messages are built using the current local log metadata,
+     * even if it changes between the moment the election is started and the timeout fires.
+     */
     @Test
     void electionTimeoutShouldReadLiveRaftLogMetadataAtElectionTime() {
         FakeClock fakeClock = new FakeClock();

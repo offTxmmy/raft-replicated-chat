@@ -341,14 +341,40 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param message raw client message received by this broker
      */
     public void onClientMessage(ClientMessage message) {
-        // Build the chat request with vector clock
+        // In Raft mode, only the current leader can accept client proposals.
+        // If this broker is a follower/candidate, do not build the ChatReqMessage:
+        // building it would increment the local vector clock and localMsgCounter
+        // for a message that will not enter the Raft log.
+        if (config.getOrderingMode() == OrderingMode.RAFT && !orderingService.isLeader()) {
+            int leaderId = orderingService.getLeaderId();
+            
+            System.err.println("[Broker " + brokerId + "] Rejecting client message from "
+                + message.getUsername()
+                + ": not Raft leader. Known leader = " + leaderId);
+
+            sendNotLeaderToClient(message.getUsername(), message.getTimestamp(), leaderId);
+        }
+
+        // Build the chat request with vector clock only when this broker can try to propose it.
         ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText());
 
-        // Propose to ordering service
-        orderingService.propose(chatReq);
+        // Propose to ordering service.
+        boolean accepted = orderingService.propose(chatReq);
 
-        // Send ACK to client
-        sendAckToClient(message.getUsername(), message.getTimestamp());
+        // ACK only if the ordering service accepted the proposal.
+        // NOTE: in Raft mode this still means "accepted by leader", not yet "committed".
+        // Moving ACK to the commit path is the next stronger fix.
+        if (accepted) {
+            sendAckToClient(message.getUsername(), message.getTimestamp());
+        } else {
+            int leaderId = orderingService.getLeaderId();
+
+            System.err.println("[Broker " + brokerId + "] Proposal rejected for "
+                + message.getUsername()
+                + ". Known leader = " + leaderId);
+
+            sendNotLeaderToClient(message.getUsername(), message.getTimestamp(), leaderId);
+        }
     }
 
     /**
@@ -571,6 +597,29 @@ public class Broker implements Serializable, OrderingServiceCallback {
             for (ClientHandler handler : clients) {
                 if (username.equals(handler.getUsername())) {
                     handler.sendLine(ClientAckMessages.buildAck(timestamp, username));
+                    break;
+                }
+            }
+        }
+    }
+
+    /**
+     * Notify a client that this broker cannot currently accept the message because
+     * it is not the Raft leader.
+     *
+     * This is intentionally NOT an ACK: the client must keep the message pending.
+     *
+     * @param username  recipient username
+     * @param timestamp original client message timestamp
+     * @param leaderId  known Raft leader id, or -1 if no leader is currently known
+     */
+    private void sendNotLeaderToClient(String username, long timestamp, int leaderId) {
+        String response = "NOT_LEADER timestamp=" + timestamp + " leaderId=" + leaderId;
+
+        synchronized (clients) {
+            for (ClientHandler handler : clients) {
+                if (username.equals(handler.getUsername())) {
+                    handler.sendLine(response);
                     break;
                 }
             }

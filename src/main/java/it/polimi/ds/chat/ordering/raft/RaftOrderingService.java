@@ -187,14 +187,14 @@ public final class RaftOrderingService implements OrderingService {
     }
 
     @Override
-    public void propose(ChatReqMessage request) {
+    public boolean propose(ChatReqMessage request) {
         if (!running) {
-            return;
+            return false;
         }
         if (!raftNode.isLeader()) {
             System.err.println("[RaftOrderingService] propose ignored: not leader. Known leader = "
                     + raftNode.getLeaderId());
-            return;
+            return false;
         }
         ChatCommand command = new ChatCommand(
                 request.getLocalMsgId(),
@@ -204,7 +204,10 @@ public final class RaftOrderingService implements OrderingService {
                 request.getVectorClock()
         );
         replicationManager.appendCommandAsLeader(command);
-        // Replication to peers is driven by the next heartbeat tick.
+        
+        // For now, true means "accepted by the local leader".
+        // TODO: A later fix should move the client ACK to the commit/apply path.
+        return true;
     }
 
     @Override

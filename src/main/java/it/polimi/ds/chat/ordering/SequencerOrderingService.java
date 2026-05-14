@@ -179,12 +179,18 @@ public class SequencerOrderingService implements OrderingService {
      * @param request the chat request message
      */
     @Override
-    public void propose(ChatReqMessage request) {
+    public boolean propose(ChatReqMessage request) {
+        if (!running) {
+            return false;
+        }
+
         if (config.isSequencer()) {
             handleChatRequest(request);
         } else {
             sendToSequencer(request);
         }
+
+        return true;
     }
 
     /**

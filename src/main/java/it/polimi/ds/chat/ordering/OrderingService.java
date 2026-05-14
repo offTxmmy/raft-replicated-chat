@@ -19,15 +19,16 @@ import java.util.function.Consumer;
  * 3. Notifying all brokers when messages are ready to be delivered
  */
 public interface OrderingService {
-
+ 
     /**
-     * Propose a message for ordering.
-     * The message will be assigned a global sequence number and delivered
-     * to all registered callbacks once committed.
-     *
-     * @param request The chat request message to be ordered
-     */
-    void propose(ChatReqMessage request);
+    * Propose a message for ordering.
+    * The message will be assigned a global sequence number and delivered
+    * to all registered callbacks once committed.
+    *
+    * @param request The chat request message to be ordered
+    * @return true if the proposal was accepted by this ordering service, false otherwise
+    */
+    boolean propose(ChatReqMessage request);
 
     /**
      * Register a callback to be notified when ordered messages are ready for delivery.
