@@ -245,6 +245,33 @@ class RaftReplicationManagerTest {
         assertFalse(response.isSuccess());
         assertEquals(1L, log.lastLogIndex());
         assertEquals(0, observer.calls);
+        assertEquals(1L, response.getConflictTerm());
+        assertEquals(1L, response.getConflictIndex());
+    }
+
+    @Test
+    // Rejects AppendEntries when the follower log is too short and returns a nextIndex hint.
+    void handleAppendEntriesShouldProvideConflictIndexWhenLogTooShort() {
+        RaftNode node = followerNodeWithTerm(1, 1L);
+        RaftLog log = new RaftLog();
+        log.append(1L, command("a"));
+        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+        RaftReplicationManager manager = newManager(node, log, commitManager, new RecordingObserver());
+
+        AppendEntriesRequestMessage request = new AppendEntriesRequestMessage(
+                1L,
+                2,
+                5L,
+                1L,
+                List.of(),
+                1L
+        );
+
+        AppendEntriesResponseMessage response = manager.handleAppendEntries(request);
+
+        assertFalse(response.isSuccess());
+        assertEquals(-1L, response.getConflictTerm());
+        assertEquals(2L, response.getConflictIndex());
     }
 
     @Test
@@ -306,8 +333,8 @@ class RaftReplicationManagerTest {
     }
 
     @Test
-    // Backtracks nextIndex after a failed AppendEntries response.
-    void failedAppendEntriesResponseShouldBacktrackNextIndex() {
+    // Backtracks nextIndex using the conflictIndex hint when the follower log is too short.
+    void failedAppendEntriesResponseShouldUseConflictIndexHint() {
         RecordingSender sender = new RecordingSender();
         RaftNode node = leaderNode(1);
         RaftLog log = new RaftLog();
@@ -332,11 +359,47 @@ class RaftReplicationManagerTest {
         AppendEntriesRequestMessage first = sender.lastRequest(2);
         assertEquals(3L, first.getPrevLogIndex());
 
-        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(1L, false, 2, 0L));
+        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(1L, false, 2, 0L, -1L, 2L));
         manager.onHeartbeatRoundDue(1L);
 
         AppendEntriesRequestMessage second = sender.lastRequest(2);
-        assertEquals(2L, second.getPrevLogIndex());
+        assertEquals(1L, second.getPrevLogIndex());
+    }
+
+    @Test
+    // Uses conflictTerm to jump to the last index of that term when present in the leader log.
+    void failedAppendEntriesResponseShouldUseConflictTermHint() {
+        RecordingSender sender = new RecordingSender();
+        RaftNode node = leaderNode(1);
+        RaftLog log = new RaftLog();
+        log.append(1L, command("a"));
+        log.append(1L, command("b"));
+        log.append(2L, command("c"));
+        log.append(2L, command("d"));
+        log.append(3L, command("e"));
+        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                sender,
+                null
+        );
+        manager.start();
+        manager.onLeaderElected(1, 1L);
+
+        manager.onHeartbeatRoundDue(1L);
+        AppendEntriesRequestMessage first = sender.lastRequest(2);
+        assertEquals(5L, first.getPrevLogIndex());
+
+        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(1L, false, 2, 0L, 2L, 3L));
+        manager.onHeartbeatRoundDue(1L);
+
+        AppendEntriesRequestMessage second = sender.lastRequest(2);
+        assertEquals(4L, second.getPrevLogIndex());
     }
 
     @Test
@@ -366,7 +429,7 @@ class RaftReplicationManagerTest {
         AppendEntriesRequestMessage first = sender.lastRequest(2);
         assertEquals(3L, first.getPrevLogIndex());
 
-        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(0L, false, 2, 0L));
+        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(0L, false, 2, 0L, -1L, 0L));
         manager.onHeartbeatRoundDue(1L);
 
         AppendEntriesRequestMessage second = sender.lastRequest(2);
@@ -393,7 +456,7 @@ class RaftReplicationManagerTest {
         manager.start();
         manager.onLeaderElected(1, 1L);
 
-        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(5L, false, 2, 0L));
+        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(5L, false, 2, 0L, -1L, 0L));
 
         assertEquals(RaftRole.FOLLOWER, node.getRole());
         assertEquals(5L, node.getCurrentTerm());
@@ -423,7 +486,7 @@ class RaftReplicationManagerTest {
         manager.onLeaderElected(1, 1L);
         manager.stop();
 
-        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(5L, false, 2, 0L));
+        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(5L, false, 2, 0L, -1L, 0L));
 
         assertEquals(RaftRole.LEADER, node.getRole());
         assertEquals(1L, node.getCurrentTerm());
@@ -454,7 +517,7 @@ class RaftReplicationManagerTest {
         manager.start();
         manager.onLeaderElected(1, 1L);
 
-        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(1L, true, 2, 3L));
+        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(1L, true, 2, 3L, -1L, 0L));
 
         assertEquals(3L, commitManager.getCommitIndex());
         assertEquals(List.of(1L, 2L, 3L), applied);

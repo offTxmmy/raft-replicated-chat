@@ -83,6 +83,37 @@ public class RaftLog implements RaftLogMetadata {
     }
 
     /**
+     * Returns the first index where the given term appears, or 0 if not present.
+     */
+    public synchronized long firstIndexOfTerm(long term) {
+        if (term <= 0L) {
+            return 0L;
+        }
+        for (RaftLogEntry entry : entries) {
+            if (entry.getTerm() == term) {
+                return entry.getIndex();
+            }
+        }
+        return 0L;
+    }
+
+    /**
+     * Returns the last index where the given term appears, or 0 if not present.
+     */
+    public synchronized long lastIndexOfTerm(long term) {
+        if (term <= 0L) {
+            return 0L;
+        }
+        for (int i = entries.size() - 1; i >= 0; i--) {
+            RaftLogEntry entry = entries.get(i);
+            if (entry.getTerm() == term) {
+                return entry.getIndex();
+            }
+        }
+        return 0L;
+    }
+
+    /**
      * Returns the entry at the given index, or null if not present.
      *
      * @param index log index (1-based)

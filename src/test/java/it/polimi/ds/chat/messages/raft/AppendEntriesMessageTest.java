@@ -31,12 +31,14 @@ class AppendEntriesMessageTest {
 
     @Test
     void responseShouldExposeFields() {
-        AppendEntriesResponseMessage response = new AppendEntriesResponseMessage(4L, true, 2, 7L);
+        AppendEntriesResponseMessage response = new AppendEntriesResponseMessage(4L, true, 2, 7L, -1L, 0L);
 
         assertEquals(4L, response.getTerm());
         assertTrue(response.isSuccess());
         assertEquals(2, response.getResponderId());
         assertEquals(7L, response.getMatchIndex());
+        assertEquals(-1L, response.getConflictTerm());
+        assertEquals(0L, response.getConflictIndex());
     }
 
     private ChatCommand command(String localMsgId) {

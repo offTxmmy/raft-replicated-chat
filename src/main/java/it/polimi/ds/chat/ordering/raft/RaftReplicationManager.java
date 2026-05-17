@@ -124,7 +124,7 @@ public class RaftReplicationManager implements RaftElectionListener {
 
         long localTerm = raftNode.getCurrentTerm();
         if (request.getTerm() < localTerm) {
-            return new AppendEntriesResponseMessage(localTerm, false, localNodeId, 0L);
+            return new AppendEntriesResponseMessage(localTerm, false, localNodeId, 0L, -1L, 0L);
         }
 
         if (request.getTerm() > localTerm || raftNode.getRole() != RaftRole.FOLLOWER) {
@@ -138,7 +138,23 @@ public class RaftReplicationManager implements RaftElectionListener {
         );
 
         if (!appended) {
-            return new AppendEntriesResponseMessage(raftNode.getCurrentTerm(), false, localNodeId, 0L);
+            long conflictTerm = -1L;
+            long conflictIndex = 0L;
+            long lastIndex = log.lastLogIndex();
+            if (request.getPrevLogIndex() > lastIndex) {
+                conflictIndex = lastIndex + 1L;
+            } else if (request.getPrevLogIndex() > 0L) {
+                conflictTerm = log.getTermAt(request.getPrevLogIndex());
+                conflictIndex = log.firstIndexOfTerm(conflictTerm);
+            }
+            return new AppendEntriesResponseMessage(
+                    raftNode.getCurrentTerm(),
+                    false,
+                    localNodeId,
+                    0L,
+                    conflictTerm,
+                    conflictIndex
+            );
         }
 
         commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
@@ -147,7 +163,14 @@ public class RaftReplicationManager implements RaftElectionListener {
             leaderActivityObserver.onValidLeaderActivityObserved(request.getTerm(), request.getLeaderId());
         }
 
-        return new AppendEntriesResponseMessage(raftNode.getCurrentTerm(), true, localNodeId, log.lastLogIndex());
+        return new AppendEntriesResponseMessage(
+            raftNode.getCurrentTerm(),
+            true,
+            localNodeId,
+            log.lastLogIndex(),
+            -1L,
+            0L
+        );
     }
 
     /**
@@ -187,7 +210,26 @@ public class RaftReplicationManager implements RaftElectionListener {
         }
 
         if (!response.isSuccess()) {
-            state.decrementNextIndex();
+            long nextIndex = state.getNextIndex();
+            long conflictTerm = response.getConflictTerm();
+            long conflictIndex = response.getConflictIndex();
+
+            if (conflictTerm > 0L) {
+                long lastIndexOfTerm = log.lastIndexOfTerm(conflictTerm);
+                if (lastIndexOfTerm > 0L) {
+                    nextIndex = lastIndexOfTerm + 1L;
+                } else if (conflictIndex > 0L) {
+                    nextIndex = conflictIndex;
+                } else {
+                    nextIndex = Math.max(1L, nextIndex - 1L);
+                }
+            } else if (conflictIndex > 0L) {
+                nextIndex = conflictIndex;
+            } else {
+                nextIndex = Math.max(1L, nextIndex - 1L);
+            }
+
+            state.setNextIndex(nextIndex);
             return;
         }
 

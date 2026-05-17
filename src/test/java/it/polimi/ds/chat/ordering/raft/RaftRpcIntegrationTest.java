@@ -64,7 +64,7 @@ class RaftRpcIntegrationTest {
     void appendEntriesRoundTripCarriesPeerId() throws Exception {
         RaftRpcServer server = new RaftRpcServer(0,
                 req -> { throw new AssertionError("vote handler should not be invoked"); },
-                req -> new AppendEntriesResponseMessage(req.getTerm(), true, 42, 7L));
+            req -> new AppendEntriesResponseMessage(req.getTerm(), true, 42, 7L, -1L, 0L));
         server.start();
         int port = server.getBoundPort();
 
