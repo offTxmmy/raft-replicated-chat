@@ -13,7 +13,7 @@ import java.util.Objects;
  * Membership (which ids are voters) is the set of keys of
  * {@link RaftConfig#getVoters()} and is fixed at startup (Contract A).
  */
-public record RaftPeerEndpoint(int brokerId, String host, int rpcPort)
+public record RaftPeerEndpoint(int brokerId, String host, int rpcPort, int clientPort)
         implements Serializable {
 
     public RaftPeerEndpoint {
@@ -26,6 +26,9 @@ public record RaftPeerEndpoint(int brokerId, String host, int rpcPort)
         }
         if (rpcPort < 1 || rpcPort > 65535) {
             throw new IllegalArgumentException("rpcPort out of range: " + rpcPort);
+        }
+        if (clientPort <= 0 || clientPort > 65535) {
+            throw new IllegalArgumentException("clientPort must be in range 1..65535, got " + clientPort);
         }
     }
 }

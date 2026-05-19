@@ -27,10 +27,10 @@ import java.util.Scanner;
  *   java BrokerMain raft &lt;nodeId&gt; &lt;rpcPort&gt; &lt;votersCSV&gt; [clientPort]
  * </pre>
  * where {@code votersCSV} is a comma-separated list of voter endpoints in
- * the form {@code id@host:port}, identical on every node of the cluster.
+ * the form {@code id@host:rpcPort[:clientPort]}, identical on every node of the cluster.
  * Example:
  * <pre>
- *   java BrokerMain raft 0 7000 0@127.0.0.1:7000,1@127.0.0.1:7001,2@127.0.0.1:7002 50000
+ *   java BrokerMain raft 0 7000 0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002 50000
  * </pre>
  * Storage directory defaults to {@code ./raft-data/n&lt;nodeId&gt;}.
  */
@@ -55,7 +55,7 @@ public class BrokerMain {
     private static void startRaftMode(String[] args) {
         if (args.length < 4) {
             System.err.println("Usage: raft <nodeId> <rpcPort> <votersCSV> [clientPort]");
-            System.err.println("  votersCSV: id@host:port,id@host:port,...");
+            System.err.println("  votersCSV: id@host:rpcPort[:clientPort],id@host:rpcPort[:clientPort],...");
             System.exit(2);
         }
 
@@ -118,16 +118,29 @@ public class BrokerMain {
         for (String token : csv.split(",")) {
             String trimmed = token.trim();
             if (trimmed.isEmpty()) continue;
+
             int at = trimmed.indexOf('@');
-            int colon = trimmed.lastIndexOf(':');
-            if (at <= 0 || colon <= at) {
+            if (at <= 0) {
                 throw new IllegalArgumentException("Bad voter token: '" + trimmed
-                        + "' (expected id@host:port)");
+                        + "' (expected id@host:rpcPort[:clientPort])");
             }
+
             int id = Integer.parseInt(trimmed.substring(0, at));
-            String host = trimmed.substring(at + 1, colon);
-            int port = Integer.parseInt(trimmed.substring(colon + 1));
-            voters.put(id, new RaftPeerEndpoint(id, host, port));
+            String endpoint = trimmed.substring(at + 1);
+            String[] parts = endpoint.split(":");
+
+            if (parts.length != 2 && parts.length != 3) {
+                throw new IllegalArgumentException("Bad voter token: '" + trimmed
+                        + "' (expected id@host:rpcPort[:clientPort])");
+            }
+
+            String host = parts[0];
+            int rpcPort = Integer.parseInt(parts[1]);
+            int clientPort = (parts.length == 3)
+                    ? Integer.parseInt(parts[2])
+                    : 50000 + id;
+
+            voters.put(id, new RaftPeerEndpoint(id, host, rpcPort, clientPort));
         }
         return voters;
     }

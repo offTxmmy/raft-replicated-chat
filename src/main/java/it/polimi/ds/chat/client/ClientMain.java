@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 /**
  * Entry point for the chat client application.
  * <p>
@@ -26,6 +28,7 @@ public class ClientMain {
     private static class ClientRuntimeContext {
         volatile ClientMessageReceiver receiver;
         volatile ClientHeartbeatManager heartbeatManager;
+        final AtomicBoolean reconnecting = new AtomicBoolean(false);
     }
 
     public static void main(String[] args) {
@@ -126,6 +129,10 @@ public class ClientMain {
         ObjectInputStream in = connection.getObjectInputStream();
 
         ClientHeartbeatManager.HeartbeatFailureHandler failureHandler = () -> {
+            if (!ctx.reconnecting.compareAndSet(false, true)) {
+                System.err.println("[HB] Reconnection already in progress; ignoring duplicate failure.");
+                return;
+            }
             System.err.println("[HB] Broker non risponde a troppi heartbeat consecutivi → sospetto crash.");
             try {
                 System.err.println("[HB] Chiudo connessione verso broker " +
@@ -139,7 +146,6 @@ public class ClientMain {
                         connection.getHost() + ":" + connection.getPort());
 
                 ObjectOutputStream newOut = connection.getObjectOutputStream();
-                ObjectInputStream newIn = connection.getObjectInputStream();
 
                 System.err.println("[HB] Invio nuovamente JOIN per utente '" + username + "' al nuovo broker...");
                 newOut.writeObject(ClientJoinMessage.joinCommand(username));
@@ -151,18 +157,55 @@ public class ClientMain {
 
                 System.err.println("[HB] Avvio nuovo receiver + heartbeat per il nuovo broker...");
                 startReceiverAndHeartbeat(ctx, connection, sender, username);
+                ctx.reconnecting.set(false);
 
             } catch (IOException e) {
                 System.err.println("[HB-ERROR] ERRORE durante la riconnessione: " + e.getMessage());
                 e.printStackTrace();
+                ctx.reconnecting.set(false);
             }
         };
 
         ClientHeartbeatManager heartbeatManager =
                 new ClientHeartbeatManager(out, failureHandler);
 
+        ClientMessageReceiver.NotLeaderRedirectHandler redirectHandler = response -> {
+            System.err.println("[CLIENT] Redirecting to Raft leader "
+                    + response.getLeaderId()
+                    + " at " + response.getLeaderHost() + ":" + response.getLeaderPort());
+            
+            if (!ctx.reconnecting.compareAndSet(false, true)) {
+                System.err.println("[CLIENT] Redirect already in progress; ignoring duplicate NOT_LEADER.");
+                return;
+            }
+
+            try {
+                if (ctx.receiver != null) {
+                    ctx.receiver.shutdown();
+                }
+                if (ctx.heartbeatManager != null) {
+                    ctx.heartbeatManager.stop();
+                }
+
+                connection.connectDirectTo(response.getLeaderHost(), response.getLeaderPort());
+
+                ObjectOutputStream newOut = connection.getObjectOutputStream();
+
+                newOut.writeObject(ClientJoinMessage.joinCommand(username));
+                newOut.flush();
+
+                sender.updateOutputStream(newOut);
+
+                startReceiverAndHeartbeat(ctx, connection, sender, username);
+                ctx.reconnecting.set(false);
+            } catch (IOException e) {
+                System.err.println("[CLIENT] Redirect to leader failed: " + e.getMessage());
+                ctx.reconnecting.set(false);
+            }
+        };
+
         ClientMessageReceiver receiver =
-                new ClientMessageReceiver(in, sender, username, heartbeatManager);
+                new ClientMessageReceiver(in, sender, username, heartbeatManager, redirectHandler);
 
         ctx.receiver = receiver;
         ctx.heartbeatManager = heartbeatManager;

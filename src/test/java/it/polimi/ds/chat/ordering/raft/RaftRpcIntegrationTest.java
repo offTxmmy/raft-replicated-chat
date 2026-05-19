@@ -37,7 +37,7 @@ class RaftRpcIntegrationTest {
 
         try {
             Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
-            voters.put(99, new RaftPeerEndpoint(99, "127.0.0.1", port));
+            voters.put(99, new RaftPeerEndpoint(99, "127.0.0.1", port, 50099));
             RaftRpcClient client = new RaftRpcClient(0, voters);
 
             AtomicReference<RequestVoteResponseMessage> received = new AtomicReference<>();
@@ -70,7 +70,7 @@ class RaftRpcIntegrationTest {
 
         try {
             Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
-            voters.put(42, new RaftPeerEndpoint(42, "127.0.0.1", port));
+            voters.put(42, new RaftPeerEndpoint(42, "127.0.0.1", port, 50042));
             RaftRpcClient client = new RaftRpcClient(0, voters);
 
             AtomicReference<Integer> seenPeer = new AtomicReference<>();
@@ -100,7 +100,7 @@ class RaftRpcIntegrationTest {
     void unreachablePeerIsSilentlyIgnored() throws InterruptedException {
         // Port 1 is privileged on Unix and unbound on Windows: connection will be refused.
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
-        voters.put(1, new RaftPeerEndpoint(1, "127.0.0.1", 1));
+        voters.put(1, new RaftPeerEndpoint(1, "127.0.0.1", 1, 50001));
         RaftRpcClient client = new RaftRpcClient(0, voters, 100, 100);
 
         AtomicBoolean voteCalled = new AtomicBoolean(false);

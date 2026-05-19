@@ -66,7 +66,7 @@ class RaftOrderingServiceIntegrationTest {
 
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
         for (int i = 0; i < 3; i++) {
-            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i]));
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
         }
 
         nodes = new RaftOrderingService[3];
@@ -118,7 +118,7 @@ class RaftOrderingServiceIntegrationTest {
 
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
         for (int i = 0; i < 3; i++) {
-            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", firstPorts[i]));
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", firstPorts[i], 50000 + i));
         }
 
         Path[] storageDirs = new Path[3];
@@ -158,7 +158,7 @@ class RaftOrderingServiceIntegrationTest {
         int[] secondPorts = pickFreePorts(3);
         Map<Integer, RaftPeerEndpoint> restartedVoters = new HashMap<>();
         for (int i = 0; i < 3; i++) {
-            restartedVoters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", secondPorts[i]));
+            restartedVoters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", secondPorts[i], 50000 + i));
         }
 
         nodes = new RaftOrderingService[3];
@@ -202,7 +202,7 @@ class RaftOrderingServiceIntegrationTest {
 
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
         for (int i = 0; i < 3; i++) {
-            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i]));
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
         }
 
         nodes = new RaftOrderingService[3];

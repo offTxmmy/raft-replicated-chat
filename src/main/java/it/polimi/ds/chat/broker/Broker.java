@@ -621,7 +621,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param leaderId  known Raft leader id, or -1 if no leader is currently known
      */
     private void sendNotLeaderToClient(String username, long timestamp, int leaderId) {
-        String response = "NOT_LEADER timestamp=" + timestamp + " leaderId=" + leaderId;
+        NotLeaderResponseMessage response = buildNotLeaderResponse(timestamp, leaderId);
 
         synchronized (clients) {
             for (ClientHandler handler : clients) {
@@ -631,5 +631,23 @@ public class Broker implements Serializable, OrderingServiceCallback {
                 }
             }
         }
+    }
+
+    private NotLeaderResponseMessage buildNotLeaderResponse(long timestamp, int leaderId) {
+        if (leaderId < 0 || config.getRaftConfig() == null) {
+            return new NotLeaderResponseMessage(timestamp, leaderId, null, -1);
+        }
+
+        RaftPeerEndpoint leaderEndpoint = config.getRaftConfig().getVoters().get(leaderId);
+        if (leaderEndpoint == null) {
+            return new NotLeaderResponseMessage(timestamp, leaderId, null, -1);
+        }
+
+        return new NotLeaderResponseMessage(
+                timestamp,
+                leaderId,
+                leaderEndpoint.host(),
+                leaderEndpoint.clientPort()
+        );
     }
 }

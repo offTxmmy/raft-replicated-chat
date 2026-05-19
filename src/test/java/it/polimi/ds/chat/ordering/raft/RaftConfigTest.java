@@ -23,9 +23,9 @@ class RaftConfigTest {
 
     private static Map<Integer, RaftPeerEndpoint> threeVoters() {
         Map<Integer, RaftPeerEndpoint> v = new HashMap<>();
-        v.put(0, new RaftPeerEndpoint(0, "host0", 7000));
-        v.put(1, new RaftPeerEndpoint(1, "host1", 7001));
-        v.put(2, new RaftPeerEndpoint(2, "host2", 7002));
+        v.put(0, new RaftPeerEndpoint(0, "host0", 7000, 50000));
+        v.put(1, new RaftPeerEndpoint(1, "host1", 7001, 50001));
+        v.put(2, new RaftPeerEndpoint(2, "host2", 7002, 50002));
         return v;
     }
 
@@ -45,8 +45,8 @@ class RaftConfigTest {
     @Test
     void quorumOnFiveNodes(@TempDir Path dir) {
         Map<Integer, RaftPeerEndpoint> v = threeVoters();
-        v.put(3, new RaftPeerEndpoint(3, "host3", 7003));
-        v.put(4, new RaftPeerEndpoint(4, "host4", 7004));
+        v.put(3, new RaftPeerEndpoint(3, "host3", 7003, 50003));
+        v.put(4, new RaftPeerEndpoint(4, "host4", 7004, 50004));
 
         RaftConfig cfg = new RaftConfig(150, 300, 30, 7000, dir, v);
         assertEquals(3, cfg.getQuorumSize());
@@ -56,13 +56,13 @@ class RaftConfigTest {
     void votersMapIsUnmodifiable(@TempDir Path dir) {
         RaftConfig cfg = new RaftConfig(150, 300, 30, 7000, dir, threeVoters());
         assertThrows(UnsupportedOperationException.class,
-                () -> cfg.getVoters().put(99, new RaftPeerEndpoint(99, "x", 9000)));
+                () -> cfg.getVoters().put(99, new RaftPeerEndpoint(99, "x", 9000, 50099)));
     }
 
     @Test
     void mismatchedVoterIdRejected(@TempDir Path dir) {
         Map<Integer, RaftPeerEndpoint> bad = new HashMap<>();
-        bad.put(0, new RaftPeerEndpoint(7, "host0", 7000)); // key 0 vs endpoint id 7
+        bad.put(0, new RaftPeerEndpoint(7, "host0", 7000, 50007)); // key 0 vs endpoint id 7
 
         assertThrows(IllegalArgumentException.class,
                 () -> new RaftConfig(150, 300, 30, 7000, dir, bad));

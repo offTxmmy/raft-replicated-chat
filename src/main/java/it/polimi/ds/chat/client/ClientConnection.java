@@ -34,6 +34,10 @@ public class ClientConnection {
      * @throws IOException if the connection or streams cannot be established
      */
     public void open() throws IOException {
+        openSocket();
+    }
+
+    private void openSocket() throws IOException {
         this.socket = new Socket(host, port);
         this.objectOut = new ObjectOutputStream(socket.getOutputStream());
         this.objectIn = new ObjectInputStream(socket.getInputStream());
@@ -117,5 +121,10 @@ public class ClientConnection {
         close();
         this.host = newHost;
         this.port = newPort;
+    }
+
+    public void connectDirectTo(String newHost, int newPort) throws IOException {
+        reopenTo(newHost, newPort);
+        openSocket();
     }
 }
