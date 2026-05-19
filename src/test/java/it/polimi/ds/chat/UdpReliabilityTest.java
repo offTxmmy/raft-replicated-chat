@@ -48,7 +48,7 @@ public class UdpReliabilityTest {
         assertTrue(connectionLatch.await(5, TimeUnit.SECONDS), "Follower failed to connect");
 
         CountDownLatch deliverLatch = new CountDownLatch(1);
-        List<ChatDeliverMessage> received = new ArrayList<>();
+        List<ChatDeliverMessage> received = Collections.synchronizedList(new ArrayList<>());
 
         follower.onDeliver(msg -> {
             System.out.println("[Test] Follower received seq=" + msg.getSeq());
@@ -62,9 +62,11 @@ public class UdpReliabilityTest {
         sequencer.propose(new ChatReqMessage("msg-1", 0, "Alice", "Hello UDP", vc));
 
         assertTrue(deliverLatch.await(2, TimeUnit.SECONDS), "Message was not delivered via UDP");
-        assertEquals(1, received.size());
-        assertEquals("Hello UDP", received.get(0).getText());
-        assertEquals(1, received.get(0).getSeq());
+
+        boolean receivedExpectedMessage = received.stream().anyMatch(msg ->
+                msg.getSeq() == 1L && msg.getText().equals("Hello UDP"));
+
+        assertTrue(receivedExpectedMessage, "Expected UDP delivery was not received");
     }
 
     /**

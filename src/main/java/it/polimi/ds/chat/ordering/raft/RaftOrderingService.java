@@ -47,9 +47,9 @@ import java.util.function.Consumer;
  * Replication to peers happens on the next heartbeat tick. Client-side
  * redirect via {@link #getLeaderId()} can be added at the application layer.
  *
- * <p><b>Scope note:</b> log entries are not yet persisted in this phase.
- * Only {@code (currentTerm, votedFor)} is durable. Log persistence is a
- * one-line wiring change once {@link RaftLog} accepts a {@link RaftPersistence}.
+ * <p>Both {@code (currentTerm, votedFor)} and log entries are persisted.
+ * On startup, the replicated log is rebuilt from durable storage before
+ * election and replication components are created.
  */
 public final class RaftOrderingService implements OrderingService {
 
@@ -109,8 +109,8 @@ public final class RaftOrderingService implements OrderingService {
         // 2. Core Raft state.
         raftNode = new RaftNode(localNodeId, persistence,
                 persisted.currentTerm(), persisted.votedFor());
-        raftLog  = new RaftLog();
-        // NOTE: log replay from persistence deferred — see scope note above.
+        raftLog  = new RaftLog(persistence);
+        raftLog.loadFromPersistence(persistence.loadLogEntries());
 
         // 3. State machine: deliver committed entries as ChatDeliverMessage.
         RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
@@ -214,7 +214,9 @@ public final class RaftOrderingService implements OrderingService {
                 + ", voters=" + raftConfig.getVoters().keySet()
                 + ", rpcPort=" + raftConfig.getRpcPort()
                 + ", restoredTerm=" + persisted.currentTerm()
-                + ", restoredVote=" + persisted.votedFor());
+                + ", restoredVote=" + persisted.votedFor()
+                + ", restoredLogLastIndex=" + raftLog.lastLogIndex()
+                + ", restoredLogLastTerm=" + raftLog.lastLogTerm());
     }
 
     @Override

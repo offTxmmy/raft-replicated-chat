@@ -16,6 +16,15 @@ import java.util.List;
 public class RaftLog implements RaftLogMetadata {
 
     private final List<RaftLogEntry> entries = new ArrayList<>();
+    private final RaftPersistence persistence;
+
+    public RaftLog() {
+        this(RaftPersistence.NO_OP);
+    }
+
+    public RaftLog(RaftPersistence persistence) {
+        this.persistence = persistence;
+    }
 
     @Override
     public synchronized long lastLogIndex() {
@@ -141,6 +150,31 @@ public class RaftLog implements RaftLogMetadata {
     }
 
     /**
+     * Rebuilds the in-memory log from persisted entries during startup.
+     * This method must not write the loaded entries back to persistence.
+     *
+     * @param persistedEntries entries loaded from durable storage
+     */
+    public synchronized void loadFromPersistence(List<RaftLogEntry> persistedEntries) {
+        if (!entries.isEmpty()) {
+            throw new IllegalStateException("Cannot load persisted entries into a non-empty RaftLog");
+        }
+
+        if (persistedEntries == null || persistedEntries.isEmpty()) {
+            return;
+        }
+
+        long expectedIndex = 1L;
+        for (RaftLogEntry entry : persistedEntries) {
+            if (entry.getIndex() != expectedIndex) {
+                throw new IllegalStateException("Persisted log is not contiguous at index: " + expectedIndex);
+            }
+            entries.add(entry);
+            expectedIndex++;
+        }
+    }
+
+    /**
      * Appends a single entry at the end of the log.
      *
      * @param term    term of the entry
@@ -150,6 +184,7 @@ public class RaftLog implements RaftLogMetadata {
     public synchronized RaftLogEntry append(long term, ChatCommand command) {
         long index = lastLogIndex() + 1L;
         RaftLogEntry entry = new RaftLogEntry(index, term, command);
+        persistence.appendLogEntry(entry);
         entries.add(entry);
         return entry;
     }
@@ -209,6 +244,7 @@ public class RaftLog implements RaftLogMetadata {
             if (incoming.getIndex() != expectedIndex) {
                 throw new IllegalArgumentException("Non-contiguous entries at index " + expectedIndex);
             }
+            persistence.appendLogEntry(incoming);
             entries.add(incoming);
             expectedIndex++;
         }
@@ -225,6 +261,7 @@ public class RaftLog implements RaftLogMetadata {
         if (fromIndex <= 0L || fromIndex > lastLogIndex()) {
             return;
         }
+        persistence.truncateLogFrom(fromIndex);
         int from = (int) fromIndex - 1;
         entries.subList(from, entries.size()).clear();
     }

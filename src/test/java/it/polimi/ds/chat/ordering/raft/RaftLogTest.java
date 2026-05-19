@@ -6,6 +6,7 @@ import it.polimi.ds.chat.utilities.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.ArrayList;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -93,7 +94,112 @@ class RaftLogTest {
         assertEquals(2L, log.lastLogTerm());
     }
 
+    @Test
+    void appendShouldPersistEntryBeforeStoringInMemory() {
+        RecordingPersistence persistence = new RecordingPersistence();
+        RaftLog log = new RaftLog(persistence);
+
+        RaftLogEntry entry = log.append(3L, command("persisted"));
+
+        assertEquals(1, persistence.appended.size());
+        assertEquals(entry, persistence.appended.get(0));
+        assertEquals(entry, log.getEntry(1L));
+    }
+
+    @Test
+    void appendEntriesShouldPersistOnlyNewEntries() {
+        RecordingPersistence persistence = new RecordingPersistence();
+        RaftLog log = new RaftLog(persistence);
+
+        log.append(1L, command("a"));
+        persistence.appended.clear();
+
+        boolean applied = log.appendEntries(1L, 1L, List.of(
+                new RaftLogEntry(2L, 2L, command("b")),
+                new RaftLogEntry(3L, 2L, command("c"))
+        ));
+
+        assertTrue(applied);
+        assertEquals(2, persistence.appended.size());
+        assertEquals(2L, persistence.appended.get(0).getIndex());
+        assertEquals(3L, persistence.appended.get(1).getIndex());
+        assertEquals(3L, log.lastLogIndex());
+    }
+
+    @Test
+    void appendEntriesShouldTruncatePersistedTailBeforeAppendingConflictReplacement() {
+        RecordingPersistence persistence = new RecordingPersistence();
+        RaftLog log = new RaftLog(persistence);
+
+        log.append(1L, command("a"));
+        log.append(1L, command("b"));
+        persistence.appended.clear();
+
+        boolean applied = log.appendEntries(1L, 1L, List.of(
+                new RaftLogEntry(2L, 2L, command("replacement")),
+                new RaftLogEntry(3L, 2L, command("new-tail"))
+        ));
+
+        assertTrue(applied);
+        assertEquals(List.of(2L), persistence.truncatedFrom);
+        assertEquals(2, persistence.appended.size());
+        assertEquals("replacement", log.getEntry(2L).getCommand().getLocalMsgId());
+        assertEquals("new-tail", log.getEntry(3L).getCommand().getLocalMsgId());
+    }
+
+    @Test
+    void loadFromPersistenceShouldRestoreLogWithoutRewritingEntries() {
+        RecordingPersistence persistence = new RecordingPersistence();
+        RaftLog log = new RaftLog(persistence);
+
+        log.loadFromPersistence(List.of(
+                new RaftLogEntry(1L, 1L, command("a")),
+                new RaftLogEntry(2L, 3L, command("b"))
+        ));
+
+        assertEquals(2L, log.lastLogIndex());
+        assertEquals(3L, log.lastLogTerm());
+        assertEquals("a", log.getEntry(1L).getCommand().getLocalMsgId());
+        assertEquals("b", log.getEntry(2L).getCommand().getLocalMsgId());
+        assertTrue(persistence.appended.isEmpty());
+        assertTrue(persistence.truncatedFrom.isEmpty());
+    }
+
+    @Test
+    void loadFromPersistenceShouldRejectNonContiguousEntries() {
+        RaftLog log = new RaftLog(new RecordingPersistence());
+
+        IllegalStateException ex = assertThrows(IllegalStateException.class, () ->
+                log.loadFromPersistence(List.of(
+                        new RaftLogEntry(1L, 1L, command("a")),
+                        new RaftLogEntry(3L, 1L, command("c"))
+                ))
+        );
+
+        assertTrue(ex.getMessage().contains("not contiguous"));
+    }
+
     private ChatCommand command(String localMsgId) {
         return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    }
+
+    private static final class RecordingPersistence implements RaftPersistence {
+        private final List<RaftLogEntry> appended = new ArrayList<>();
+        private final List<Long> truncatedFrom = new ArrayList<>();
+
+        @Override
+        public void persistTermAndVote(long currentTerm, Integer votedFor) {
+            // Not used by RaftLog tests.
+        }
+
+        @Override
+        public void appendLogEntry(RaftLogEntry entry) {
+            appended.add(entry);
+        }
+
+        @Override
+        public void truncateLogFrom(long fromIndex) {
+            truncatedFrom.add(fromIndex);
+        }
     }
 }

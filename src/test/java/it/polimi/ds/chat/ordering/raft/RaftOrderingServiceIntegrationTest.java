@@ -113,6 +113,90 @@ class RaftOrderingServiceIntegrationTest {
     }
 
     @Test
+    void restartedNodesReloadPersistedLogAndContinueSequence(@TempDir Path baseDir) throws Exception {
+        int[] firstPorts = pickFreePorts(3);
+
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", firstPorts[i]));
+        }
+
+        Path[] storageDirs = new Path[3];
+        nodes = new RaftOrderingService[3];
+        List<List<ChatDeliverMessage>> firstRunDeliveries = new ArrayList<>();
+
+        for (int i = 0; i < 3; i++) {
+            storageDirs[i] = baseDir.resolve("n" + i);
+            nodes[i] = buildService(i, firstPorts[i], voters, storageDirs[i]);
+
+            List<ChatDeliverMessage> d = new CopyOnWriteArrayList<>();
+            firstRunDeliveries.add(d);
+            nodes[i].onDeliver(d::add);
+        }
+
+        for (RaftOrderingService n : nodes) {
+            n.start();
+        }
+
+        int firstLeader = waitForSingleLeader();
+        assertTrue(firstLeader >= 0, "no leader elected before restart");
+
+        ChatReqMessage firstReq = new ChatReqMessage(
+                "msg-before-restart", firstLeader, "alice", "before restart", new VectorClock());
+
+        assertTrue(nodes[firstLeader].propose(firstReq), "first proposal should commit");
+
+        assertTrue(waitFor(
+                () -> firstRunDeliveries.stream().allMatch(d -> d.size() >= 1),
+                DELIVERY_DEADLINE_MS
+        ), "first message not delivered before restart");
+
+        for (RaftOrderingService n : nodes) {
+            n.stop();
+        }
+
+        int[] secondPorts = pickFreePorts(3);
+        Map<Integer, RaftPeerEndpoint> restartedVoters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            restartedVoters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", secondPorts[i]));
+        }
+
+        nodes = new RaftOrderingService[3];
+        List<List<ChatDeliverMessage>> secondRunDeliveries = new ArrayList<>();
+
+        for (int i = 0; i < 3; i++) {
+            nodes[i] = buildService(i, secondPorts[i], restartedVoters, storageDirs[i]);
+
+            List<ChatDeliverMessage> d = new CopyOnWriteArrayList<>();
+            secondRunDeliveries.add(d);
+            nodes[i].onDeliver(d::add);
+        }
+
+        for (RaftOrderingService n : nodes) {
+            n.start();
+        }
+
+        int secondLeader = waitForSingleLeader();
+        assertTrue(secondLeader >= 0, "no leader elected after restart");
+
+        ChatReqMessage secondReq = new ChatReqMessage(
+                "msg-after-restart", secondLeader, "alice", "after restart", new VectorClock());
+
+        assertTrue(nodes[secondLeader].propose(secondReq), "second proposal should commit");
+
+        assertTrue(waitFor(
+                () -> secondRunDeliveries.stream().allMatch(d -> d.stream().anyMatch(msg -> msg.getSeq() == 2L)),
+                DELIVERY_DEADLINE_MS
+        ), "second message with seq=2 not delivered after restart");
+
+        for (int i = 0; i < 3; i++) {
+            boolean hasSeq2 = secondRunDeliveries.get(i).stream()
+                    .anyMatch(msg -> msg.getSeq() == 2L && msg.getText().equals("after restart"));
+            assertTrue(hasSeq2, "node " + i + " did not deliver restarted seq=2 message");
+        }
+    }
+
+    @Test
     void followerRejectsClientProposalWithoutDeliveringMessage(@TempDir Path baseDir) throws Exception {
         int[] ports = pickFreePorts(3);
 
