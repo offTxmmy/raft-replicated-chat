@@ -290,30 +290,70 @@ public class RaftReplicationManager implements RaftElectionListener {
             return;
         }
 
+        List<AppendEntriesSendPlan> sendPlans = new ArrayList<>();
         for (Map.Entry<Integer, RaftPeerReplicationState> entry : replicationState.entrySet()) {
-            sendAppendEntries(entry.getKey(), entry.getValue());
+            sendPlans.add(buildAppendEntriesSendPlan(entry.getKey(), entry.getValue()));
+        }
+
+        sendAppendEntries(sendPlans, replicationState.size());
+    }
+
+    /**
+     * Builds AppendEntries requests for all followers before sending them.
+     *
+     * <p>This keeps request construction separate from transport selection and
+     * allows identical empty heartbeats to be grouped into a single broadcast.
+     */
+    private void sendAppendEntries(List<AppendEntriesSendPlan> sendPlans, int followerCount) {
+        Map<EmptyHeartbeatKey, HeartbeatBroadcastPlan> emptyHeartbeats = new LinkedHashMap<>();
+
+        for (AppendEntriesSendPlan sendPlan : sendPlans) {
+            AppendEntriesRequestMessage request = sendPlan.request();
+            if (!request.getEntries().isEmpty()) {
+                appendEntriesSender.sendAppendEntries(sendPlan.peerId(), request);
+                continue;
+            }
+
+            EmptyHeartbeatKey key = EmptyHeartbeatKey.from(request);
+            HeartbeatBroadcastPlan broadcastPlan = emptyHeartbeats.computeIfAbsent(
+                    key,
+                    ignored -> new HeartbeatBroadcastPlan(request)
+            );
+            broadcastPlan.peerIds().add(sendPlan.peerId());
+        }
+
+        for (HeartbeatBroadcastPlan broadcastPlan : emptyHeartbeats.values()) {
+            if (broadcastPlan.peerIds().size() == followerCount) {
+                appendEntriesSender.broadcastAppendEntries(
+                        broadcastPlan.request(),
+                        Collections.unmodifiableSet(broadcastPlan.peerIds())
+                );
+                continue;
+            }
+
+            for (Integer peerId : broadcastPlan.peerIds()) {
+                appendEntriesSender.sendAppendEntries(peerId, broadcastPlan.request());
+            }
         }
     }
 
     /**
-     * Builds and sends an AppendEntries request for a single follower.
+     * Builds an AppendEntries request for a single follower.
      */
-    private void sendAppendEntries(int peerId, RaftPeerReplicationState state) {
+    private AppendEntriesSendPlan buildAppendEntriesSendPlan(int peerId, RaftPeerReplicationState state) {
         long nextIndex = state.getNextIndex();
         long prevLogIndex = nextIndex - 1L;
         long prevLogTerm = log.getTermAt(prevLogIndex);
         List<RaftLogEntry> entries = log.getEntriesFrom(nextIndex);
 
-        AppendEntriesRequestMessage request = new AppendEntriesRequestMessage(
+        return new AppendEntriesSendPlan(peerId, new AppendEntriesRequestMessage(
                 raftNode.getCurrentTerm(),
                 localNodeId,
                 prevLogIndex,
                 prevLogTerm,
                 entries,
                 commitManager.getCommitIndex()
-        );
-
-        appendEntriesSender.sendAppendEntries(peerId, request);
+        ));
     }
 
     /**
@@ -358,5 +398,30 @@ public class RaftReplicationManager implements RaftElectionListener {
         LinkedHashSet<Integer> peers = new LinkedHashSet<>(allVotingNodeIds);
         peers.remove(localNodeId);
         return Collections.unmodifiableSet(peers);
+    }
+
+    private record AppendEntriesSendPlan(int peerId, AppendEntriesRequestMessage request) {
+    }
+
+    private record EmptyHeartbeatKey(long term,
+                                     int leaderId,
+                                     long prevLogIndex,
+                                     long prevLogTerm,
+                                     long leaderCommit) {
+        static EmptyHeartbeatKey from(AppendEntriesRequestMessage request) {
+            return new EmptyHeartbeatKey(
+                    request.getTerm(),
+                    request.getLeaderId(),
+                    request.getPrevLogIndex(),
+                    request.getPrevLogTerm(),
+                    request.getLeaderCommit()
+            );
+        }
+    }
+
+    private record HeartbeatBroadcastPlan(AppendEntriesRequestMessage request, Set<Integer> peerIds) {
+        HeartbeatBroadcastPlan(AppendEntriesRequestMessage request) {
+            this(request, new LinkedHashSet<>());
+        }
     }
 }

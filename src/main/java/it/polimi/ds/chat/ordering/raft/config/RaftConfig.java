@@ -7,8 +7,8 @@ import java.util.Objects;
 import java.util.TreeMap;
 
 /**
- * Immutable Raft-specific configuration block, owned by {@link BrokerConfig}
- * when {@link OrderingMode#RAFT} is selected.
+ * Immutable Raft-specific configuration block, owned by the broker configuration
+ * when Raft ordering is selected.
  *
  * <p>The {@link #getVoters() voter map} is the <strong>source of truth</strong>
  * for cluster membership and quorum (Contract A). It must include every voting
@@ -26,19 +26,50 @@ import java.util.TreeMap;
  */
 public final class RaftConfig {
 
+    public static final RaftTransportMode DEFAULT_TRANSPORT_MODE = RaftTransportMode.TCP_UNICAST;
+    public static final int DEFAULT_RAFT_BROADCAST_PORT = 7100;
+    public static final int DEFAULT_UDP_MAX_PAYLOAD_BYTES = 1400;
+    public static final String DEFAULT_CLUSTER_ID = "default-raft-cluster";
+
     private final long electionTimeoutMinMs;
     private final long electionTimeoutMaxMs;
     private final long heartbeatIntervalMs;
     private final int rpcPort;
+    private final RaftTransportMode transportMode;
+    private final int raftBroadcastPort;
+    private final int udpMaxPayloadBytes;
+    private final String clusterId;
     private final Path storageDir;
     private final Map<Integer, RaftPeerEndpoint> voters;
 
     public RaftConfig(long electionTimeoutMinMs,
-                      long electionTimeoutMaxMs,
-                      long heartbeatIntervalMs,
-                      int rpcPort,
-                      Path storageDir,
-                      Map<Integer, RaftPeerEndpoint> voters) {
+                  long electionTimeoutMaxMs,
+                  long heartbeatIntervalMs,
+                  int rpcPort,
+                  Path storageDir,
+                  Map<Integer, RaftPeerEndpoint> voters) {
+        this(electionTimeoutMinMs,
+                electionTimeoutMaxMs,
+                heartbeatIntervalMs,
+                rpcPort,
+                DEFAULT_TRANSPORT_MODE,
+                DEFAULT_RAFT_BROADCAST_PORT,
+                DEFAULT_UDP_MAX_PAYLOAD_BYTES,
+                DEFAULT_CLUSTER_ID,
+                storageDir,
+                voters);
+    }
+
+    public RaftConfig(long electionTimeoutMinMs,
+                  long electionTimeoutMaxMs,
+                  long heartbeatIntervalMs,
+                  int rpcPort,
+                  RaftTransportMode transportMode,
+                  int raftBroadcastPort,
+                  int udpMaxPayloadBytes,
+                  String clusterId,
+                  Path storageDir,
+                  Map<Integer, RaftPeerEndpoint> voters) {
         if (electionTimeoutMinMs <= 0L) {
             throw new IllegalArgumentException("electionTimeoutMinMs must be > 0");
         }
@@ -55,6 +86,17 @@ public final class RaftConfig {
         }
         if (rpcPort < 1 || rpcPort > 65535) {
             throw new IllegalArgumentException("rpcPort out of range: " + rpcPort);
+        }
+        Objects.requireNonNull(transportMode, "transportMode");
+        if (raftBroadcastPort < 1 || raftBroadcastPort > 65535) {
+            throw new IllegalArgumentException("raftBroadcastPort out of range: " + raftBroadcastPort);
+        }
+        if (udpMaxPayloadBytes <= 0) {
+            throw new IllegalArgumentException("udpMaxPayloadBytes must be > 0");
+        }
+        Objects.requireNonNull(clusterId, "clusterId");
+        if (clusterId.isBlank()) {
+            throw new IllegalArgumentException("clusterId must not be blank");
         }
         Objects.requireNonNull(storageDir, "storageDir");
         Objects.requireNonNull(voters, "voters");
@@ -76,6 +118,10 @@ public final class RaftConfig {
         this.electionTimeoutMaxMs = electionTimeoutMaxMs;
         this.heartbeatIntervalMs  = heartbeatIntervalMs;
         this.rpcPort              = rpcPort;
+        this.transportMode        = transportMode;
+        this.raftBroadcastPort    = raftBroadcastPort;
+        this.udpMaxPayloadBytes   = udpMaxPayloadBytes;
+        this.clusterId            = clusterId;
         this.storageDir           = storageDir;
         // defensive immutable copy with deterministic iteration order
         this.voters = Collections.unmodifiableMap(new TreeMap<>(voters));
@@ -95,6 +141,33 @@ public final class RaftConfig {
 
     public int getRpcPort() {
         return rpcPort;
+    }
+
+    public RaftTransportMode getTransportMode() {
+        return transportMode;
+    }
+
+    /**
+     * UDP port used by every broker in the same Raft cluster for LAN broadcast
+     * traffic. Unlike {@link #getRpcPort()}, this port is common across nodes.
+     */
+    public int getRaftBroadcastPort() {
+        return raftBroadcastPort;
+    }
+
+    /**
+     * Maximum serialized UDP payload accepted by the Raft UDP transport.
+     */
+    public int getUdpMaxPayloadBytes() {
+        return udpMaxPayloadBytes;
+    }
+
+    /**
+     * Logical cluster identifier used to ignore UDP packets from unrelated
+     * clusters sharing the same LAN.
+     */
+    public String getClusterId() {
+        return clusterId;
     }
 
     public Path getStorageDir() {

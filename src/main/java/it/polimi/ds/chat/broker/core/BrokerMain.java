@@ -5,6 +5,7 @@ import it.polimi.ds.chat.broker.config.OrderingMode;
 import it.polimi.ds.chat.broker.session.HandlerState;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
+import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -13,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.InputMismatchException;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Scanner;
 
@@ -30,13 +32,16 @@ import java.util.Scanner;
  *
  * <h4>Raft mode</h4>
  * <pre>
- *   java BrokerMain raft &lt;nodeId&gt; &lt;rpcPort&gt; &lt;votersCSV&gt; [clientPort]
+ *   java BrokerMain raft &lt;nodeId&gt; &lt;rpcPort&gt; &lt;votersCSV&gt;
+ *       [clientPort] [transportMode] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]
  * </pre>
  * where {@code votersCSV} is a comma-separated list of voter endpoints in
  * the form {@code id@host:rpcPort[:clientPort]}, identical on every node of the cluster.
+ * {@code transportMode} is {@code TCP_UNICAST} by default; use {@code HYBRID}
+ * to send RequestVote and empty heartbeat traffic over UDP LAN broadcast.
  * Example:
  * <pre>
- *   java BrokerMain raft 0 7000 0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002 50000
+ *   java BrokerMain raft 0 7000 0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002 50000 HYBRID 7100 demo-cluster 1400
  * </pre>
  * Storage directory defaults to {@code ./raft-data/n&lt;nodeId&gt;}.
  */
@@ -60,8 +65,10 @@ public class BrokerMain {
 
     private static void startRaftMode(String[] args) {
         if (args.length < 4) {
-            System.err.println("Usage: raft <nodeId> <rpcPort> <votersCSV> [clientPort]");
+            System.err.println("Usage: raft <nodeId> <rpcPort> <votersCSV> "
+                    + "[clientPort] [transportMode] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]");
             System.err.println("  votersCSV: id@host:rpcPort[:clientPort],id@host:rpcPort[:clientPort],...");
+            System.err.println("  transportMode: TCP_UNICAST or HYBRID (default: TCP_UNICAST)");
             System.exit(2);
         }
 
@@ -69,6 +76,19 @@ public class BrokerMain {
         int rpcPort     = Integer.parseInt(args[2]);
         String votersCsv = args[3];
         int clientPort  = (args.length >= 5) ? Integer.parseInt(args[4]) : 50000 + nodeId;
+
+        RaftTransportMode transportMode = (args.length >= 6)
+                ? RaftTransportMode.valueOf(args[5].toUpperCase(Locale.ROOT))
+                : RaftConfig.DEFAULT_TRANSPORT_MODE;
+        int raftBroadcastPort = (args.length >= 7)
+                ? Integer.parseInt(args[6])
+                : RaftConfig.DEFAULT_RAFT_BROADCAST_PORT;
+        String clusterId = (args.length >= 8)
+                ? args[7]
+                : RaftConfig.DEFAULT_CLUSTER_ID;
+        int udpMaxPayloadBytes = (args.length >= 9)
+                ? Integer.parseInt(args[8])
+                : RaftConfig.DEFAULT_UDP_MAX_PAYLOAD_BYTES;
 
         Map<Integer, RaftPeerEndpoint> voters = parseVoters(votersCsv);
         if (!voters.containsKey(nodeId)) {
@@ -83,6 +103,10 @@ public class BrokerMain {
                 /* electionTimeoutMaxMs */ 400,
                 /* heartbeatIntervalMs  */ 40,
                 rpcPort,
+                transportMode,
+                raftBroadcastPort,
+                udpMaxPayloadBytes,
+                clusterId,
                 storageDir,
                 voters);
 
@@ -104,6 +128,10 @@ public class BrokerMain {
         System.out.println("Starting RAFT broker, nodeId=" + nodeId
                 + ", rpcPort=" + rpcPort
                 + ", clientPort=" + clientPort
+                + ", transportMode=" + transportMode
+                + ", raftBroadcastPort=" + raftBroadcastPort
+                + ", clusterId=" + clusterId
+                + ", udpMaxPayloadBytes=" + udpMaxPayloadBytes
                 + ", voters=" + voters.keySet()
                 + ", storageDir=" + storageDir.toAbsolutePath());
 

@@ -177,6 +177,31 @@ class RaftElectionManagerTest {
     }
 
     /**
+     * Verifies that the election manager expresses RequestVote fan-out as one
+     * broadcast operation over the static peer set. The sender may still implement
+     * that broadcast as TCP unicast internally, but the election layer should not
+     * hard-code the transport strategy.
+     */
+    @Test
+    void electionTimeoutShouldUseBroadcastRequestVoteOperation() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RaftElectionManager manager = newManager(2, setOf(1, 2, 3, 4), fakeClock, sender);
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire();
+
+        assertEquals(1, sender.broadcastRequests.size());
+
+        BroadcastVoteRequest broadcast = sender.broadcastRequests.get(0);
+        assertEquals(setOf(1, 3, 4), broadcast.peerIds());
+        assertEquals(1L, broadcast.request().getTerm());
+        assertEquals(2, broadcast.request().getCandidateId());
+        assertEquals(0L, broadcast.request().getLastLogIndex());
+        assertEquals(0L, broadcast.request().getLastLogTerm());
+    }
+
+    /**
      * Verifies that RequestVote messages are built using the current local log metadata.
      */
     @Test
@@ -1097,16 +1122,26 @@ class RaftElectionManagerTest {
     private record SentVoteRequest(int peerId, RequestVoteRequestMessage request) {
     }
 
+    private record BroadcastVoteRequest(RequestVoteRequestMessage request, Set<Integer> peerIds) {
+    }
+
     private static final class RecordingVoteRequestSender implements RaftVoteRequestSender {
         private final List<SentVoteRequest> sentRequests = new ArrayList<SentVoteRequest>();
+        private final List<BroadcastVoteRequest> broadcastRequests = new ArrayList<BroadcastVoteRequest>();
 
         @Override
         public void sendRequestVote(int peerId, RequestVoteRequestMessage request) {
             sentRequests.add(new SentVoteRequest(peerId, request));
         }
 
-        private Set<Integer> destinationPeerIds() {
-            LinkedHashSet<Integer> ids = new LinkedHashSet<Integer>();
+        @Override
+        public void broadcastRequestVote(RequestVoteRequestMessage request, Set<Integer> peerIds) {
+            broadcastRequests.add(new BroadcastVoteRequest(request, peerIds));
+            RaftVoteRequestSender.super.broadcastRequestVote(request, peerIds);
+        }
+
+        Set<Integer> destinationPeerIds() {
+            LinkedHashSet<Integer> ids = new LinkedHashSet<>();
             for (SentVoteRequest sent : sentRequests) {
                 ids.add(sent.peerId());
             }

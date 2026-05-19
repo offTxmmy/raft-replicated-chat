@@ -2,6 +2,7 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
+import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalRequestMessage;
@@ -71,7 +72,8 @@ public final class RaftOrderingService implements OrderingService {
     private RaftElectionManager electionManager;
     private RaftReplicationManager replicationManager;
     private RaftRpcServer rpcServer;
-    private RaftRpcClient rpcClient;
+    private RaftTransport raftTransport;
+    private RaftRpcClient tcpClient;
     private DefaultRaftClock raftClock;
 
     private volatile boolean running;
@@ -126,9 +128,10 @@ public final class RaftOrderingService implements OrderingService {
             completePendingCommit(entry);
         });
 
-        // 4. RPC client (outbound transport). Response handlers are attached
-        //    once the election/replication managers exist.
-        rpcClient = new RaftRpcClient(localNodeId, raftConfig.getVoters());
+        // 4. TCP client and outbound Raft transport. The TCP client remains available
+        //    for forwarding client proposals to the leader even when Raft RPCs become hybrid.
+        tcpClient = new RaftRpcClient(localNodeId, raftConfig.getVoters());
+        raftTransport = createRaftTransport(tcpClient);
 
         // 5. Clock for election timeout and heartbeat scheduling.
         raftClock = new DefaultRaftClock();
@@ -149,7 +152,7 @@ public final class RaftOrderingService implements OrderingService {
                 raftNode,
                 raftLog,
                 commitManager,
-                rpcClient,
+                raftTransport,
                 leaderActivityObserver
         );
 
@@ -186,17 +189,23 @@ public final class RaftOrderingService implements OrderingService {
                 raftConfig.getHeartbeatIntervalMs(),
                 raftNode,
                 raftLog,
-                rpcClient,
+                raftTransport,
                 raftClock,
                 electionListener
         );
 
-        // 10. Wire RPC client response handlers (package-private callbacks
+        // 10. Wire Raft transport response handlers (package-private callbacks
         //     on the election manager are visible here).
-        rpcClient.attachHandlers(
+        raftTransport.attachHandlers(
                 electionManager::onRequestVoteResponse,
                 replicationManager::handleAppendEntriesResponse
         );
+        if (raftTransport instanceof RaftHybridTransport hybridTransport) {
+            hybridTransport.attachRequestHandlers(
+                    electionManager::onRequestVoteRequest,
+                    replicationManager::handleAppendEntries
+            );
+        }
 
         // 11. RPC server: dispatch inbound RPCs.
         rpcServer = new RaftRpcServer(
@@ -213,7 +222,7 @@ public final class RaftOrderingService implements OrderingService {
             throw new RuntimeException("Failed to start RaftRpcServer on port "
                     + raftConfig.getRpcPort(), e);
         }
-        rpcClient.start();
+        raftTransport.start();
         replicationManager.start();
         electionManager.start();
 
@@ -221,6 +230,10 @@ public final class RaftOrderingService implements OrderingService {
         System.out.println("[RaftOrderingService] started, nodeId=" + localNodeId
                 + ", voters=" + raftConfig.getVoters().keySet()
                 + ", rpcPort=" + raftConfig.getRpcPort()
+                + ", transportMode=" + raftConfig.getTransportMode()
+                + ", raftBroadcastPort=" + raftConfig.getRaftBroadcastPort()
+                + ", clusterId=" + raftConfig.getClusterId()
+                + ", udpMaxPayloadBytes=" + raftConfig.getUdpMaxPayloadBytes()
                 + ", restoredTerm=" + persisted.currentTerm()
                 + ", restoredVote=" + persisted.votedFor()
                 + ", restoredLogLastIndex=" + raftLog.lastLogIndex()
@@ -240,7 +253,7 @@ public final class RaftOrderingService implements OrderingService {
 
         if (electionManager   != null) electionManager.stop();
         if (replicationManager != null) replicationManager.stop();
-        if (rpcClient         != null) rpcClient.stop();
+        if (raftTransport         != null) raftTransport.stop();
         if (rpcServer         != null) rpcServer.stop();
         if (raftClock         != null) raftClock.shutdown();
 
@@ -326,7 +339,7 @@ public final class RaftOrderingService implements OrderingService {
         }
 
         ForwardClientProposalResponseMessage response =
-                rpcClient.forwardClientProposal(leaderId, request);
+                tcpClient.forwardClientProposal(leaderId, request);
         if (response == null || !response.isAccepted()) {
             String reason = response == null ? "no response" : response.getReason();
             System.err.println("[RaftOrderingService] forwarded proposal rejected by leader "
@@ -369,6 +382,21 @@ public final class RaftOrderingService implements OrderingService {
 
     public int getLocalNodeId() {
         return localNodeId;
+    }
+
+    private RaftTransport createRaftTransport(RaftRpcClient tcpClient) {
+        if (raftConfig.getTransportMode() == RaftTransportMode.TCP_UNICAST) {
+            return tcpClient;
+        }
+        if (raftConfig.getTransportMode() == RaftTransportMode.HYBRID) {
+            RaftUdpBroadcastTransport udpTransport =
+                    new RaftUdpBroadcastTransport(localNodeId, raftConfig);
+            return new RaftHybridTransport(tcpClient, udpTransport);
+        }
+
+        throw new UnsupportedOperationException(
+                "Raft transport mode " + raftConfig.getTransportMode()
+                        + " is configured but not implemented yet");
     }
 
     private void notifyDelivery(ChatDeliverMessage message) {

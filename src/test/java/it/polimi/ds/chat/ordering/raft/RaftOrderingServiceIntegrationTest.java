@@ -4,6 +4,7 @@ import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.broker.config.OrderingMode;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
+import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.common.clock.VectorClock;
@@ -258,6 +259,75 @@ class RaftOrderingServiceIntegrationTest {
     }
 
     @Test
+    void hybridTransportElectsLeaderAndReplicatesOneMessage(@TempDir Path baseDir) throws Exception {
+        int[] ports = pickFreePorts(3);
+        int broadcastPort = pickFreeUdpPort();
+        String clusterId = "hybrid-it-" + System.nanoTime();
+
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
+        }
+
+        nodes = new RaftOrderingService[3];
+        List<List<ChatDeliverMessage>> deliveries = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            nodes[i] = buildService(
+                    i,
+                    ports[i],
+                    voters,
+                    baseDir.resolve("hybrid-n" + i),
+                    RaftTransportMode.HYBRID,
+                    broadcastPort,
+                    clusterId
+            );
+            List<ChatDeliverMessage> d = new CopyOnWriteArrayList<>();
+            deliveries.add(d);
+            nodes[i].onDeliver(d::add);
+        }
+        for (RaftOrderingService n : nodes) {
+            n.start();
+        }
+
+        int leaderIdx = waitForSingleLeader();
+        assertTrue(leaderIdx >= 0, "no HYBRID leader elected within "
+                + LEADER_ELECTION_DEADLINE_MS + " ms");
+
+        long leaderCount = Arrays.stream(nodes).filter(RaftOrderingService::isLeader).count();
+        assertEquals(1L, leaderCount, "expected exactly one HYBRID leader, got " + leaderCount);
+
+        assertTrue(waitFor(() -> {
+            for (int i = 0; i < nodes.length; i++) {
+                if (i != leaderIdx && nodes[i].getLeaderId() != leaderIdx) {
+                    return false;
+                }
+            }
+            return true;
+        }, DELIVERY_DEADLINE_MS), "followers did not learn the HYBRID leader from heartbeats");
+
+        ChatReqMessage req = new ChatReqMessage(
+                "hybrid-msg-1", leaderIdx, "alice", "hello hybrid", new VectorClock());
+
+        assertTrue(nodes[leaderIdx].propose(req), "HYBRID leader proposal should commit");
+
+        boolean delivered = waitFor(
+                () -> deliveries.stream().allMatch(d -> d.size() >= 1),
+                DELIVERY_DEADLINE_MS);
+        assertTrue(delivered, "HYBRID message not delivered on all nodes within "
+                + DELIVERY_DEADLINE_MS + " ms; per-node sizes = "
+                + deliveries.stream().map(List::size).toList());
+
+        for (int i = 0; i < 3; i++) {
+            List<ChatDeliverMessage> d = deliveries.get(i);
+            assertEquals(1, d.size(), "node " + i + " unexpected HYBRID delivery count");
+            assertEquals(1L, d.get(0).getSeq(), "node " + i + " unexpected HYBRID seq");
+            assertEquals("hello hybrid", d.get(0).getText(), "node " + i + " unexpected HYBRID text");
+            assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected HYBRID username");
+            assertEquals(leaderIdx, d.get(0).getBrokerId(), "node " + i + " unexpected HYBRID brokerId");
+        }
+    }
+
+    @Test
     void duplicateClientRetryForwardedByFollowerCommitsAndDeliversOnce(@TempDir Path baseDir) throws Exception {
         int[] ports = pickFreePorts(3);
 
@@ -442,12 +512,34 @@ class RaftOrderingServiceIntegrationTest {
                                              int rpcPort,
                                              Map<Integer, RaftPeerEndpoint> voters,
                                              Path storageDir) throws IOException {
+        return buildService(
+                nodeId,
+                rpcPort,
+                voters,
+                storageDir,
+                RaftTransportMode.TCP_UNICAST,
+                RaftConfig.DEFAULT_RAFT_BROADCAST_PORT,
+                RaftConfig.DEFAULT_CLUSTER_ID
+        );
+    }
+
+    private RaftOrderingService buildService(int nodeId,
+                                             int rpcPort,
+                                             Map<Integer, RaftPeerEndpoint> voters,
+                                             Path storageDir,
+                                             RaftTransportMode transportMode,
+                                             int raftBroadcastPort,
+                                             String clusterId) throws IOException {
         Files.createDirectories(storageDir);
         RaftConfig raft = new RaftConfig(
                 ELECTION_TIMEOUT_MIN_MS,
                 ELECTION_TIMEOUT_MAX_MS,
                 HEARTBEAT_INTERVAL_MS,
                 rpcPort,
+                transportMode,
+                raftBroadcastPort,
+                RaftConfig.DEFAULT_UDP_MAX_PAYLOAD_BYTES,
+                clusterId,
                 storageDir,
                 voters);
 
@@ -515,5 +607,11 @@ class RaftOrderingServiceIntegrationTest {
             }
         }
         return ports;
+    }
+
+    private static int pickFreeUdpPort() throws IOException {
+        try (java.net.DatagramSocket socket = new java.net.DatagramSocket(0)) {
+            return socket.getLocalPort();
+        }
     }
 }

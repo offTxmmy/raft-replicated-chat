@@ -39,7 +39,7 @@ import java.util.function.Consumer;
  * (needed by the election/replication managers as a sender) and the managers
  * (needed by the client to dispatch responses).
  */
-public final class RaftRpcClient implements RaftVoteRequestSender, RaftAppendEntriesSender {
+public final class RaftRpcClient implements RaftTransport {
 
     private static final int DEFAULT_CONNECT_TIMEOUT_MS = 500;
     private static final int DEFAULT_READ_TIMEOUT_MS    = 1000;
@@ -77,6 +77,7 @@ public final class RaftRpcClient implements RaftVoteRequestSender, RaftAppendEnt
     /**
      * Installs the response handlers. Must be called before {@link #start()}.
      */
+    @Override
     public synchronized void attachHandlers(
             Consumer<RequestVoteResponseMessage> voteResponseHandler,
             BiConsumer<Integer, AppendEntriesResponseMessage> appendResponseHandler) {
@@ -84,6 +85,7 @@ public final class RaftRpcClient implements RaftVoteRequestSender, RaftAppendEnt
         this.appendResponseHandler = Objects.requireNonNull(appendResponseHandler);
     }
 
+    @Override
     public synchronized void start() {
         if (running) {
             return;
@@ -99,6 +101,7 @@ public final class RaftRpcClient implements RaftVoteRequestSender, RaftAppendEnt
         running = true;
     }
 
+    @Override
     public synchronized void stop() {
         if (!running) {
             return;

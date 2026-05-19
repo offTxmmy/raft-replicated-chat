@@ -251,9 +251,7 @@ public class RaftElectionManager {
                 logMetadata.lastLogTerm()
         );
 
-        for (Integer peerId : peerVotingNodeIds) {
-            voteRequestSender.sendRequestVote(peerId, request);
-        }
+        voteRequestSender.broadcastRequestVote(request, peerVotingNodeIds);
 
         scheduleRandomElectionTimeout();
     }

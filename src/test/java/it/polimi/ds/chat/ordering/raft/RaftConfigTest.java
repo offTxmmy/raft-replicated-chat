@@ -4,6 +4,7 @@ import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.broker.config.OrderingMode;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
+import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -37,9 +38,35 @@ class RaftConfigTest {
         assertEquals(300, cfg.getElectionTimeoutMaxMs());
         assertEquals(30, cfg.getHeartbeatIntervalMs());
         assertEquals(7000, cfg.getRpcPort());
+        assertEquals(RaftConfig.DEFAULT_TRANSPORT_MODE, cfg.getTransportMode());
+        assertEquals(RaftConfig.DEFAULT_RAFT_BROADCAST_PORT, cfg.getRaftBroadcastPort());
+        assertEquals(RaftConfig.DEFAULT_UDP_MAX_PAYLOAD_BYTES, cfg.getUdpMaxPayloadBytes());
+        assertEquals(RaftConfig.DEFAULT_CLUSTER_ID, cfg.getClusterId());
         assertSame(dir, cfg.getStorageDir());
         assertEquals(3, cfg.getVoters().size());
         assertEquals(2, cfg.getQuorumSize());
+    }
+
+    @Test
+    void fullRaftConfigBuildsWithHybridTransport(@TempDir Path dir) {
+        RaftConfig cfg = new RaftConfig(
+                150,
+                300,
+                30,
+                7000,
+                RaftTransportMode.HYBRID,
+                7101,
+                1200,
+                "test-cluster",
+                dir,
+                threeVoters());
+
+        assertEquals(RaftTransportMode.HYBRID, cfg.getTransportMode());
+        assertEquals(7101, cfg.getRaftBroadcastPort());
+        assertEquals(1200, cfg.getUdpMaxPayloadBytes());
+        assertEquals("test-cluster", cfg.getClusterId());
+        assertSame(dir, cfg.getStorageDir());
+        assertEquals(3, cfg.getVoters().size());
     }
 
     @Test
@@ -84,6 +111,25 @@ class RaftConfigTest {
     void electionTimeoutMaxSmallerThanMinRejected(@TempDir Path dir) {
         assertThrows(IllegalArgumentException.class,
                 () -> new RaftConfig(300, 150, 30, 7000, dir, threeVoters()));
+    }
+
+    @Test
+    void invalidRaftTransportSettingsRejected(@TempDir Path dir) {
+        assertThrows(NullPointerException.class,
+                () -> new RaftConfig(150, 300, 30, 7000,
+                        null, 7100, 1400, "cluster", dir, threeVoters()));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new RaftConfig(150, 300, 30, 7000,
+                        RaftTransportMode.HYBRID, 0, 1400, "cluster", dir, threeVoters()));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new RaftConfig(150, 300, 30, 7000,
+                        RaftTransportMode.HYBRID, 7100, 0, "cluster", dir, threeVoters()));
+
+        assertThrows(IllegalArgumentException.class,
+                () -> new RaftConfig(150, 300, 30, 7000,
+                        RaftTransportMode.HYBRID, 7100, 1400, " ", dir, threeVoters()));
     }
 
     @Test

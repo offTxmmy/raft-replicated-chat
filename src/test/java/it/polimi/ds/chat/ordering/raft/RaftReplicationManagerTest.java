@@ -333,6 +333,71 @@ class RaftReplicationManagerTest {
     }
 
     @Test
+    // Groups identical empty AppendEntries heartbeats into one broadcast send.
+    void heartbeatRoundShouldBroadcastIdenticalEmptyHeartbeats() {
+        RecordingSender sender = new RecordingSender();
+        RaftNode node = leaderNode(1);
+        RaftLog log = new RaftLog();
+        log.append(1L, command("a"));
+        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                sender,
+                null
+        );
+        manager.start();
+        manager.onLeaderElected(1, 1L);
+
+        manager.onHeartbeatRoundDue(1L);
+
+        assertEquals(1, sender.broadcasts.size());
+        BroadcastAppendEntries broadcast = sender.broadcasts.get(0);
+        assertEquals(Set.of(2, 3), broadcast.peerIds());
+        assertTrue(broadcast.request().getEntries().isEmpty());
+        assertEquals(1L, broadcast.request().getPrevLogIndex());
+        assertEquals(1L, broadcast.request().getPrevLogTerm());
+        assertEquals(2, sender.totalRequests());
+    }
+
+    @Test
+    // Keeps empty heartbeats unicast when only some followers can receive that request.
+    void heartbeatRoundShouldNotBroadcastPartialEmptyHeartbeatGroup() {
+        RecordingSender sender = new RecordingSender();
+        RaftNode node = leaderNode(1);
+        RaftLog log = new RaftLog();
+        log.append(1L, command("a"));
+        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                sender,
+                null
+        );
+        manager.start();
+        manager.onLeaderElected(1, 1L);
+
+        manager.appendCommandAsLeader(command("b"));
+        manager.onHeartbeatRoundDue(1L);
+        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(1L, true, 2, 2L, -1L, 0L));
+
+        sender.clear();
+        manager.onHeartbeatRoundDue(1L);
+
+        assertEquals(0, sender.broadcasts.size());
+        assertTrue(sender.lastRequest(2).getEntries().isEmpty());
+        assertEquals(1, sender.lastRequest(3).getEntries().size());
+    }
+
+    @Test
     // Backtracks nextIndex using the conflictIndex hint when the follower log is too short.
     void failedAppendEntriesResponseShouldUseConflictIndexHint() {
         RecordingSender sender = new RecordingSender();
@@ -573,10 +638,17 @@ class RaftReplicationManagerTest {
 
     private static class RecordingSender implements RaftAppendEntriesSender {
         private final Map<Integer, List<AppendEntriesRequestMessage>> sent = new HashMap<>();
+        private final List<BroadcastAppendEntries> broadcasts = new ArrayList<>();
 
         @Override
         public void sendAppendEntries(int peerId, AppendEntriesRequestMessage request) {
             sent.computeIfAbsent(peerId, key -> new ArrayList<>()).add(request);
+        }
+
+        @Override
+        public void broadcastAppendEntries(AppendEntriesRequestMessage request, Set<Integer> peerIds) {
+            broadcasts.add(new BroadcastAppendEntries(request, Set.copyOf(peerIds)));
+            RaftAppendEntriesSender.super.broadcastAppendEntries(request, peerIds);
         }
 
         AppendEntriesRequestMessage lastRequest(int peerId) {
@@ -594,6 +666,14 @@ class RaftReplicationManagerTest {
             }
             return total;
         }
+
+        void clear() {
+            sent.clear();
+            broadcasts.clear();
+        }
+    }
+
+    private record BroadcastAppendEntries(AppendEntriesRequestMessage request, Set<Integer> peerIds) {
     }
 
     private static class RecordingObserver implements RaftLeaderActivityObserver {
