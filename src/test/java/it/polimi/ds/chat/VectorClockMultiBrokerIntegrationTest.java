@@ -2,7 +2,6 @@ package it.polimi.ds.chat;
 
 import it.polimi.ds.chat.broker.core.Broker;
 import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.broker.session.HandlerState;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.Before;
@@ -38,44 +37,15 @@ public class VectorClockMultiBrokerIntegrationTest {
         }
     }
 
-    private TracingBroker sequencer;
+    private TracingBroker broker0;
     private TracingBroker broker1;
     private TracingBroker broker2;
 
     @Before
     public void setUp() {
-        HandlerState handlerState = new HandlerState();
-
-        // Sequencer brokerId = 0
-        BrokerConfig sequencerCfg = new BrokerConfig(
-                0, true,
-                "localhost", 5000, 5000,
-                "localhost", 5001,
-                0,
-                handlerState
-        );
-
-        // Follower 1 brokerId = 1
-        BrokerConfig broker1Cfg = new BrokerConfig(
-                1, false,
-                "localhost", 5002, 5002,
-                "localhost", 5001,
-                0,
-                null
-        );
-
-        // Follower 2 brokerId = 2
-        BrokerConfig broker2Cfg = new BrokerConfig(
-                2, false,
-                "localhost", 5003, 5003,
-                "localhost", 5001,
-                0,
-                null
-        );
-
-        sequencer = new TracingBroker(sequencerCfg);
-        broker1   = new TracingBroker(broker1Cfg);
-        broker2   = new TracingBroker(broker2Cfg);
+        broker0 = new TracingBroker(TestConfigs.raftBrokerConfig(0, 5000));
+        broker1   = new TracingBroker(TestConfigs.raftBrokerConfig(1, 5002));
+        broker2   = new TracingBroker(TestConfigs.raftBrokerConfig(2, 5003));
     }
 
     @Test
@@ -84,7 +54,7 @@ public class VectorClockMultiBrokerIntegrationTest {
          * Scenario logico sui vector clock:
          *
          * Processi / broker:
-         *  - P0 = sequencer (id 0) – qui non genera eventi suoi, solo riceve
+         *  - P0 = broker0 (id 0) – qui non genera eventi suoi, solo riceve
          *  - P1 = broker1      (id 1)
          *  - P2 = broker2      (id 2)
          *
@@ -110,7 +80,7 @@ public class VectorClockMultiBrokerIntegrationTest {
          *      aggiorno con {1:2, 2:1} → {1:2, 2:1}
          *      incremento P2           → {1:2, 2:2}
          *
-         * Sequenza globale decisa dal sequencer (seq):
+         * Sequenza globale decisa da Raft (seq):
          *   seq=1 → m1 (E1)
          *   seq=2 → m2 (E2)
          *   seq=3 → m3 (E3)
@@ -173,7 +143,7 @@ public class VectorClockMultiBrokerIntegrationTest {
         List<ChatDeliverMessage> ordered = List.of(m1, m2, m3, m4);
 
         for (ChatDeliverMessage msg : ordered) {
-            sequencer.handleOrderedMessage(msg);
+            broker0.handleOrderedMessage(msg);
             broker1.handleOrderedMessage(msg);
             broker2.handleOrderedMessage(msg);
         }
@@ -186,16 +156,16 @@ public class VectorClockMultiBrokerIntegrationTest {
                 "4:bob:m4"
         );
 
-        assertEquals("Sequencer should deliver all messages in global order",
-                expectedDelivery, sequencer.getDelivered());
+        assertEquals("Broker0 should deliver all messages in global order",
+                expectedDelivery, broker0.getDelivered());
         assertEquals("Broker1 should deliver all messages in global order",
                 expectedDelivery, broker1.getDelivered());
         assertEquals("Broker2 should deliver all messages in global order",
                 expectedDelivery, broker2.getDelivered());
 
         // --- VERIFICA 2: tutti i broker hanno visto almeno ID 1 e 2 ---
-        assertTrue("Sequencer clock should know at least brokers 1 and 2",
-                sequencer.getVectorClock().getClock().size() >= 2);
+        assertTrue("Broker0 clock should know at least brokers 1 and 2",
+                broker0.getVectorClock().getClock().size() >= 2);
         assertTrue("Broker1 clock should know at least brokers 1 and 2",
                 broker1.getVectorClock().getClock().size() >= 2);
         assertTrue("Broker2 clock should know at least brokers 1 and 2",
@@ -203,11 +173,11 @@ public class VectorClockMultiBrokerIntegrationTest {
 
         // --- VERIFICA 3: i timestamp per broker 1 e 2 sono coerenti tra i broker ---
 
-        int seqTime1 = sequencer.getVectorClock().getTimeStamp(1);
+        int seqTime1 = broker0.getVectorClock().getTimeStamp(1);
         int b1Time1  = broker1.getVectorClock().getTimeStamp(1);
         int b2Time1  = broker2.getVectorClock().getTimeStamp(1);
 
-        int seqTime2 = sequencer.getVectorClock().getTimeStamp(2);
+        int seqTime2 = broker0.getVectorClock().getTimeStamp(2);
         int b1Time2  = broker1.getVectorClock().getTimeStamp(2);
         int b2Time2  = broker2.getVectorClock().getTimeStamp(2);
 

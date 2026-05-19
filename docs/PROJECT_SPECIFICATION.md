@@ -127,8 +127,7 @@ No additional durable storage is required. Client session state is volatile by d
   |                        Broker.java                         |
   +-----------------------------------------------------------+
   |                 OrderingService (interface)                |
-  |     implemented by: SequencerOrderingService (legacy)      |
-  |                     RaftOrderingService   (target)         |
+  |              implemented by: RaftOrderingService           |
   +-----------------------------------------------------------+
   |        Raft core (election + replication + commit)         |
   |  RaftNode, RaftElectionManager, RaftLog, RaftReplication   |
@@ -346,8 +345,8 @@ document first.
 - `Broker`, `BrokerConfig`, `BrokerMain`.
 - `ClientConnection`, `ClientHandler`, `ClientMessageSender/Receiver`,
   `ClientDirectory`, etc.
-- `SequencerOrderingService` — kept temporarily behind a configuration switch during
-  migration; removed once Raft is fully integrated.
+- Raft is the only production ordering implementation; the legacy sequencer mode has
+  been removed.
 
 ---
 
@@ -422,9 +421,10 @@ document first.
 Update the status checkboxes in this section as work lands. This section is the
 "where are we" overview.
 
-### M0 — Legacy baseline (done)
+### M0 — Legacy baseline (retired)
 
-- [x] Centralized `SequencerOrderingService` working end-to-end with clients.
+- [x] Centralized sequencer prototype used as the initial baseline.
+- [x] Legacy sequencer mode removed from production startup/configuration.
 - [x] Client-side causal metadata plumbing in place.
 
 ### M1 — Raft MVP (static voter set)

@@ -13,16 +13,13 @@ Il punto non e' la correttezza teorica di Raft: Raft funziona anche su
 TCP unicast. Il punto e' che la specifica del progetto dice che i broker
 sono sulla stessa LAN e che il broadcast di livello link e' disponibile
 e va sfruttato dove appropriato. La nostra implementazione oggi sfrutta
-UDP broadcast per discovery e per la modalita' sequencer, ma non per il
-consenso Raft.
+UDP broadcast per discovery, ma non ancora per il consenso Raft.
 
 ## Stato attuale
 
 ### Cosa fa oggi il codice
 
 - `LanDiscoveryService` usa UDP broadcast solo per discovery dei broker.
-- `SequencerOrderingService` usa UDP broadcast per distribuire
-  `ChatDeliverMessage` in modalita' sequencer.
 - `RaftRpcClient` usa TCP unicast per:
   - `RequestVoteRequestMessage`;
   - `AppendEntriesRequestMessage`.
@@ -117,8 +114,6 @@ anche per la replica del log.
 Aggiungere campi per il trasporto LAN:
 
 - `raftTransportMode`
-  - `TCP_UNICAST`;
-  - `UDP_BROADCAST`;
   - `HYBRID`.
 - `raftBroadcastPort`
   - porta UDP comune su cui tutti i broker ascoltano le RPC broadcast.
@@ -144,13 +139,13 @@ Aggiornare la CLI Raft.
 Possibile forma:
 
 ```text
-raft <nodeId> <rpcPort> <votersCSV> [clientPort] [raftBroadcastPort] [transportMode]
+raft <nodeId> <rpcPort> <votersCSV> [clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]
 ```
 
 Esempio:
 
 ```text
-raft 0 7000 0@host0:7000,1@host1:7001,2@host2:7002 50000 7100 HYBRID
+raft 0 7000 0@host0:7000,1@host1:7001,2@host2:7002 50000 7100 demo-cluster 1400
 ```
 
 Per demo locale va previsto un fallback, perche' piu' processi che
@@ -304,7 +299,7 @@ In modalita' `HYBRID`:
 Per fare questo senza rompere il manager:
 
 - creare un transport composito:
-  - `RaftHybridRpcClient`;
+  - `RaftHybridTransport`;
   - contiene `RaftRpcClient` TCP esistente;
   - contiene `RaftUdpBroadcastTransport`;
   - implementa entrambe le interfacce sender.
@@ -330,12 +325,10 @@ ogni peer.
 
 Modifiche:
 
-- scegliere il trasporto in base a `RaftConfig.raftTransportMode`;
-- oggi costruisce sempre `RaftRpcClient`;
-- domani deve costruire:
-  - `RaftRpcClient` per `TCP_UNICAST`;
-  - `RaftUdpBroadcastTransport` per `UDP_BROADCAST`;
-  - `RaftHybridRpcClient` per `HYBRID`.
+- costruire sempre il trasporto ibrido LAN-aware;
+- mantenere `RaftRpcClient` come componente interno per payload-bearing
+  `AppendEntries` e forwarding delle proposte client;
+- usare `RaftUdpBroadcastTransport` per `RequestVote` e heartbeat vuoti.
 
 Punto del codice attuale:
 
@@ -385,7 +378,7 @@ Poi:
 
 - `RaftRpcClient` implementa `RaftTransport`;
 - `RaftUdpBroadcastTransport` implementa `RaftTransport`;
-- `RaftHybridRpcClient` implementa `RaftTransport`.
+- `RaftHybridTransport` implementa `RaftTransport`.
 
 `RaftOrderingService` tiene:
 
@@ -481,17 +474,15 @@ il transport.
 
 ### `BrokerConfig`
 
-Oggi `udpPort` e' generico e nasce dalla modalita' sequencer. In Raft
-serve distinguere:
+Oggi `udpPort` e' usato per discovery. In Raft serve distinguere:
 
 - `discoveryUdpPort`;
-- `sequencerDataUdpPort`;
 - `raftBroadcastPort`.
 
 Se non si vuole refactorare troppo:
 
 - aggiungere solo `raftBroadcastPort` dentro `RaftConfig`;
-- lasciare `BrokerConfig.udpPort` per discovery/sequencer.
+- lasciare `BrokerConfig.udpPort` per discovery.
 
 ### `PeerRegistry`
 
@@ -642,7 +633,7 @@ Testare che `AppendEntries` con entries reali usi ancora TCP in modalita'
 
 ### Fase 3 - UDP broadcast per heartbeat
 
-- Estendere `RaftHybridRpcClient`.
+- Estendere `RaftHybridTransport`.
 - Broadcastare solo `AppendEntries` vuoti.
 - Lasciare entries reali su TCP.
 - Aggiungere test heartbeat.

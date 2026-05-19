@@ -4,8 +4,8 @@ import it.polimi.ds.chat.common.clock.VectorClock;
 import it.polimi.ds.chat.protocol.broker.BrokerMessage;
 
 /**
- * Message sent by the sequencer to all brokers to deliver an ordered chat
- * message.
+ * Message emitted after Raft commits a chat message and assigns its global
+ * sequence number.
  */
 public class ChatDeliverMessage extends BrokerMessage {
     private final long seq;

@@ -1,7 +1,6 @@
 package it.polimi.ds.chat.broker.core;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.broker.config.OrderingMode;
 import it.polimi.ds.chat.broker.discovery.PeerRegistry;
 import it.polimi.ds.chat.broker.session.ClientHandler;
 import it.polimi.ds.chat.discovery.LanDiscoveryService;
@@ -11,7 +10,6 @@ import it.polimi.ds.chat.protocol.client.*;
 import it.polimi.ds.chat.protocol.directory.*;
 import it.polimi.ds.chat.ordering.api.OrderingService;
 import it.polimi.ds.chat.ordering.api.OrderingServiceCallback;
-import it.polimi.ds.chat.ordering.sequencer.SequencerOrderingService;
 import it.polimi.ds.chat.common.delivery.HoldBackQueue;
 import it.polimi.ds.chat.common.clock.VectorClock;
 
@@ -30,7 +28,7 @@ import java.util.concurrent.TimeUnit;
  *
  * Responsibilities:
  * - Accept TCP connections from chat clients.
- * - Use OrderingService for message ordering (sequencer or Raft in future).
+ * - Use Raft-backed OrderingService for message ordering.
  * - Deliver ordered messages to its local clients.
  */
 public class Broker implements Serializable, OrderingServiceCallback {
@@ -49,7 +47,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Peer registry for broker-to-broker discovery
     private transient PeerRegistry peerRegistry;
 
-    // Static configuration for this broker (ports, host, isSequencer, etc.)
+    // Static configuration for this broker (ports, host, Raft settings, etc.)
     private final BrokerConfig config;
 
     // Runtime brokerId (may differ from initial config value for followers)
@@ -87,11 +85,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
         this.config = config;
         this.brokerId = config.getBrokerId(); // 0 for leader, -1 for followers at startup
 
-        // Validate config for sequencer
-        if (config.isSequencer() && config.getHandlerState() == null && config.getOrderingMode() == OrderingMode.SEQUENCER) {
-            throw new IllegalArgumentException("Sequencer broker must have a HandlerState");
-        }
-
         // Initialize OrderingService
         initializeOrderingService();
 
@@ -101,31 +94,15 @@ public class Broker implements Serializable, OrderingServiceCallback {
     }
 
     /**
-     * Initialize the ordering service based on {@link BrokerConfig#getOrderingMode()}.
-     *
-     * <ul>
-     *   <li>{@link OrderingMode#SEQUENCER}: legacy single-sequencer ordering with
-     *       dynamic broker-id assignment from the leader (latch waited in start()).
-     *   <li>{@link OrderingMode#RAFT}: Raft-replicated ordering with static voter
-     *       set and pre-assigned broker ids (latch counted down immediately).
-     * </ul>
+     * Initialize the Raft ordering service.
      */
     private void initializeOrderingService() {
-        if (config.getOrderingMode() == OrderingMode.RAFT) {
-            it.polimi.ds.chat.ordering.raft.RaftOrderingService raftService =
-                    new it.polimi.ds.chat.ordering.raft.RaftOrderingService(config);
-            raftService.setCallback(this);
-            raftService.onDeliver(this::handleOrderedMessage);
-            this.orderingService = raftService;
-            // Raft uses the static voter set from config: broker id is known
-            // at startup and no Sequencer-assigned id is awaited.
-            brokerIdLatch.countDown();
-        } else {
-            SequencerOrderingService seqService = new SequencerOrderingService(config, brokerId);
-            seqService.setCallback(this);
-            seqService.onDeliver(this::handleOrderedMessage);
-            this.orderingService = seqService;
-        }
+        it.polimi.ds.chat.ordering.raft.RaftOrderingService raftService =
+                new it.polimi.ds.chat.ordering.raft.RaftOrderingService(config);
+        raftService.setCallback(this);
+        raftService.onDeliver(this::handleOrderedMessage);
+        this.orderingService = raftService;
+        brokerIdLatch.countDown();
     }
 
     // =========================================================================
@@ -220,14 +197,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
     }
 
     /**
-     * Set a custom ordering service (useful for testing or switching to Raft).
+     * Set a custom ordering service, mainly for tests.
      */
     public void setOrderingService(OrderingService orderingService) {
         this.orderingService = orderingService;
-        if (orderingService instanceof SequencerOrderingService seqService) {
-            seqService.setCallback(this);
-            seqService.onDeliver(this::handleOrderedMessage);
-        }
     }
 
     /**
@@ -243,7 +216,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     /**
      * Start the broker:
-     * - Start the OrderingService (handles sequencer or follower logic)
+     * - Start the Raft ordering service
      * - Open TCP listener for clients
      * - Connect to directory service
      * - Start peer discovery
@@ -256,19 +229,14 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Start the ordering service
         orderingService.start();
 
-        // Wait for follower to get broker ID from sequencer
-        if (!config.isSequencer()) {
-            System.out.println("[Broker] Waiting for ID assignment from Sequencer...");
-            try {
-                boolean assigned = brokerIdLatch.await(10, TimeUnit.SECONDS);
-
-                if (!assigned){
-                    throw new IOException("Failed to obtain Broker ID from Sequencer within timeout. Cannot start.");
-                }
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new IOException("Interrupted while waiting for Broker ID.", e);
+        try {
+            boolean assigned = brokerIdLatch.await(10, TimeUnit.SECONDS);
+            if (!assigned) {
+                throw new IOException("Failed to initialize broker id within timeout.");
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("Interrupted while waiting for broker id initialization.", e);
         }
 
         // Connect to directory service, register, and start sending heartbeats
@@ -386,15 +354,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
         if (incomingSeq > expectedSeq) {
             System.out.println("[Broker " + brokerId + "] Gap detected! Received seq = " + incomingSeq + ", expected = " + expectedSeq);
 
-            if (orderingService instanceof SequencerOrderingService) {
-                SequencerOrderingService seqService = (SequencerOrderingService) orderingService;
-
-                // Ask for all missing messages
-                for (long seq = expectedSeq; seq < incomingSeq; seq++) {
-                    System.out.println("[Broker " + brokerId + "] Requesting retransmission for missing seq = " + seq);
-                    seqService.requestRetransmission(seq);
-                }
-            }
+            System.err.println("[Broker " + brokerId + "] Unexpected gap in Raft delivery; waiting for log catch-up.");
         }
 
         // Enqueue message and get all messages ready for delivery
@@ -461,8 +421,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
             DirectoryRegisterMessage msg = new DirectoryRegisterMessage(
                     this.brokerId,
                     config.getBrokerHost(),
-                    config.getBrokerPort(),
-                    config.isSequencer()
+                    config.getBrokerPort()
             );
 
             synchronized (directoryLock) {
@@ -479,7 +438,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     /**
      * Start a background thread that periodically sends heartbeats to the Directory Service.
      *
-     * If the ordering service is a SequencerOrderingService, also forward the heartbeat to it.
      * The thread runs until an IO error occurs or it is interrupted.
      */
     private void startHeartbeatLoop() {
@@ -496,11 +454,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
                     synchronized (directoryLock) {
                         directoryOut.writeObject(hb);
                         directoryOut.flush();
-                    }
-
-                    // Send heartbeat to OrderingService (for sequencer)
-                    if (!config.isSequencer() && orderingService instanceof SequencerOrderingService seqService) {
-                        seqService.sendHeartbeat(hb);
                     }
 
                     Thread.sleep(HEARTBEAT_INTERVAL_MS);

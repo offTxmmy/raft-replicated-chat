@@ -2,7 +2,7 @@ package it.polimi.ds.chat.integration;
 
 import it.polimi.ds.chat.broker.core.Broker;
 import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.broker.session.HandlerState;
+import it.polimi.ds.chat.TestConfigs;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.Before;
@@ -34,20 +34,13 @@ public class VectorClockIntegrationTest {
         }
     }
 
-    private InMemoryBroker sequencer;
+    private InMemoryBroker broker0;
     private InMemoryBroker follower;
 
     @Before
     public void setUp() {
-        HandlerState handlerState = new HandlerState();
-        BrokerConfig sequencerCfg = new BrokerConfig(
-                0, true, "localhost", 5000, 5000, "localhost", 5001, 0, handlerState
-        );
-        BrokerConfig followerCfg = new BrokerConfig(
-                1, false, "localhost", 5002, 5002, "localhost", 5001, 0, null
-        );
-        sequencer = new InMemoryBroker(sequencerCfg);
-        follower = new InMemoryBroker(followerCfg);
+        broker0 = new InMemoryBroker(TestConfigs.raftBrokerConfig(0, 5000));
+        follower = new InMemoryBroker(TestConfigs.raftBrokerConfig(1, 5002));
     }
 
     @Test
@@ -65,7 +58,7 @@ public class VectorClockIntegrationTest {
         ChatDeliverMessage third = new ChatDeliverMessage(3L, 0, "alice", "all good", new VectorClock(thirdClock));
 
         for (ChatDeliverMessage message : List.of(first, second, third)) {
-            sequencer.handleOrderedMessage(message);
+            broker0.handleOrderedMessage(message);
             follower.handleOrderedMessage(message);
         }
 
@@ -75,10 +68,10 @@ public class VectorClockIntegrationTest {
                 "3:alice:all good"
         );
 
-        assertEquals("Sequencer should deliver every message to its clients", expectedOrder, sequencer.getDelivered());
+        assertEquals("Broker 0 should deliver every message to its clients", expectedOrder, broker0.getDelivered());
         assertEquals("Follower should deliver every message to its clients", expectedOrder, follower.getDelivered());
 
-        assertTrue("Sequencer vector clock should have recorded both brokers", sequencer.getVectorClock().getClock().size() >= 2);
+        assertTrue("Broker 0 vector clock should have recorded both brokers", broker0.getVectorClock().getClock().size() >= 2);
         assertTrue("Follower vector clock should have recorded both brokers", follower.getVectorClock().getClock().size() >= 2);
     }
 }

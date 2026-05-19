@@ -2,16 +2,16 @@
 
 ## 1) Refactoring objective
 
-The current architecture uses a centralized `SequencerOrderingService`, which is a single point of failure.
-To achieve fault tolerance and distributed consensus, the system should introduce a
-`RaftOrderingService` implementation behind the existing `OrderingService` interface.
+The original baseline used a centralized sequencer, which was a single point of failure.
+The production architecture now uses `RaftOrderingService` behind the existing
+`OrderingService` interface.
 
 This keeps the `Broker` almost unchanged at API level (`propose`, `onDeliver`, `isLeader`, `getLeaderId`), while replacing only the internal ordering and replication logic.
 
 The main architectural goal is:
 
 - keep `Broker` dependent only on `OrderingService`
-- replace the centralized sequencer with Raft for total order and fault tolerance
+- keep Raft as the only production ordering mode for total order and fault tolerance
 - preserve clear separation between:
     - **consensus/election**
     - **replication/commit**
@@ -275,12 +275,11 @@ Below is the proposed class structure aligned with the current codebase and the 
 ## 5) Classes to modify
 
 1. **`Broker`**
-    - In `initializeOrderingService()`, choose implementation via config (`sequencer` vs `raft`).
+    - In `initializeOrderingService()`, instantiate `RaftOrderingService`.
     - External interaction with the rest of the system remains unchanged.
 
 2. **`BrokerConfig`**
     - New parameters:
-        - `orderingMode` (`SEQUENCER` / `RAFT`)
         - `raftElectionTimeoutMinMs`
         - `raftElectionTimeoutMaxMs`
         - `raftHeartbeatIntervalMs`
@@ -593,6 +592,6 @@ To minimize risk and maximize parallelism in a 3-person team:
     - local log metadata (Contract B)
     - message/event callbacks (Contract C)
     - timer abstraction (Contract D)
-- keep `Broker` dependent only on `OrderingService`, so sequencer/raft switch is possible without impact on the rest of the system
+- keep `Broker` dependent only on `OrderingService`, while the production implementation is Raft-only
 
 This structure enables delivery of a correct static-membership Raft MVP and then iterative hardening or extension without rewriting the architecture.

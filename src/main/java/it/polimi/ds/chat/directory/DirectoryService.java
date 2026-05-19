@@ -1,7 +1,8 @@
 package it.polimi.ds.chat.directory;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.broker.session.HandlerState;
+import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
+import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
 import it.polimi.ds.chat.protocol.broker.*;
 import it.polimi.ds.chat.protocol.chat.*;
 import it.polimi.ds.chat.protocol.client.*;
@@ -10,8 +11,8 @@ import it.polimi.ds.chat.protocol.directory.*;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.util.ArrayList;
-import java.util.List;
+import java.nio.file.Paths;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -113,9 +114,7 @@ public class DirectoryService {
 
             if (obj instanceof GetBrokerRequestMessage req) {
                 handleGetBrokerRequest(out);
-            }/* else if (obj instanceof GetPeerListRequestMessage req) {
-                handleGetPeerListRequest(req, out);
-            }*/ else {
+            } else {
                 System.out.println("Unknown client request object: " + obj);
             }
 
@@ -155,37 +154,6 @@ public class DirectoryService {
         out.writeObject(resp);
         out.flush();
     }
-
-    /**
-     * Handles a client request for the peer list and sends a response.
-     *
-     * @param req the peer list request message
-     * @param out the output stream to the client
-     * @throws IOException if an I/O error occurs
-     */
-    /*private void handleGetPeerListRequest(GetPeerListRequestMessage req, ObjectOutputStream out) throws IOException {
-        int requestingBrokerId = req.getRequestingBrokerId();
-        List<PeerInfo> peers = new ArrayList<>();
-
-        for (Map.Entry<Integer, BrokerConfig> entry : brokersById.entrySet()) {
-            int peerId = entry.getKey();
-            BrokerConfig cfg = entry.getValue();
-
-            // Include all brokers (including self, requester can filter if needed)
-            peers.add(new PeerInfo(
-                    peerId,
-                    cfg.getBrokerHost(),
-                    cfg.getBrokerPort(),
-                    cfg.isSequencer()
-            ));
-        }
-
-        GetPeerListResponseMessage resp = new GetPeerListResponseMessage(true, peers);
-        out.writeObject(resp);
-        out.flush();
-
-        System.out.println("Returned peer list (" + peers.size() + " brokers) to broker " + requestingBrokerId);
-    }*/
 
     /**
      * Handles a broker connection, processing registration and heartbeats.
@@ -259,24 +227,25 @@ public class DirectoryService {
         int brokerId = msg.getBrokerId();
         String host = msg.getBrokerHost();
         int port = msg.getBrokerPort();
-        boolean isSequencer = msg.isSequencer();
-
         int clientPort = port;
-        String sequencerHost = host;
-        int sequencerPort = 0;
-        int udpPort = 0;
-        HandlerState handlerState = null;
+        int udpPort = 50002 + brokerId;
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        voters.put(brokerId, new RaftPeerEndpoint(brokerId, host, port, clientPort));
+        RaftConfig raftConfig = new RaftConfig(
+                200,
+                400,
+                40,
+                port,
+                Paths.get("directory-raft-data", "n" + brokerId),
+                voters);
 
         BrokerConfig config = new BrokerConfig(
                 brokerId,
-                isSequencer,
                 host,
                 port,
                 clientPort,
-                sequencerHost,
-                sequencerPort,
                 udpPort,
-                handlerState
+                raftConfig
         );
 
         registeredBrokers.putIfAbsent(config, 0);
@@ -285,7 +254,7 @@ public class DirectoryService {
 
         System.out.println("Registered broker: id=" + brokerId + " "
                 + config.getBrokerHost() + ":" + config.getBrokerPort()
-                + " (sequencer=" + isSequencer + "), clientCount=0");
+                + ", clientCount=0");
 
         return config;
     }

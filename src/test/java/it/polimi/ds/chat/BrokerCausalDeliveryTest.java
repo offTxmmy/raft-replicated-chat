@@ -41,19 +41,7 @@ public class BrokerCausalDeliveryTest {
 
     @BeforeEach
     public void setUp() {
-        // Broker "normale" (non sequencer), config minimale
-        BrokerConfig cfg = new BrokerConfig(
-                1,          // brokerId
-                false,      // isSequencer
-                "localhost",
-                5000, 5000, // porte finte, non usiamo la rete
-                "localhost",
-                5001,
-                0,
-                null        // niente HandlerState per follower
-        );
-
-        broker = new RecordingBroker(cfg);
+        broker = new RecordingBroker(TestConfigs.raftBrokerConfig(1, 5000));
     }
 
     @Test

@@ -1,11 +1,9 @@
 package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.broker.config.OrderingMode;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
 import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
-import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -15,7 +13,6 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -133,43 +130,34 @@ class RaftConfigTest {
     }
 
     @Test
-    void legacyBrokerConfigConstructorDefaultsToSequencer() {
-        BrokerConfig cfg = new BrokerConfig(
-                0, true, "127.0.0.1", 50000, 50000,
-                "127.0.0.1", 50001, 50002, null);
-
-        Assertions.assertEquals(OrderingMode.SEQUENCER, cfg.getOrderingMode());
-        assertNull(cfg.getRaftConfig());
-    }
-
-    @Test
     void raftBrokerConfigCarriesRaftConfig(@TempDir Path dir) {
         RaftConfig raft = new RaftConfig(150, 300, 30, 7000, dir, threeVoters());
         BrokerConfig cfg = new BrokerConfig(
-                0, false, "127.0.0.1", 50000, 50000,
-                "127.0.0.1", 50001, 50002, null,
-                OrderingMode.RAFT, raft);
+                0,
+                "127.0.0.1",
+                50000,
+                50000,
+                50002,
+                raft);
 
-        assertEquals(OrderingMode.RAFT, cfg.getOrderingMode());
         assertNotNull(cfg.getRaftConfig());
+        assertEquals(0, cfg.getBrokerId());
+        assertEquals("127.0.0.1", cfg.getBrokerHost());
+        assertEquals(50000, cfg.getBrokerPort());
+        assertEquals(50000, cfg.getClientPort());
+        assertEquals(50002, cfg.getUdpPort());
         assertEquals(2, cfg.getRaftConfig().getQuorumSize());
         assertTrue(cfg.getRaftConfig().getVoters().containsKey(0));
     }
 
     @Test
-    void raftModeWithoutRaftConfigRejected() {
-        assertThrows(IllegalArgumentException.class, () -> new BrokerConfig(
-                0, false, "127.0.0.1", 50000, 50000,
-                "127.0.0.1", 50001, 50002, null,
-                OrderingMode.RAFT, null));
-    }
-
-    @Test
-    void sequencerModeWithRaftConfigRejected(@TempDir Path dir) {
-        RaftConfig raft = new RaftConfig(150, 300, 30, 7000, dir, threeVoters());
-        assertThrows(IllegalArgumentException.class, () -> new BrokerConfig(
-                0, false, "127.0.0.1", 50000, 50000,
-                "127.0.0.1", 50001, 50002, null,
-                OrderingMode.SEQUENCER, raft));
+    void brokerConfigRejectsMissingRaftConfig() {
+        assertThrows(NullPointerException.class, () -> new BrokerConfig(
+                0,
+                "127.0.0.1",
+                50000,
+                50000,
+                50002,
+                null));
     }
 }

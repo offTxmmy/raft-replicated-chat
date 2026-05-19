@@ -5,13 +5,8 @@ package it.polimi.ds.chat.ordering.raft.config;
  */
 public enum RaftTransportMode {
     /**
-     * Current behavior: every Raft RPC is sent to a specific peer over TCP.
-     */
-    TCP_UNICAST,
-
-    /**
-     * Planned LAN-aware behavior: small broadcast-friendly Raft messages
-     * travel over UDP broadcast, while payload-bearing replication remains TCP.
+     * LAN-aware behavior: small broadcast-friendly Raft messages travel over
+     * UDP broadcast, while payload-bearing replication remains TCP.
      */
     HYBRID
 }

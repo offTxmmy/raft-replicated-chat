@@ -2,7 +2,6 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
-import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalRequestMessage;
@@ -385,18 +384,9 @@ public final class RaftOrderingService implements OrderingService {
     }
 
     private RaftTransport createRaftTransport(RaftRpcClient tcpClient) {
-        if (raftConfig.getTransportMode() == RaftTransportMode.TCP_UNICAST) {
-            return tcpClient;
-        }
-        if (raftConfig.getTransportMode() == RaftTransportMode.HYBRID) {
-            RaftUdpBroadcastTransport udpTransport =
-                    new RaftUdpBroadcastTransport(localNodeId, raftConfig);
-            return new RaftHybridTransport(tcpClient, udpTransport);
-        }
-
-        throw new UnsupportedOperationException(
-                "Raft transport mode " + raftConfig.getTransportMode()
-                        + " is configured but not implemented yet");
+        RaftUdpBroadcastTransport udpTransport =
+                new RaftUdpBroadcastTransport(localNodeId, raftConfig);
+        return new RaftHybridTransport(tcpClient, udpTransport);
     }
 
     private void notifyDelivery(ChatDeliverMessage message) {

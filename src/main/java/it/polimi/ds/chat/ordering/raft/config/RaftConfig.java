@@ -26,7 +26,7 @@ import java.util.TreeMap;
  */
 public final class RaftConfig {
 
-    public static final RaftTransportMode DEFAULT_TRANSPORT_MODE = RaftTransportMode.TCP_UNICAST;
+    public static final RaftTransportMode DEFAULT_TRANSPORT_MODE = RaftTransportMode.HYBRID;
     public static final int DEFAULT_RAFT_BROADCAST_PORT = 7100;
     public static final int DEFAULT_UDP_MAX_PAYLOAD_BYTES = 1400;
     public static final String DEFAULT_CLUSTER_ID = "default-raft-cluster";

@@ -16,30 +16,19 @@ public class PeerRegistryTest {
     @Test
     @DisplayName("PeerInfo stores broker information correctly")
     void testPeerInfoBasics() {
-        PeerInfo peer = new PeerInfo(1, "localhost", 5000, false);
+        PeerInfo peer = new PeerInfo(1, "localhost", 5000);
 
         assertEquals(1, peer.getBrokerId());
         assertEquals("localhost", peer.getHost());
         assertEquals(5000, peer.getPort());
-        assertFalse(peer.isSequencer());
-    }
-
-    @Test
-    @DisplayName("PeerInfo identifies sequencer correctly")
-    void testPeerInfoSequencer() {
-        PeerInfo sequencer = new PeerInfo(0, "localhost", 5000, true);
-        PeerInfo follower = new PeerInfo(1, "localhost", 5001, false);
-
-        assertTrue(sequencer.isSequencer());
-        assertFalse(follower.isSequencer());
     }
 
     @Test
     @DisplayName("PeerInfo equals based on brokerId")
     void testPeerInfoEquals() {
-        PeerInfo peer1 = new PeerInfo(1, "localhost", 5000, false);
-        PeerInfo peer2 = new PeerInfo(1, "192.168.1.1", 6000, true);
-        PeerInfo peer3 = new PeerInfo(2, "localhost", 5000, false);
+        PeerInfo peer1 = new PeerInfo(1, "localhost", 5000);
+        PeerInfo peer2 = new PeerInfo(1, "192.168.1.1", 6000);
+        PeerInfo peer3 = new PeerInfo(2, "localhost", 5000);
 
         assertEquals(peer1, peer2, "Same brokerId should be equal");
         assertNotEquals(peer1, peer3, "Different brokerId should not be equal");
@@ -74,7 +63,7 @@ public class PeerRegistryTest {
     @Test
     @DisplayName("PeerInfo toString provides readable output")
     void testPeerInfoToString() {
-        PeerInfo peer = new PeerInfo(1, "localhost", 5000, false);
+        PeerInfo peer = new PeerInfo(1, "localhost", 5000);
         String str = peer.toString();
 
         assertTrue(str.contains("brokerId=1"));

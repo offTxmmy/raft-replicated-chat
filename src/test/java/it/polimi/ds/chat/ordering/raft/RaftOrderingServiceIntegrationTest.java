@@ -1,7 +1,6 @@
 package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.broker.config.OrderingMode;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
 import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
@@ -52,6 +51,8 @@ class RaftOrderingServiceIntegrationTest {
     private static final long DELIVERY_DEADLINE_MS        = 8_000;
 
     private RaftOrderingService[] nodes;
+    private int defaultBroadcastPort;
+    private String defaultClusterId;
 
     @AfterEach
     void tearDown() {
@@ -517,9 +518,9 @@ class RaftOrderingServiceIntegrationTest {
                 rpcPort,
                 voters,
                 storageDir,
-                RaftTransportMode.TCP_UNICAST,
-                RaftConfig.DEFAULT_RAFT_BROADCAST_PORT,
-                RaftConfig.DEFAULT_CLUSTER_ID
+                RaftConfig.DEFAULT_TRANSPORT_MODE,
+                defaultBroadcastPort(),
+                defaultClusterId()
         );
     }
 
@@ -543,19 +544,12 @@ class RaftOrderingServiceIntegrationTest {
                 storageDir,
                 voters);
 
-        // Sequencer-side BrokerConfig fields are irrelevant when orderingMode == RAFT;
-        // we pass dummy values to satisfy the constructor.
         BrokerConfig cfg = new BrokerConfig(
                 nodeId,
-                false,
                 "127.0.0.1",
                 50000 + nodeId,
                 50000 + nodeId,
-                "127.0.0.1",
-                50001,
                 50002,
-                null,
-                OrderingMode.RAFT,
                 raft);
 
         return new RaftOrderingService(cfg);
@@ -613,5 +607,19 @@ class RaftOrderingServiceIntegrationTest {
         try (java.net.DatagramSocket socket = new java.net.DatagramSocket(0)) {
             return socket.getLocalPort();
         }
+    }
+
+    private int defaultBroadcastPort() throws IOException {
+        if (defaultBroadcastPort == 0) {
+            defaultBroadcastPort = pickFreeUdpPort();
+        }
+        return defaultBroadcastPort;
+    }
+
+    private String defaultClusterId() {
+        if (defaultClusterId == null) {
+            defaultClusterId = "raft-it-" + System.nanoTime();
+        }
+        return defaultClusterId;
     }
 }

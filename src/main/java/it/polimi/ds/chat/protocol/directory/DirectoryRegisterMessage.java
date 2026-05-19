@@ -8,13 +8,11 @@ public class DirectoryRegisterMessage implements Serializable {
     private final int brokerId;
     private final String brokerHost;
     private final int brokerPort;
-    private final boolean sequencer;
 
-    public DirectoryRegisterMessage(int brokekId, String brokerHost, int brokerPort, boolean sequencer) {
+    public DirectoryRegisterMessage(int brokekId, String brokerHost, int brokerPort) {
         this.brokerId = brokekId;
         this.brokerHost = brokerHost;
         this.brokerPort = brokerPort;
-        this.sequencer = sequencer;
     }
 
     public int getBrokerId() {
@@ -29,16 +27,11 @@ public class DirectoryRegisterMessage implements Serializable {
         return brokerPort;
     }
 
-    public boolean isSequencer() {
-        return sequencer;
-    }
-
     @Override
     public String toString() {
         return "DirectoryRegisterMessage{" +
                 "brokerHost='" + brokerHost + '\'' +
                 ", brokerPort=" + brokerPort +
-                ", sequencer=" + sequencer +
                 '}';
     }
 }

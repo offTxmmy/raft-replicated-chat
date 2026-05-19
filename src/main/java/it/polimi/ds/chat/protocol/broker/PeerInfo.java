@@ -10,13 +10,11 @@ public class PeerInfo implements Serializable {
     private final int brokerId;
     private final String host;
     private final int port;
-    private final boolean isSequencer;
 
-    public PeerInfo(int brokerId, String host, int port, boolean isSequencer) {
+    public PeerInfo(int brokerId, String host, int port) {
         this.brokerId = brokerId;
         this.host = host;
         this.port = port;
-        this.isSequencer = isSequencer;
     }
 
     public int getBrokerId() {
@@ -31,17 +29,12 @@ public class PeerInfo implements Serializable {
         return port;
     }
 
-    public boolean isSequencer() {
-        return isSequencer;
-    }
-
     @Override
     public String toString() {
         return "PeerInfo{" +
                 "brokerId=" + brokerId +
                 ", host='" + host + '\'' +
                 ", port=" + port +
-                ", isSequencer=" + isSequencer +
                 '}';
     }
 

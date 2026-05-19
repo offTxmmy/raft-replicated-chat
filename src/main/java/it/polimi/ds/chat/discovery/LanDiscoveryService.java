@@ -103,11 +103,11 @@ public class LanDiscoveryService {
 
     /**
      * Expected format:
-     * CHAT_DISCOVERY;HELLO;brokerId;host;port;isSequencer
+     * CHAT_DISCOVERY;HELLO;brokerId;host;port
      */
     private void handlePacket(String payload) {
         String[] parts = payload.split(";");
-        if (parts.length < 6) {
+        if (parts.length < 5) {
             return;
         }
 
@@ -129,9 +129,8 @@ public class LanDiscoveryService {
 
         String host = parts[3];
         int port = Integer.parseInt(parts[4]);
-        boolean isSequencer = Boolean.parseBoolean(parts[5]);
 
-        PeerInfo peer = new PeerInfo(brokerId, host, port, isSequencer);
+        PeerInfo peer = new PeerInfo(brokerId, host, port);
 
         // Update PeerRegistry with this pear
         peerRegistry.upsertFromDiscovery(peer);
@@ -142,13 +141,12 @@ public class LanDiscoveryService {
      */
     public void announcePresence() {
         String msg = String.format(
-            "%s;%s;%d;%s;%d;%s",
+            "%s;%s;%d;%s;%d",
             MAGIC,
             TYPE_HELLO,
             this.currentBrokerId,
             brokerConfig.getBrokerHost(),
-            brokerConfig.getBrokerPort(),
-            brokerConfig.isSequencer()
+            brokerConfig.getBrokerPort()
         );
         sendBroadcast(msg);
     }

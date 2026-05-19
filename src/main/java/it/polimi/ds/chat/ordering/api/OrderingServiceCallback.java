@@ -2,13 +2,14 @@ package it.polimi.ds.chat.ordering.api;
 
 /**
  * Callback interface for ordering service events.
- * Used to notify the Broker of important events like broker ID assignment.
+ * Used to notify the Broker of important ordering-service events.
  */
 public interface OrderingServiceCallback {
 
     /**
      * Called when the ordering service assigns a new broker ID.
-     * This happens when a follower connects to the sequencer.
+     * Raft brokers use static IDs, so this callback is retained only for
+     * backward-compatible test hooks.
      *
      * @param brokerId The assigned broker ID
      */

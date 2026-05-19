@@ -10,7 +10,7 @@ import java.util.*;
  *
  * Ensures both:
  * <ul>
- *   <li><b>Total Order:</b> Messages are delivered in strict sequence number order (assigned by sequencer)</li>
+ *   <li><b>Total Order:</b> Messages are delivered in strict sequence number order (assigned by Raft log index)</li>
  *   <li><b>Causal Order:</b> Messages respect causal dependencies tracked via vector clocks</li>
  * </ul>
  * A message can be delivered only when:
@@ -94,7 +94,7 @@ public class HoldBackQueue {
             // Check causal order: all dependencies must have been delivered
             if (!canDeliverCausally(head)) {
                 // Causal dependency not yet satisfied - must wait
-                // Note: This shouldn't happen if sequencer orders correctly,
+                // Note: This should not happen when Raft applies committed entries in order,
                 // but we keep this check for robustness
                 System.out.println("[HoldBackQueue] Message seq=" + head.getSeq() +
                         " waiting for causal dependencies");

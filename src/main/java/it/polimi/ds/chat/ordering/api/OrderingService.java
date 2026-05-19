@@ -8,10 +8,7 @@ import java.util.function.Consumer;
 /**
  * Interface for message ordering services.
  *
- * This abstraction decouples the ordering logic from the broker networking,
- * allowing different implementations:
- * - SequencerOrderingService: current single-sequencer approach
- * - RaftOrderingService: future Raft-based consensus (log replication)
+ * This abstraction decouples the Raft ordering logic from the broker networking.
  *
  * The ordering service is responsible for:
  * 1. Receiving message proposals from brokers
@@ -50,8 +47,7 @@ public interface OrderingService {
     void stop();
 
     /**
-     * Check if this node is currently the leader/sequencer.
-     * In a Raft implementation, this may change over time.
+     * Check if this node is currently the Raft leader.
      *
      * @return true if this node can accept proposals
      */

@@ -74,17 +74,6 @@ public class PeerRegistry {
     }
 
     /**
-     * Returns the PeerInfo for the sequencer/leader broker, if present.
-     *
-     * @return Optional containing PeerInfo of the sequencer, otherwise empty
-     */
-    public Optional<PeerInfo> getSequencer() {
-        return peers.values().stream()
-                .filter(PeerInfo::isSequencer)
-                .findFirst();
-    }
-
-    /**
      * Returns the number of known peers, excluding the local broker.
      *
      * @return peer count excluding self
@@ -131,8 +120,7 @@ public class PeerRegistry {
 
         boolean changed = (previous == null)
                 || !Objects.equals(previous.getHost(), peer.getHost())
-                || previous.getPort() != peer.getPort()
-                || previous.isSequencer() != peer.isSequencer();
+                || previous.getPort() != peer.getPort();
 
         if (changed) {
             System.out.println("[PeerRegistry] Updated peer from LAN discovery: " + peer);
