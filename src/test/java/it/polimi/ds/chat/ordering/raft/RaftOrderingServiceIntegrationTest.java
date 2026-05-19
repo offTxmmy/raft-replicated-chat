@@ -197,6 +197,145 @@ class RaftOrderingServiceIntegrationTest {
     }
 
     @Test
+    void duplicateClientRetryOnLeaderCommitsAndDeliversOnce(@TempDir Path baseDir) throws Exception {
+        int[] ports = pickFreePorts(3);
+
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
+        }
+
+        nodes = new RaftOrderingService[3];
+        List<List<ChatDeliverMessage>> deliveries = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            nodes[i] = buildService(i, ports[i], voters, baseDir.resolve("n" + i));
+            List<ChatDeliverMessage> d = new CopyOnWriteArrayList<>();
+            deliveries.add(d);
+            nodes[i].onDeliver(d::add);
+        }
+        for (RaftOrderingService n : nodes) {
+            n.start();
+        }
+
+        int leaderIdx = waitForSingleLeader();
+        assertTrue(leaderIdx >= 0, "no leader elected within "
+                + LEADER_ELECTION_DEADLINE_MS + " ms");
+
+        long clientTimestamp = 12345L;
+        ChatReqMessage firstAttempt = new ChatReqMessage(
+                "retry-leader-1",
+                leaderIdx,
+                "alice",
+                "same wire message",
+                new VectorClock(),
+                clientTimestamp
+        );
+        ChatReqMessage retryAttempt = new ChatReqMessage(
+                "retry-leader-2",
+                leaderIdx,
+                "alice",
+                "same wire message",
+                new VectorClock(),
+                clientTimestamp
+        );
+
+        assertTrue(nodes[leaderIdx].propose(firstAttempt), "first attempt should commit");
+        assertTrue(waitFor(
+                () -> deliveries.stream().allMatch(d -> d.size() >= 1),
+                DELIVERY_DEADLINE_MS
+        ), "first attempt was not delivered on all nodes");
+
+        assertTrue(nodes[leaderIdx].propose(retryAttempt), "committed retry should ACK without appending");
+
+        assertEquals(1L, nodes[leaderIdx].getLastLogIndexForTesting(),
+                "duplicate retry must not append a second Raft entry");
+        for (int i = 0; i < 3; i++) {
+            List<ChatDeliverMessage> d = deliveries.get(i);
+            assertEquals(1, d.size(), "node " + i + " should deliver the client message once");
+            assertEquals("same wire message", d.get(0).getText(), "node " + i + " unexpected text");
+            assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected username");
+        }
+    }
+
+    @Test
+    void duplicateClientRetryForwardedByFollowerCommitsAndDeliversOnce(@TempDir Path baseDir) throws Exception {
+        int[] ports = pickFreePorts(3);
+
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
+        }
+
+        nodes = new RaftOrderingService[3];
+        List<List<ChatDeliverMessage>> deliveries = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            nodes[i] = buildService(i, ports[i], voters, baseDir.resolve("n" + i));
+            List<ChatDeliverMessage> d = new CopyOnWriteArrayList<>();
+            deliveries.add(d);
+            nodes[i].onDeliver(d::add);
+        }
+        for (RaftOrderingService n : nodes) {
+            n.start();
+        }
+
+        int leaderIdx = waitForSingleLeader();
+        assertTrue(leaderIdx >= 0, "no leader elected within "
+                + LEADER_ELECTION_DEADLINE_MS + " ms");
+
+        int followerIdx = -1;
+        for (int i = 0; i < nodes.length; i++) {
+            if (i != leaderIdx) {
+                followerIdx = i;
+                break;
+            }
+        }
+        assertTrue(followerIdx >= 0, "no follower found");
+
+        final int leader = leaderIdx;
+        final int follower = followerIdx;
+        assertTrue(waitFor(
+                () -> nodes[follower].getLeaderId() == leader,
+                DELIVERY_DEADLINE_MS
+        ), "follower did not learn the current leader");
+
+        long clientTimestamp = 67890L;
+        ChatReqMessage firstAttempt = new ChatReqMessage(
+                "retry-follower-1",
+                followerIdx,
+                "alice",
+                "same forwarded wire message",
+                new VectorClock(),
+                clientTimestamp
+        );
+        ChatReqMessage retryAttempt = new ChatReqMessage(
+                "retry-follower-2",
+                followerIdx,
+                "alice",
+                "same forwarded wire message",
+                new VectorClock(),
+                clientTimestamp
+        );
+
+        assertTrue(nodes[followerIdx].propose(firstAttempt), "first follower-forwarded attempt should commit");
+        assertTrue(waitFor(
+                () -> deliveries.stream().allMatch(d -> d.size() >= 1),
+                DELIVERY_DEADLINE_MS
+        ), "first follower-forwarded attempt was not delivered on all nodes");
+
+        assertTrue(nodes[followerIdx].propose(retryAttempt),
+                "committed follower-forwarded retry should ACK without appending");
+
+        assertEquals(1L, nodes[leaderIdx].getLastLogIndexForTesting(),
+                "duplicate forwarded retry must not append a second Raft entry");
+        for (int i = 0; i < 3; i++) {
+            List<ChatDeliverMessage> d = deliveries.get(i);
+            assertEquals(1, d.size(), "node " + i + " should deliver the forwarded client message once");
+            assertEquals("same forwarded wire message", d.get(0).getText(), "node " + i + " unexpected text");
+            assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected username");
+        }
+    }
+
+    @Test
     void followerForwardsClientProposalToLeader(@TempDir Path baseDir) throws Exception {
         int[] ports = pickFreePorts(3);
 

@@ -13,7 +13,9 @@ import java.io.Serializable;
  * - log index as the global sequence number
  * - brokerId/username/text/vectorClock as the message content
  *
- * localMsgId is preserved to support de-duplication across retries.
+ * localMsgId is preserved for tracing. Client-originated commands also carry
+ * the original MSG timestamp so the leader can de-duplicate retries by
+ * (username, timestamp).
  */
 public class ChatCommand implements Serializable {
     private static final long serialVersionUID = 1L;
@@ -23,17 +25,27 @@ public class ChatCommand implements Serializable {
     private final String username;
     private final String text;
     private final VectorClock vectorClock;
+    private final long clientTimestamp;
+    private final boolean hasClientTimestamp;
 
-    public ChatCommand(String localMsgId,
-                       int brokerId,
-                       String username,
-                       String text,
-                       VectorClock vectorClock) {
+    public ChatCommand(String localMsgId, int brokerId, String username, String text, VectorClock vectorClock) {
+        this(localMsgId, brokerId, username, text, vectorClock, 0L, false);
+    }
+
+    public ChatCommand(String localMsgId, int brokerId, String username, String text,
+                       VectorClock vectorClock, long clientTimestamp) {
+        this(localMsgId, brokerId, username, text, vectorClock, clientTimestamp, true);
+    }
+
+    private ChatCommand(String localMsgId, int brokerId, String username, String text,
+                        VectorClock vectorClock, long clientTimestamp, boolean hasClientTimestamp) {
         this.localMsgId = localMsgId;
         this.brokerId = brokerId;
         this.username = username;
         this.text = text;
         this.vectorClock = vectorClock;
+        this.clientTimestamp = clientTimestamp;
+        this.hasClientTimestamp = hasClientTimestamp;
     }
 
     public String getLocalMsgId() {
@@ -54,5 +66,13 @@ public class ChatCommand implements Serializable {
 
     public VectorClock getVectorClock() {
         return vectorClock;
+    }
+
+    public long getClientTimestamp() {
+        return clientTimestamp;
+    }
+
+    public boolean hasClientTimestamp() {
+        return hasClientTimestamp;
     }
 }

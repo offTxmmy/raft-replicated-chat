@@ -179,6 +179,9 @@ Below is the proposed class structure aligned with the current codebase and the 
     - Receives `ChatReqMessage` via `propose(...)`.
     - If leader: appends to log and starts `AppendEntries` to followers.
     - If follower: forwards to leader (or responds with internal redirect).
+    - De-duplicates client retries by `(username, MSG timestamp)`: pending
+      duplicates wait on the original commit, committed duplicates return
+      success without another append.
     - Exposes `start/stop`, `isLeader`, `getLeaderId`.
 
 2. **`RaftNode`**
@@ -459,6 +462,8 @@ This section should be treated as the practical implementation guide for the 3-p
 - `RaftPeerReplicationState` (per-follower `nextIndex`/`matchIndex` tracking).
 - Raft RPC DTOs for `AppendEntriesRequest` / `AppendEntriesResponse`.
 - `ChatCommand` payload and `RaftLogEntry` updated to carry it.
+- Client retry idempotency in `RaftOrderingService`, with stable retry keys
+  propagated through `ChatReqMessage` and `ChatCommand`.
 - Unit tests for `RaftLog`, `RaftCommitManager`, `RaftPeerReplicationState`, and AppendEntries DTOs.
 
 ### Person B – progress update (May 5, 2026)

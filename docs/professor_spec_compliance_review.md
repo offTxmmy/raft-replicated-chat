@@ -26,9 +26,10 @@ alcune lacune impattano direttamente i requisiti del professore:
 - **`NOT_LEADER` non gestito lato client.** `Broker.sendNotLeaderToClient`
   invia una stringa che `ClientMessageReceiver` si limita a stampare. Il
   client non si riconnette al leader e ritrasmette inutilmente.
-- **Nessuna deduplicazione `(clientId, clientSeq)`** sul leader Raft.
-  `Broker.buildChatReq` genera un nuovo `localMsgId` ad ogni retry; un
-  messaggio ritrasmesso può essere committato due volte.
+- **Deduplicazione retry client in Raft implementata.** Il broker propaga
+  il timestamp originale di `MSG ts text` fino a `ChatCommand` e il leader
+  deduplica su `(username, timestamp)`: retry pending attendono lo stesso
+  commit, retry già committati ricevono ACK senza nuovo append.
 - **In modalità sequencer, ACK al client *prima* del commit globale**
   (`SequencerOrderingService.propose` su follower ritorna `true`
   immediatamente). Pericoloso se il sequencer muore subito dopo.
@@ -89,14 +90,15 @@ sezione "Critical Issues to Fix Before Submission".
 
 1. Client invia `MSG ts text` su TCP al suo broker B.
 2. `ClientHandler.handleCommand` → `Broker.onClientMessage`.
-3. Se B non è leader Raft: `Broker.onClientMessage` invia stringa
-   `NOT_LEADER timestamp=... leaderId=...` (ignorata dal client) e
-   ritorna.
-4. Se B è leader: `buildChatReq` (incrementa VC locale) →
+3. Se B non è leader Raft: `RaftOrderingService.propose` inoltra la
+   `ChatReqMessage` al leader noto via RPC; se non conosce un leader,
+   rifiuta la proposta.
+4. Se B è leader: `buildChatReq` (incrementa VC locale e conserva il
+   timestamp originale del client) →
    `RaftOrderingService.propose(req)`.
-5. `propose` registra un `CompletableFuture` su `localMsgId`,
-   appende al log via `replicationManager.appendCommandAsLeader`,
-   e blocca fino al commit (timeout 5 s).
+5. `propose` registra o riusa un `CompletableFuture` sulla chiave
+   idempotente `(username, timestamp)`, appende al log solo se la chiave
+   non è già pending/committed, e blocca fino al commit (timeout 5 s).
 6. Replicazione via `onHeartbeatRoundDue` →
    `AppendEntries` ai peer; quando matchIndex maggioritario raggiunge
    l'indice, `RaftCommitManager.tryAdvanceCommitIndex` committa.
@@ -256,11 +258,12 @@ gap-recovery in `Broker.handleOrderedMessage` (gated su
 
 ## Possibili duplicati
 
-**CRITICO**: `ClientMessageSender` ritrasmette dopo `ackTimeoutMs`
-con stesso `MSG ts text`. Sul broker leader,
-`Broker.buildChatReq` genera ogni volta un nuovo `localMsgId`
-(`brokerId + "-" + ++localMsgCounter`). `ChatCommand` non porta nessun
-ID lato client. Retry → due commit → due deliver. Duplicato concreto.
+**Risolto per Raft**: `ClientMessageSender` ritrasmette dopo
+`ackTimeoutMs` con stesso `MSG ts text`. `Broker.buildChatReq` può ancora
+generare un nuovo `localMsgId` a ogni tentativo, ma ora propaga anche il
+timestamp originale del client; `RaftOrderingService` deduplica sul leader
+con chiave `(username, timestamp)`. Retry → stesso commit/ACK, nessun
+secondo append/deliver.
 
 ## Possibili perdite
 
@@ -405,7 +408,7 @@ Il client la stampa soltanto. **Difetto end-to-end critico.**
 | Replication | `RaftReplicationManagerTest` | 19 | Buona |
 | Persistence | `FileRaftPersistenceTest`, `RaftPersistenceTest` | 10+10 | Solo isolato |
 | RPC | `RaftRpcIntegrationTest` | 3 | Solo round-trip |
-| End-to-end | `RaftOrderingServiceIntegrationTest` | 2 | Minima |
+| End-to-end | `RaftOrderingServiceIntegrationTest` | 4+ | Include retry dedup diretto e via follower-forward |
 
 ### Verdetto Raft
 
@@ -435,7 +438,7 @@ o di restart con stato pieno).
   N client su broker diversi vedano la stessa sequenza.
 - **Failover leader sotto carico**.
 - **Restart con stato persistito + ripristino consegna**.
-- **Dedup retry client**.
+- **Dedup retry client**: coperto da test Raft mirati.
 - **Gestione NOT_LEADER lato client** (perché non implementata).
 - **Causale cross-broker dopo cambio leader**.
 - **Timeout di `propose()` 5 s**.
@@ -494,23 +497,22 @@ failure" davanti al professore.
 - **Test:** client → follower invia 1 msg → riceve NotLeader → si
   riconnette al leader → tutti i client vedono il msg.
 
-### B3. Nessuna deduplicazione `(clientId, clientSeq)`
-- **Problema:** `ClientMessageSender.run` ritrasmette `MSG ts text`.
-  `Broker.buildChatReq` genera ogni volta un nuovo `localMsgId`
-  (`brokerId + "-" + ++localMsgCounter`). `ChatCommand` non porta nessun
-  ID lato client → due commit, due deliver per lo stesso messaggio.
-- **Perché importa:** viola "stesso ordine senza duplicati" appena il
-  client ritrasmette.
+### B3. Deduplicazione retry client in Raft
+- **Stato:** implementato.
+- **Problema risolto:** `ClientMessageSender.run` ritrasmette lo stesso
+  `MSG ts text`; `Broker.buildChatReq` può generare un nuovo `localMsgId`,
+  ma ora conserva il timestamp client dentro `ChatReqMessage` e
+  `ChatCommand`.
+- **Perché importa:** evita doppi commit/doppi deliver quando il client
+  ritrasmette un messaggio già pending o già committato.
 - **File:** `ChatCommand`, `ChatReqMessage`, `Broker.buildChatReq`,
-  `ClientMessage`, `RaftOrderingService.propose` o
-  `Broker.onClientMessage`.
-- **Fix suggerito:** propagare `(clientId = username, clientSeq = ts)`
-  fino al `ChatCommand`. Sul leader, mantenere
-  `Map<(clientId, clientSeq), CompletableFuture<Boolean>>` short-lived.
-  Se la chiave è già presente con stato "committed", restituisci ACK
-  senza nuovo append.
-- **Test:** client invia stesso `(ts, text)` due volte → un solo entry
-  nel log + una sola consegna.
+  `ClientMessage`, `RaftOrderingService.propose`.
+- **Fix:** propagare `(clientId = username, clientSeq = ts)` fino al
+  `ChatCommand`. Sul leader, mantenere pending e committed set per la
+  chiave idempotente; pending duplicate attendono lo stesso future,
+  committed duplicate ritornano `true` senza nuovo append.
+- **Test:** `duplicateClientRetryOnLeaderCommitsAndDeliversOnce` e
+  `duplicateClientRetryForwardedByFollowerCommitsAndDeliversOnce`.
 
 ## High
 
@@ -623,7 +625,7 @@ Aggiornato al 2026-05-19.
 - **B1 - Persistenza log Raft**: ancora da cablare in `RaftLog` e
   `RaftOrderingService`.
 - **B2 - Gestione `NOT_LEADER` lato client**: ancora da implementare.
-- **B3 - Deduplicazione retry client**: ancora da implementare.
+- **B3 - Deduplicazione retry client**: implementata e testata in Raft.
 - **H4 - Test end-to-end Broker + Raft**: ancora da aggiungere.
 - **H5 - Test failover sotto carico / restart con stato pieno**: ancora
   da aggiungere.
@@ -665,8 +667,10 @@ in Raft, ancora utile in modalità sequencer).
   vedi B2).
 
 ### 4. "Cosa succede se un client invia lo stesso messaggio due volte (retry)?"
-**Oggi:** duplicato silenzioso. Vedi B3.
-**Dopo la fix:** dedup `(clientId, clientSeq)` → un solo append.
+In Raft il broker conserva il timestamp originale di `MSG ts text` e il
+leader deduplica su `(username, timestamp)`. Se il retry è pending, attende
+lo stesso commit; se è già committed, riceve ACK senza nuovo append. I test
+coprono sia invio diretto al leader sia forward da follower.
 
 ### 5. "Perché avete una DirectoryService? Non viola la spec?"
 La DirectoryService non partecipa al consenso, alla replicazione, al

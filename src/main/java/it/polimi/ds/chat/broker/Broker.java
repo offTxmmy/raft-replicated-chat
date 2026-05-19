@@ -349,7 +349,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     public void onClientMessage(ClientMessage message) {
         // In Raft mode followers proxy the proposal to the known leader, so
         // clients can stay connected to the broker selected by DirectoryService.
-        ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText());
+        ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText(), message.getTimestamp());
 
         // Propose to ordering service.
         boolean accepted = orderingService.propose(chatReq);
@@ -435,10 +435,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param text     message text
      * @return constructed ChatReqMessage ready for proposing to the ordering service
      */
-    private synchronized ChatReqMessage buildChatReq(String username, String text) {
+    private synchronized ChatReqMessage buildChatReq(String username, String text, long clientTimestamp) {
         vectorClock.increment(brokerId);
         String localMsgId = brokerId + "-" + (++localMsgCounter);
-        return new ChatReqMessage(localMsgId, brokerId, username, text, new VectorClock(vectorClock));
+        return new ChatReqMessage(localMsgId, brokerId, username, text, new VectorClock(vectorClock), clientTimestamp);
     }
 
     /**

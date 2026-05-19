@@ -44,8 +44,11 @@ import java.util.function.Consumer;
  * </ol>
  *
  * <p>{@link #propose(ChatReqMessage)}: the current leader appends the command
- * to the local log; followers proxy proposals to the known leader. Replication
- * to peers happens on the next heartbeat tick.
+ * to the local log; followers proxy proposals to the known leader. Client
+ * retries are idempotent on the leader by (username, MSG timestamp), so a
+ * duplicate pending proposal waits for the original commit and a duplicate
+ * committed proposal returns success without another append. Replication to
+ * peers happens on the next heartbeat tick.
  *
  * <p>Both {@code (currentTerm, votedFor)} and log entries are persisted.
  * On startup, the replicated log is rebuilt from durable storage before
@@ -75,8 +78,12 @@ public final class RaftOrderingService implements OrderingService {
 
     private static final long PROPOSE_COMMIT_TIMEOUT_MS = 5_000L;
 
-    private final ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits = 
+    private final ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits =
         new ConcurrentHashMap<>();
+
+    // Guards the check-and-register sequence for retry idempotency.
+    private final Set<String> committedProposalKeys = ConcurrentHashMap.newKeySet();
+    private final Object idempotencyLock = new Object();
 
     public RaftOrderingService(BrokerConfig brokerConfig) {
         this.brokerConfig = brokerConfig;
@@ -229,6 +236,7 @@ public final class RaftOrderingService implements OrderingService {
 
         pendingCommits.forEach((id, future) -> future.complete(false));
         pendingCommits.clear();
+        committedProposalKeys.clear();
 
         if (electionManager   != null) electionManager.stop();
         if (replicationManager != null) replicationManager.stop();
@@ -252,33 +260,60 @@ public final class RaftOrderingService implements OrderingService {
     }
 
     private boolean appendAndWaitForCommit(ChatReqMessage request) {
-        ChatCommand command = new ChatCommand(
-                request.getLocalMsgId(),
-                request.getBrokerId(),
-                request.getUsername(),
-                request.getText(),
-                request.getVectorClock()
-        );
+        String proposalKey = proposalKey(request);
+        CompletableFuture<Boolean> committed;
+        boolean owner = false;
 
-        CompletableFuture<Boolean> committed = new CompletableFuture<>();
-        pendingCommits.put(command.getLocalMsgId(), committed);
+        synchronized (idempotencyLock) {
+            if (committedProposalKeys.contains(proposalKey)) {
+                return true;
+            }
 
-        RaftLogEntry appended = replicationManager.appendCommandAsLeader(command);
-        if (appended == null) {
-            pendingCommits.remove(command.getLocalMsgId());
-            return false;
+            committed = pendingCommits.get(proposalKey);
+            if (committed == null) {
+                committed = new CompletableFuture<>();
+                pendingCommits.put(proposalKey, committed);
+                owner = true;
+            }
         }
-        
+
+        if (owner) {
+            ChatCommand command;
+            if (request.hasClientTimestamp()) {
+                command = new ChatCommand(
+                        request.getLocalMsgId(),
+                        request.getBrokerId(),
+                        request.getUsername(),
+                        request.getText(),
+                        request.getVectorClock(),
+                        request.getClientTimestamp()
+                );
+            } else {
+                command = new ChatCommand(
+                        request.getLocalMsgId(),
+                        request.getBrokerId(),
+                        request.getUsername(),
+                        request.getText(),
+                        request.getVectorClock()
+                );
+            }
+
+            RaftLogEntry appended = replicationManager.appendCommandAsLeader(command);
+            if (appended == null) {
+                synchronized (idempotencyLock) {
+                    pendingCommits.remove(proposalKey, committed);
+                }
+                return false;
+            }
+        }
+
         try {
             return committed.get(PROPOSE_COMMIT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            pendingCommits.remove(command.getLocalMsgId());
             return false;
         } catch (ExecutionException | TimeoutException e) {
-            pendingCommits.remove(command.getLocalMsgId());
-            System.err.println("[RaftOrderingService] propose timed out waiting for commit: "
-                + command.getLocalMsgId());
+            System.err.println("[RaftOrderingService] propose timed out waiting for commit: " + proposalKey);
             return false;
         }
     }
@@ -359,11 +394,33 @@ public final class RaftOrderingService implements OrderingService {
             return;
         }
 
-        String localMsgId = entry.getCommand().getLocalMsgId();
-        CompletableFuture<Boolean> pending = pendingCommits.remove(localMsgId);
-        
+        String proposalKey = proposalKey(entry.getCommand());
+        CompletableFuture<Boolean> pending;
+        synchronized (idempotencyLock) {
+            committedProposalKeys.add(proposalKey);
+            pending = pendingCommits.remove(proposalKey);
+        }
+
         if (pending != null) {
             pending.complete(true);
         }
+    }
+
+    long getLastLogIndexForTesting() {
+        return raftLog == null ? 0L : raftLog.lastLogIndex();
+    }
+
+    private static String proposalKey(ChatReqMessage request) {
+        if (request.hasClientTimestamp()) {
+            return "client:" + request.getUsername() + ":" + request.getClientTimestamp();
+        }
+        return "local:" + request.getLocalMsgId();
+    }
+
+    private static String proposalKey(ChatCommand command) {
+        if (command.hasClientTimestamp()) {
+            return "client:" + command.getUsername() + ":" + command.getClientTimestamp();
+        }
+        return "local:" + command.getLocalMsgId();
     }
 }

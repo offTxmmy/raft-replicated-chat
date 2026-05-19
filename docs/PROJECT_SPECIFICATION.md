@@ -457,11 +457,12 @@ Replication and commit (Person B):
 
 Integration, transport, persistence, QA (Person C):
 
-- [ ] `RaftOrderingService` wired behind `OrderingService`.
-- [ ] `BrokerConfig` extended with Raft parameters and static voter set.
-- [ ] `Broker.initializeOrderingService()` selects Raft via config.
-- [ ] `RaftRpcServer` / `RaftRpcClient` (including UDP-broadcast path for
-      `RequestVote` and `AppendEntries` on LAN).
+- [x] `RaftOrderingService` wired behind `OrderingService`.
+- [x] `BrokerConfig` extended with Raft parameters and static voter set.
+- [x] `Broker.initializeOrderingService()` selects Raft via config.
+- [x] `RaftRpcServer` / `RaftRpcClient` for Raft RPC and follower proposal
+      forwarding.
+- [x] Client retry deduplication in Raft using `(username, MSG timestamp)`.
 - [ ] LAN discovery beacon + `PeerRegistry` adapter for address resolution only.
 - [ ] `RaftPersistence` + `FileRaftPersistence` implementation.
 - [ ] Client-facing leader redirect triggered by `onLeaderChanged`.
