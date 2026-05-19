@@ -1,7 +1,7 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage;
-import it.polimi.ds.chat.messages.raft.RequestVoteResponseMessage;
+import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 
 /**
  * Core Raft node state.

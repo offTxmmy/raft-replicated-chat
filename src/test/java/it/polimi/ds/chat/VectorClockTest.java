@@ -1,6 +1,6 @@
 package it.polimi.ds.chat;
 
-import it.polimi.ds.chat.utilities.VectorClock;
+import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.Test;
 
 import static org.junit.Assert.*;

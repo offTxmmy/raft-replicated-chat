@@ -1,10 +1,10 @@
 package it.polimi.ds.chat;
 
-import it.polimi.ds.chat.broker.Broker;
-import it.polimi.ds.chat.broker.BrokerConfig;
-import it.polimi.ds.chat.broker.HandlerState;
-import it.polimi.ds.chat.messages.ChatDeliverMessage;
-import it.polimi.ds.chat.utilities.VectorClock;
+import it.polimi.ds.chat.broker.core.Broker;
+import it.polimi.ds.chat.broker.config.BrokerConfig;
+import it.polimi.ds.chat.broker.session.HandlerState;
+import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
+import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.Before;
 import org.junit.Test;
 

@@ -1,12 +1,12 @@
 package it.polimi.ds.chat;
 
-import it.polimi.ds.chat.broker.BrokerConfig;
-import it.polimi.ds.chat.broker.HandlerState;
-import it.polimi.ds.chat.messages.ChatDeliverMessage;
-import it.polimi.ds.chat.messages.ChatReqMessage;
-import it.polimi.ds.chat.ordering.OrderingService;
-import it.polimi.ds.chat.ordering.SequencerOrderingService;
-import it.polimi.ds.chat.utilities.VectorClock;
+import it.polimi.ds.chat.broker.config.BrokerConfig;
+import it.polimi.ds.chat.broker.session.HandlerState;
+import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
+import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
+import it.polimi.ds.chat.ordering.api.OrderingService;
+import it.polimi.ds.chat.ordering.sequencer.SequencerOrderingService;
+import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

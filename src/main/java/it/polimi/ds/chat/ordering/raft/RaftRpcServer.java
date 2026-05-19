@@ -1,11 +1,11 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.messages.raft.AppendEntriesRequestMessage;
-import it.polimi.ds.chat.messages.raft.AppendEntriesResponseMessage;
-import it.polimi.ds.chat.messages.raft.ForwardClientProposalRequestMessage;
-import it.polimi.ds.chat.messages.raft.ForwardClientProposalResponseMessage;
-import it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage;
-import it.polimi.ds.chat.messages.raft.RequestVoteResponseMessage;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.protocol.raft.ForwardClientProposalRequestMessage;
+import it.polimi.ds.chat.protocol.raft.ForwardClientProposalResponseMessage;
+import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 
 import java.io.EOFException;
 import java.io.IOException;

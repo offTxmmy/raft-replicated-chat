@@ -326,7 +326,7 @@ document first.
   `votedFor`, log.
 - `RaftStateMachineAdapter` — maps committed entries to `ChatDeliverMessage`.
 
-### 7.2 Raft RPC data models (`it.polimi.ds.chat.messages.raft`)
+### 7.2 Raft RPC data models (`it.polimi.ds.chat.protocol.raft`)
 
 - `RaftLogEntry` — `(index, term, command)`.
 - `RequestVoteRequest` / `RequestVoteResponse`.

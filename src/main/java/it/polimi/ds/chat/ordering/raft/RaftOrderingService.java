@@ -1,16 +1,16 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.broker.BrokerConfig;
-import it.polimi.ds.chat.broker.RaftConfig;
-import it.polimi.ds.chat.messages.ChatDeliverMessage;
-import it.polimi.ds.chat.messages.ChatReqMessage;
-import it.polimi.ds.chat.messages.raft.ForwardClientProposalRequestMessage;
-import it.polimi.ds.chat.messages.raft.ForwardClientProposalResponseMessage;
-import it.polimi.ds.chat.messages.raft.ChatCommand;
-import it.polimi.ds.chat.ordering.OrderingService;
-import it.polimi.ds.chat.ordering.OrderingServiceCallback;
+import it.polimi.ds.chat.broker.config.BrokerConfig;
+import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
+import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
+import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
+import it.polimi.ds.chat.protocol.raft.ForwardClientProposalRequestMessage;
+import it.polimi.ds.chat.protocol.raft.ForwardClientProposalResponseMessage;
+import it.polimi.ds.chat.protocol.raft.ChatCommand;
+import it.polimi.ds.chat.ordering.api.OrderingService;
+import it.polimi.ds.chat.ordering.api.OrderingServiceCallback;
 
-import it.polimi.ds.chat.messages.raft.RaftLogEntry;
+import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;

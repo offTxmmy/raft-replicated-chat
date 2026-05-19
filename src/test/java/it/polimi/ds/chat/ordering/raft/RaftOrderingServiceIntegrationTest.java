@@ -1,12 +1,12 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.broker.BrokerConfig;
-import it.polimi.ds.chat.broker.OrderingMode;
-import it.polimi.ds.chat.broker.RaftConfig;
-import it.polimi.ds.chat.broker.RaftPeerEndpoint;
-import it.polimi.ds.chat.messages.ChatDeliverMessage;
-import it.polimi.ds.chat.messages.ChatReqMessage;
-import it.polimi.ds.chat.utilities.VectorClock;
+import it.polimi.ds.chat.broker.config.BrokerConfig;
+import it.polimi.ds.chat.broker.config.OrderingMode;
+import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
+import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
+import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
+import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
+import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;

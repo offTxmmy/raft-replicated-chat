@@ -244,7 +244,7 @@ Below is the proposed class structure aligned with the current codebase and the 
     - Maps committed log entries into application events (`ChatDeliverMessage`) toward `Broker`.
     - Keeps Raft logic separated from chat-specific delivery logic.
 
-## 4.2 Raft data models (package `it.polimi.ds.chat.messages.raft`)
+## 4.2 Raft data models (package `it.polimi.ds.chat.protocol.raft`)
 
 11. **`RaftLogEntry`**
     - Minimum fields:

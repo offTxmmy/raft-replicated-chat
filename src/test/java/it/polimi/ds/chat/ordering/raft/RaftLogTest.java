@@ -1,8 +1,8 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.messages.raft.ChatCommand;
-import it.polimi.ds.chat.messages.raft.RaftLogEntry;
-import it.polimi.ds.chat.utilities.VectorClock;
+import it.polimi.ds.chat.protocol.raft.ChatCommand;
+import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
+import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;

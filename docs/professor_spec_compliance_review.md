@@ -56,7 +56,7 @@ sezione "Critical Issues to Fix Before Submission".
 
 ## Componenti effettivi
 
-- **`Broker`** (`it.polimi.ds.chat.broker.Broker`): accetta TCP dai
+- **`Broker`** (`it.polimi.ds.chat.broker.core.Broker`): accetta TCP dai
   client (un `ClientHandler` per client). Riceve `ClientMessage` →
   costruisce `ChatReqMessage` con vector clock (`buildChatReq`) →
   `OrderingService.propose`. Riceve in callback `ChatDeliverMessage`,

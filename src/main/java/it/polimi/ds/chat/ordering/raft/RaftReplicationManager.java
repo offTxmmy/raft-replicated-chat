@@ -1,9 +1,9 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.messages.raft.AppendEntriesRequestMessage;
-import it.polimi.ds.chat.messages.raft.AppendEntriesResponseMessage;
-import it.polimi.ds.chat.messages.raft.ChatCommand;
-import it.polimi.ds.chat.messages.raft.RaftLogEntry;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.protocol.raft.ChatCommand;
+import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 
 import java.util.ArrayList;
 import java.util.Collections;

@@ -1,7 +1,7 @@
 package it.polimi.ds.chat;
 
-import it.polimi.ds.chat.broker.PeerRegistry;
-import it.polimi.ds.chat.messages.PeerInfo;
+import it.polimi.ds.chat.broker.discovery.PeerRegistry;
+import it.polimi.ds.chat.protocol.broker.PeerInfo;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.DisplayName;
 

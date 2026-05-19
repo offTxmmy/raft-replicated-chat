@@ -1,11 +1,11 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.messages.raft.AppendEntriesRequestMessage;
-import it.polimi.ds.chat.messages.raft.AppendEntriesResponseMessage;
-import it.polimi.ds.chat.messages.raft.ChatCommand;
-import it.polimi.ds.chat.messages.raft.RaftLogEntry;
-import it.polimi.ds.chat.messages.raft.RequestVoteResponseMessage;
-import it.polimi.ds.chat.utilities.VectorClock;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.protocol.raft.ChatCommand;
+import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
+import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
+import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -136,7 +136,7 @@ class RaftCoreTest {
 
     private static final class RecordingVoteRequestSender implements RaftVoteRequestSender {
         @Override
-        public void sendRequestVote(int peerId, it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage request) {
+        public void sendRequestVote(int peerId, it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage request) {
         }
     }
 

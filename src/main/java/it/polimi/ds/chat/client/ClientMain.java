@@ -1,7 +1,12 @@
 package it.polimi.ds.chat.client;
 
-import it.polimi.ds.chat.messages.ClientJoinMessage;
-import it.polimi.ds.chat.messages.ClientQuitMessage;
+import it.polimi.ds.chat.client.connection.ClientConnection;
+import it.polimi.ds.chat.client.connection.DirectoryAwareClientConnection;
+import it.polimi.ds.chat.client.messaging.ClientHeartbeatManager;
+import it.polimi.ds.chat.client.messaging.ClientMessageReceiver;
+import it.polimi.ds.chat.client.messaging.ClientMessageSender;
+import it.polimi.ds.chat.protocol.client.ClientJoinMessage;
+import it.polimi.ds.chat.protocol.client.ClientQuitMessage;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;

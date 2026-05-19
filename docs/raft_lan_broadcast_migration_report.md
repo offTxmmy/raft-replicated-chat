@@ -168,7 +168,7 @@ envelope comune.
 Package consigliato:
 
 ```text
-it.polimi.ds.chat.messages.raft
+it.polimi.ds.chat.protocol.raft
 ```
 
 Campi:
@@ -201,7 +201,7 @@ Scopi:
 Package consigliato:
 
 ```text
-it.polimi.ds.chat.messages.raft
+it.polimi.ds.chat.protocol.raft
 ```
 
 Valori:

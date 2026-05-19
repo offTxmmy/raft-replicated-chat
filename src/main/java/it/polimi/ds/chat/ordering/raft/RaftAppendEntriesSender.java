@@ -1,6 +1,6 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.messages.raft.AppendEntriesRequestMessage;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 
 /**
  * Outbound RPC contract for AppendEntries.

@@ -1,6 +1,6 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 
 /**
  * Minimal outbound RPC contract needed by the election manager.
