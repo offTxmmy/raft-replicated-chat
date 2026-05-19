@@ -6,6 +6,7 @@ import it.polimi.ds.chat.messages.ChatDeliverMessage;
 import it.polimi.ds.chat.messages.ChatReqMessage;
 import it.polimi.ds.chat.messages.raft.ChatCommand;
 import it.polimi.ds.chat.ordering.OrderingService;
+import it.polimi.ds.chat.ordering.OrderingServiceCallback;
 
 import it.polimi.ds.chat.messages.raft.RaftLogEntry;
 
@@ -58,6 +59,7 @@ public final class RaftOrderingService implements OrderingService {
 
     private final CopyOnWriteArrayList<Consumer<ChatDeliverMessage>> deliveryCallbacks =
             new CopyOnWriteArrayList<>();
+    private volatile OrderingServiceCallback callback;
 
     private RaftPersistence persistence;
     private RaftNode raftNode;
@@ -88,6 +90,10 @@ public final class RaftOrderingService implements OrderingService {
                     "Local broker id " + localNodeId + " is not in the static voter set "
                             + raftConfig.getVoters().keySet());
         }
+    }
+
+    public void setCallback(OrderingServiceCallback callback) {
+        this.callback = callback;
     }
 
     @Override
@@ -140,6 +146,30 @@ public final class RaftOrderingService implements OrderingService {
                 leaderActivityObserver
         );
 
+        RaftElectionListener electionListener = new RaftElectionListener() {
+            @Override
+            public void onLeaderElected(int leaderId, long term) {
+                replicationManager.onLeaderElected(leaderId, term);
+                notifyLeaderChanged(leaderId, term);
+            }
+
+            @Override
+            public void onSteppedDown(long newTerm, int knownLeaderId) {
+                replicationManager.onSteppedDown(newTerm, knownLeaderId);
+            }
+
+            @Override
+            public void onLeaderObserved(int leaderId, long term) {
+                replicationManager.onLeaderObserved(leaderId, term);
+                notifyLeaderChanged(leaderId, term);
+            }
+
+            @Override
+            public void onHeartbeatRoundDue(long term) {
+                replicationManager.onHeartbeatRoundDue(term);
+            }
+        };
+
         // 9. Election manager. Uses a consistent log-tip snapshot (Contract B).
         electionManager = new RaftElectionManager(
                 localNodeId,
@@ -151,7 +181,7 @@ public final class RaftOrderingService implements OrderingService {
                 raftLog,
                 rpcClient,
                 raftClock,
-                replicationManager
+                electionListener
         );
 
         // 10. Wire RPC client response handlers (package-private callbacks
@@ -274,6 +304,13 @@ public final class RaftOrderingService implements OrderingService {
                 System.err.println("[RaftOrderingService] delivery callback error: "
                         + e.getMessage());
             }
+        }
+    }
+
+    private void notifyLeaderChanged(int leaderId, long term) {
+        OrderingServiceCallback cb = callback;
+        if (cb != null) {
+            cb.onLeaderChanged(leaderId, term);
         }
     }
 

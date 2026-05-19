@@ -23,5 +23,15 @@ public interface OrderingServiceCallback {
      * Called when connection to the ordering service is established.
      */
     void onConnectionEstablished();
+
+    /**
+     * Called when the ordering service observes a leader change.
+     *
+     * @param newLeaderId the known leader id, or -1 if no leader is known
+     * @param term the Raft term in which the leader was observed
+     */
+    default void onLeaderChanged(int newLeaderId, long term) {
+        // no-op by default
+    }
 }
 

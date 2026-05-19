@@ -605,6 +605,31 @@ sulla correttezza in scenari di failover.
     avviare un client".
 12. Documento di motivazione TCP per Raft RPC (H3).
 
+## Fix tracking
+
+Aggiornato al 2026-05-19.
+
+### Fatto
+- **M2 - `OrderingServiceCallback.onLeaderChanged`**: aggiunto evento
+  `onLeaderChanged(newLeaderId, term)` con default no-op; cablato in
+  `RaftOrderingService` tramite wrapper di `RaftElectionListener`;
+  `Broker` registra la callback anche in modalità Raft e logga i cambi
+  leader.
+
+### Da fare
+- **B1 - Persistenza log Raft**: ancora da cablare in `RaftLog` e
+  `RaftOrderingService`.
+- **B2 - Gestione `NOT_LEADER` lato client**: ancora da implementare.
+- **B3 - Deduplicazione retry client**: ancora da implementare.
+- **H4 - Test end-to-end Broker + Raft**: ancora da aggiungere.
+- **H5 - Test failover sotto carico / restart con stato pieno**: ancora
+  da aggiungere.
+- **H2 - Directory host parametrizzabile**: ancora da fare.
+- **M3 - Pulizia `pom.xml`**: ancora da fare.
+- **L1 - Spostare `VectorClockIntegrationTest`**: ancora da fare.
+- **H3 - Motivazione TCP per Raft RPC nel report/README**: ancora da
+  documentare.
+
 ---
 
 # Questions I Should Be Ready to Answer

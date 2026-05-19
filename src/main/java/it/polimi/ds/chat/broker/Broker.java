@@ -108,6 +108,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
         if (config.getOrderingMode() == OrderingMode.RAFT) {
             it.polimi.ds.chat.ordering.raft.RaftOrderingService raftService =
                     new it.polimi.ds.chat.ordering.raft.RaftOrderingService(config);
+            raftService.setCallback(this);
             raftService.onDeliver(this::handleOrderedMessage);
             this.orderingService = raftService;
             // Raft uses the static voter set from config: broker id is known
@@ -171,6 +172,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
     @Override
     public void onConnectionEstablished() {
         System.out.println("[Broker] Connected to ordering service");
+    }
+
+    @Override
+    public void onLeaderChanged(int newLeaderId, long term) {
+        System.out.println("[Broker] Raft leader changed: leaderId=" + newLeaderId + ", term=" + term);
     }
 
     // =========================================================================
