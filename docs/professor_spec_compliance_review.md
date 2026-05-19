@@ -615,6 +615,9 @@ Aggiornato al 2026-05-19.
   `RaftOrderingService` tramite wrapper di `RaftElectionListener`;
   `Broker` registra la callback anche in modalità Raft e logga i cambi
   leader.
+- **M3 - Pulizia `pom.xml`**: rimosse le property duplicate
+  `maven.compiler.source/target=1.7`; resta la configurazione Java 16
+  del `maven-compiler-plugin`.
 
 ### Da fare
 - **B1 - Persistenza log Raft**: ancora da cablare in `RaftLog` e
@@ -625,7 +628,6 @@ Aggiornato al 2026-05-19.
 - **H5 - Test failover sotto carico / restart con stato pieno**: ancora
   da aggiungere.
 - **H2 - Directory host parametrizzabile**: ancora da fare.
-- **M3 - Pulizia `pom.xml`**: ancora da fare.
 - **L1 - Spostare `VectorClockIntegrationTest`**: ancora da fare.
 - **H3 - Motivazione TCP per Raft RPC nel report/README**: ancora da
   documentare.
