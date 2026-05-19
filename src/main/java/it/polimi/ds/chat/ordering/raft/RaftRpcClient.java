@@ -1,8 +1,11 @@
 package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.broker.RaftPeerEndpoint;
+import it.polimi.ds.chat.messages.ChatReqMessage;
 import it.polimi.ds.chat.messages.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.messages.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.messages.raft.ForwardClientProposalRequestMessage;
+import it.polimi.ds.chat.messages.raft.ForwardClientProposalResponseMessage;
 import it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.messages.raft.RequestVoteResponseMessage;
 
@@ -40,6 +43,7 @@ public final class RaftRpcClient implements RaftVoteRequestSender, RaftAppendEnt
 
     private static final int DEFAULT_CONNECT_TIMEOUT_MS = 500;
     private static final int DEFAULT_READ_TIMEOUT_MS    = 1000;
+    private static final int FORWARD_PROPOSAL_READ_TIMEOUT_MS = 7000;
 
     private final int localNodeId;
     private final Map<Integer, RaftPeerEndpoint> voters;
@@ -132,6 +136,26 @@ public final class RaftRpcClient implements RaftVoteRequestSender, RaftAppendEnt
         });
     }
 
+    public ForwardClientProposalResponseMessage forwardClientProposal(int leaderId, ChatReqMessage request) {
+        if (!running) {
+            return new ForwardClientProposalResponseMessage(false, -1, "rpc client not running");
+        }
+        RaftPeerEndpoint endpoint = voters.get(leaderId);
+        if (endpoint == null) {
+            return new ForwardClientProposalResponseMessage(false, -1, "unknown leader endpoint");
+        }
+
+        Object response = exchangeBlocking(
+                endpoint,
+                new ForwardClientProposalRequestMessage(request),
+                FORWARD_PROPOSAL_READ_TIMEOUT_MS);
+
+        if (response instanceof ForwardClientProposalResponseMessage r) {
+            return r;
+        }
+        return new ForwardClientProposalResponseMessage(false, -1, "invalid forward response");
+    }
+
     private void sendAsync(int peerId, Object request, Consumer<Object> onResponse) {
         if (!running) {
             return;
@@ -140,23 +164,28 @@ public final class RaftRpcClient implements RaftVoteRequestSender, RaftAppendEnt
         if (endpoint == null) {
             return;
         }
-        sendExecutor.submit(() -> sendBlocking(endpoint, request, onResponse));
+        sendExecutor.submit(() -> {
+            Object response = exchangeBlocking(endpoint, request, readTimeoutMs);
+            if (response != null) {
+                onResponse.accept(response);
+            }
+        });
     }
 
-    private void sendBlocking(RaftPeerEndpoint endpoint, Object request, Consumer<Object> onResponse) {
+    private Object exchangeBlocking(RaftPeerEndpoint endpoint, Object request, int socketReadTimeoutMs) {
         try (Socket sock = new Socket()) {
             sock.connect(new InetSocketAddress(endpoint.host(), endpoint.rpcPort()), connectTimeoutMs);
-            sock.setSoTimeout(readTimeoutMs);
+            sock.setSoTimeout(socketReadTimeoutMs);
 
             ObjectOutputStream out = new ObjectOutputStream(sock.getOutputStream());
             out.writeObject(request);
             out.flush();
 
             ObjectInputStream in = new ObjectInputStream(sock.getInputStream());
-            Object response = in.readObject();
-            onResponse.accept(response);
+            return in.readObject();
         } catch (IOException | ClassNotFoundException e) {
             // peer unreachable, timeout, or malformed reply: Raft will retry naturally
+            return null;
         }
     }
 }

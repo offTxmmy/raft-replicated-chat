@@ -4,6 +4,8 @@ import it.polimi.ds.chat.broker.BrokerConfig;
 import it.polimi.ds.chat.broker.RaftConfig;
 import it.polimi.ds.chat.messages.ChatDeliverMessage;
 import it.polimi.ds.chat.messages.ChatReqMessage;
+import it.polimi.ds.chat.messages.raft.ForwardClientProposalRequestMessage;
+import it.polimi.ds.chat.messages.raft.ForwardClientProposalResponseMessage;
 import it.polimi.ds.chat.messages.raft.ChatCommand;
 import it.polimi.ds.chat.ordering.OrderingService;
 import it.polimi.ds.chat.ordering.OrderingServiceCallback;
@@ -41,11 +43,9 @@ import java.util.function.Consumer;
  *       and persistence-backed components.
  * </ol>
  *
- * <p>{@link #propose(ChatReqMessage)}: only the current leader appends the
- * command to the local log; followers reject proposals by returning false;
- * the broker can use leaderId to redirect the client.
- * Replication to peers happens on the next heartbeat tick. Client-side
- * redirect via {@link #getLeaderId()} can be added at the application layer.
+ * <p>{@link #propose(ChatReqMessage)}: the current leader appends the command
+ * to the local log; followers proxy proposals to the known leader. Replication
+ * to peers happens on the next heartbeat tick.
  *
  * <p>Both {@code (currentTerm, votedFor)} and log entries are persisted.
  * On startup, the replicated log is rebuilt from durable storage before
@@ -195,7 +195,8 @@ public final class RaftOrderingService implements OrderingService {
         rpcServer = new RaftRpcServer(
                 raftConfig.getRpcPort(),
                 electionManager::onRequestVoteRequest,
-                replicationManager::handleAppendEntries
+                replicationManager::handleAppendEntries,
+                this::handleForwardedProposal
         );
 
         // 12. Start in dependency order.
@@ -244,10 +245,13 @@ public final class RaftOrderingService implements OrderingService {
             return false;
         }
         if (!raftNode.isLeader()) {
-            System.err.println("[RaftOrderingService] propose ignored: not leader. Known leader = "
-                    + raftNode.getLeaderId());
-            return false;
+            return forwardProposalToLeader(request);
         }
+
+        return appendAndWaitForCommit(request);
+    }
+
+    private boolean appendAndWaitForCommit(ChatReqMessage request) {
         ChatCommand command = new ChatCommand(
                 request.getLocalMsgId(),
                 request.getBrokerId(),
@@ -277,6 +281,40 @@ public final class RaftOrderingService implements OrderingService {
                 + command.getLocalMsgId());
             return false;
         }
+    }
+
+    private boolean forwardProposalToLeader(ChatReqMessage request) {
+        int leaderId = raftNode.getLeaderId();
+        if (leaderId < 0 || leaderId == localNodeId) {
+            System.err.println("[RaftOrderingService] cannot forward proposal: known leader = " + leaderId);
+            return false;
+        }
+
+        ForwardClientProposalResponseMessage response =
+                rpcClient.forwardClientProposal(leaderId, request);
+        if (response == null || !response.isAccepted()) {
+            String reason = response == null ? "no response" : response.getReason();
+            System.err.println("[RaftOrderingService] forwarded proposal rejected by leader "
+                    + leaderId + ": " + reason);
+            return false;
+        }
+        return true;
+    }
+
+    private ForwardClientProposalResponseMessage handleForwardedProposal(
+            ForwardClientProposalRequestMessage request) {
+        if (!running) {
+            return new ForwardClientProposalResponseMessage(false, getLeaderId(), "service not running");
+        }
+        if (!raftNode.isLeader()) {
+            return new ForwardClientProposalResponseMessage(false, getLeaderId(), "receiver is not leader");
+        }
+
+        boolean accepted = appendAndWaitForCommit(request.getRequest());
+        return new ForwardClientProposalResponseMessage(
+                accepted,
+                localNodeId,
+                accepted ? "committed" : "proposal was not committed");
     }
 
     @Override

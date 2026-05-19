@@ -2,6 +2,8 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.messages.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.messages.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.messages.raft.ForwardClientProposalRequestMessage;
+import it.polimi.ds.chat.messages.raft.ForwardClientProposalResponseMessage;
 import it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.messages.raft.RequestVoteResponseMessage;
 
@@ -27,6 +29,7 @@ import java.util.function.Function;
  * <ul>
  *   <li>{@link RequestVoteRequestMessage}     → {@code voteHandler}     → response written back
  *   <li>{@link AppendEntriesRequestMessage}   → {@code appendHandler}   → response written back
+ *   <li>{@link ForwardClientProposalRequestMessage} → {@code forwardHandler} → response written back
  * </ul>
  *
  * <p>Handler functions run on the per-connection worker thread. They are
@@ -38,6 +41,7 @@ public final class RaftRpcServer {
     private final int requestedPort;
     private final Function<RequestVoteRequestMessage, RequestVoteResponseMessage> voteHandler;
     private final Function<AppendEntriesRequestMessage, AppendEntriesResponseMessage> appendHandler;
+    private final Function<ForwardClientProposalRequestMessage, ForwardClientProposalResponseMessage> forwardHandler;
 
     private ServerSocket serverSocket;
     private ExecutorService acceptExecutor;
@@ -48,12 +52,21 @@ public final class RaftRpcServer {
     public RaftRpcServer(int port,
                          Function<RequestVoteRequestMessage, RequestVoteResponseMessage> voteHandler,
                          Function<AppendEntriesRequestMessage, AppendEntriesResponseMessage> appendHandler) {
+        this(port, voteHandler, appendHandler,
+                req -> new ForwardClientProposalResponseMessage(false, -1, "forward handler unavailable"));
+    }
+
+    public RaftRpcServer(int port,
+                         Function<RequestVoteRequestMessage, RequestVoteResponseMessage> voteHandler,
+                         Function<AppendEntriesRequestMessage, AppendEntriesResponseMessage> appendHandler,
+                         Function<ForwardClientProposalRequestMessage, ForwardClientProposalResponseMessage> forwardHandler) {
         if (port < 0 || port > 65535) {
             throw new IllegalArgumentException("port out of range: " + port);
         }
         this.requestedPort = port;
         this.voteHandler = Objects.requireNonNull(voteHandler, "voteHandler");
         this.appendHandler = Objects.requireNonNull(appendHandler, "appendHandler");
+        this.forwardHandler = Objects.requireNonNull(forwardHandler, "forwardHandler");
     }
 
     public synchronized void start() throws IOException {
@@ -136,6 +149,9 @@ public final class RaftRpcServer {
         }
         if (msg instanceof AppendEntriesRequestMessage r) {
             return appendHandler.apply(r);
+        }
+        if (msg instanceof ForwardClientProposalRequestMessage r) {
+            return forwardHandler.apply(r);
         }
         System.err.println("[RaftRpcServer] unknown message type: "
                 + (msg == null ? "null" : msg.getClass().getName()));

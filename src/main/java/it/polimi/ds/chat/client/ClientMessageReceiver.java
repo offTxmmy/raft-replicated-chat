@@ -3,7 +3,6 @@ package it.polimi.ds.chat.client;
 import it.polimi.ds.chat.messages.ClientAckMessages;
 import it.polimi.ds.chat.messages.HeartbeatMessage;
 import it.polimi.ds.chat.messages.HeartbeatAckMessage;
-import it.polimi.ds.chat.messages.NotLeaderResponseMessage;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -14,15 +13,10 @@ import java.io.ObjectInputStream;
  */
 public class ClientMessageReceiver implements Runnable {
 
-    public interface NotLeaderRedirectHandler {
-        void onNotLeaderRedirect(NotLeaderResponseMessage response);
-    }
-
     private final ObjectInputStream in;
     private final ClientMessageSender sender;
     private final String username;
     private final ClientHeartbeatManager heartbeatManager;
-    private final NotLeaderRedirectHandler redirectHandler;
 
     private volatile boolean running = true;
 
@@ -37,13 +31,11 @@ public class ClientMessageReceiver implements Runnable {
     public ClientMessageReceiver(ObjectInputStream in,
                                  ClientMessageSender sender,
                                  String username,
-                                 ClientHeartbeatManager heartbeatManager,
-                                 NotLeaderRedirectHandler notLeaderRedirectHandler) {
+                                 ClientHeartbeatManager heartbeatManager) {
         this.in = in;
         this.sender = sender;
         this.username = username;
         this.heartbeatManager = heartbeatManager;
-        this.redirectHandler = notLeaderRedirectHandler;
     }
 
     /**
@@ -67,16 +59,6 @@ public class ClientMessageReceiver implements Runnable {
             while (running) {
                 Object obj = in.readObject();
 
-                if (obj instanceof NotLeaderResponseMessage response) {
-                    System.err.println("[CLIENT] Current broker is not Raft leader. Known leaderId="
-                            + response.getLeaderId()
-                            + ", endpoint=" + response.getLeaderHost() + ":" + response.getLeaderPort());
-
-                    if (redirectHandler != null && response.hasLeaderEndpoint()) {
-                        redirectHandler.onNotLeaderRedirect(response);
-                    }
-                    continue;
-                }
                 if (obj instanceof HeartbeatAckMessage) {
                     HeartbeatAckMessage ack = (HeartbeatAckMessage) obj;
 

@@ -169,43 +169,8 @@ public class ClientMain {
         ClientHeartbeatManager heartbeatManager =
                 new ClientHeartbeatManager(out, failureHandler);
 
-        ClientMessageReceiver.NotLeaderRedirectHandler redirectHandler = response -> {
-            System.err.println("[CLIENT] Redirecting to Raft leader "
-                    + response.getLeaderId()
-                    + " at " + response.getLeaderHost() + ":" + response.getLeaderPort());
-            
-            if (!ctx.reconnecting.compareAndSet(false, true)) {
-                System.err.println("[CLIENT] Redirect already in progress; ignoring duplicate NOT_LEADER.");
-                return;
-            }
-
-            try {
-                if (ctx.receiver != null) {
-                    ctx.receiver.shutdown();
-                }
-                if (ctx.heartbeatManager != null) {
-                    ctx.heartbeatManager.stop();
-                }
-
-                connection.connectDirectTo(response.getLeaderHost(), response.getLeaderPort());
-
-                ObjectOutputStream newOut = connection.getObjectOutputStream();
-
-                newOut.writeObject(ClientJoinMessage.joinCommand(username));
-                newOut.flush();
-
-                sender.updateOutputStream(newOut);
-
-                startReceiverAndHeartbeat(ctx, connection, sender, username);
-                ctx.reconnecting.set(false);
-            } catch (IOException e) {
-                System.err.println("[CLIENT] Redirect to leader failed: " + e.getMessage());
-                ctx.reconnecting.set(false);
-            }
-        };
-
         ClientMessageReceiver receiver =
-                new ClientMessageReceiver(in, sender, username, heartbeatManager, redirectHandler);
+                new ClientMessageReceiver(in, sender, username, heartbeatManager);
 
         ctx.receiver = receiver;
         ctx.heartbeatManager = heartbeatManager;

@@ -123,8 +123,4 @@ public class ClientConnection {
         this.port = newPort;
     }
 
-    public void connectDirectTo(String newHost, int newPort) throws IOException {
-        reopenTo(newHost, newPort);
-        openSocket();
-    }
 }

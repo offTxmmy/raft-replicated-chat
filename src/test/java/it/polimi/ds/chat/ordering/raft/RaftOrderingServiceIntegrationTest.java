@@ -197,7 +197,7 @@ class RaftOrderingServiceIntegrationTest {
     }
 
     @Test
-    void followerRejectsClientProposalWithoutDeliveringMessage(@TempDir Path baseDir) throws Exception {
+    void followerForwardsClientProposalToLeader(@TempDir Path baseDir) throws Exception {
         int[] ports = pickFreePorts(3);
 
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
@@ -234,24 +234,67 @@ class RaftOrderingServiceIntegrationTest {
 
         assertTrue(followerIdx >= 0, "no follower found");
 
-        ChatReqMessage rejectedReq = new ChatReqMessage(
+        final int leader = leaderIdx;
+        final int follower = followerIdx;
+        assertTrue(waitFor(
+                () -> nodes[follower].getLeaderId() == leader,
+                DELIVERY_DEADLINE_MS
+        ), "follower did not learn the current leader");
+
+        ChatReqMessage forwardedReq = new ChatReqMessage(
                 "msg-follower",
                 followerIdx,
                 "alice",
-                "this should not be accepted by a follower",
+                "forwarded through follower",
                 new VectorClock()
         );
 
-        boolean accepted = nodes[followerIdx].propose(rejectedReq);
+        boolean accepted = nodes[followerIdx].propose(forwardedReq);
 
-        assertFalse(accepted, "a follower must reject client proposals");
+        assertTrue(accepted, "a follower should proxy client proposals to the leader");
 
         boolean delivered = waitFor(
-                () -> deliveries.stream().anyMatch(d -> !d.isEmpty()),
-                600
+                () -> deliveries.stream().allMatch(d -> d.size() >= 1),
+                DELIVERY_DEADLINE_MS
         );
 
-        assertFalse(delivered, "a proposal rejected by a follower must not be delivered");
+        assertTrue(delivered, "forwarded proposal was not delivered on all nodes");
+        for (int i = 0; i < 3; i++) {
+            List<ChatDeliverMessage> d = deliveries.get(i);
+            assertEquals(1, d.size(), "node " + i + " unexpected delivery count");
+            assertEquals(1L, d.get(0).getSeq(), "node " + i + " unexpected seq");
+            assertEquals("forwarded through follower", d.get(0).getText(), "node " + i + " unexpected text");
+            assertEquals(followerIdx, d.get(0).getBrokerId(), "node " + i + " unexpected brokerId");
+        }
+    }
+
+    @Test
+    void followerWithoutKnownLeaderRejectsClientProposal(@TempDir Path baseDir) throws Exception {
+        int[] ports = pickFreePorts(3);
+
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
+        }
+
+        nodes = new RaftOrderingService[1];
+        List<ChatDeliverMessage> deliveries = new CopyOnWriteArrayList<>();
+        nodes[0] = buildService(0, ports[0], voters, baseDir.resolve("n0"));
+        nodes[0].onDeliver(deliveries::add);
+        nodes[0].start();
+
+        ChatReqMessage request = new ChatReqMessage(
+                "msg-no-leader",
+                0,
+                "alice",
+                "no known leader",
+                new VectorClock()
+        );
+
+        boolean accepted = nodes[0].propose(request);
+
+        assertFalse(accepted, "proposal should be rejected when no leader is known");
+        assertTrue(deliveries.isEmpty(), "proposal without a known leader must not be delivered");
     }
 
     // --- helpers ----------------------------------------------------------

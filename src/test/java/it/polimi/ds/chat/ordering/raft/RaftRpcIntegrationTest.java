@@ -1,10 +1,13 @@
 package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.broker.RaftPeerEndpoint;
+import it.polimi.ds.chat.messages.ChatReqMessage;
 import it.polimi.ds.chat.messages.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.messages.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.messages.raft.ForwardClientProposalResponseMessage;
 import it.polimi.ds.chat.messages.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.messages.raft.RequestVoteResponseMessage;
+import it.polimi.ds.chat.utilities.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -89,6 +92,39 @@ class RaftRpcIntegrationTest {
             assertEquals(5L, seenResp.get().getTerm());
             assertTrue(seenResp.get().isSuccess());
             assertEquals(7L, seenResp.get().getMatchIndex());
+
+            client.stop();
+        } finally {
+            server.stop();
+        }
+    }
+
+    @Test
+    void forwardClientProposalRoundTrip() throws Exception {
+        RaftRpcServer server = new RaftRpcServer(0,
+                req -> { throw new AssertionError("vote handler should not be invoked"); },
+                req -> { throw new AssertionError("append handler should not be invoked"); },
+                req -> new ForwardClientProposalResponseMessage(
+                        "msg-forward".equals(req.getRequest().getLocalMsgId()),
+                        7,
+                        "committed"));
+        server.start();
+        int port = server.getBoundPort();
+
+        try {
+            Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+            voters.put(7, new RaftPeerEndpoint(7, "127.0.0.1", port, 50007));
+            RaftRpcClient client = new RaftRpcClient(0, voters);
+            client.attachHandlers(r -> { }, (peer, r) -> { });
+            client.start();
+
+            ForwardClientProposalResponseMessage response = client.forwardClientProposal(
+                    7,
+                    new ChatReqMessage("msg-forward", 1, "alice", "hello", new VectorClock()));
+
+            assertTrue(response.isAccepted());
+            assertEquals(7, response.getLeaderId());
+            assertEquals("committed", response.getReason());
 
             client.stop();
         } finally {
