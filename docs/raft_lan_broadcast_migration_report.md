@@ -1,718 +1,184 @@
-# Raft LAN Broadcast Migration Report
+# Raft LAN Broadcast Transport - Final Report
 
-Aggiornato al 2026-05-19.
+Aggiornato al 2026-06-03.
 
-## Obiettivo
+Questo documento sostituisce il vecchio piano di migrazione. Non va letto come una
+lista di TODO: descrive la scelta finale di trasporto broker-broker e la
+giustificazione da portare all'orale.
 
-Questo report descrive tutte le modifiche necessarie per rendere la
-cooperazione tra broker aderente al requisito/hint della specifica:
-usare la LAN broadcast/multicast tra broker, invece di usare solo TCP
-unicast per le RPC Raft.
+---
 
-Il punto non e' la correttezza teorica di Raft: Raft funziona anche su
-TCP unicast. Il punto e' che la specifica del progetto dice che i broker
-sono sulla stessa LAN e che il broadcast di livello link e' disponibile
-e va sfruttato dove appropriato. La nostra implementazione oggi sfrutta
-UDP broadcast per discovery, ma non ancora per il consenso Raft.
+## 1. Requisito da soddisfare
 
-## Stato attuale
+La specifica dice che i broker sono sulla stessa LAN e che il broadcast di livello
+link e' disponibile. Quindi non basta dire "Raft funziona su TCP": dobbiamo spiegare
+dove sfruttiamo broadcast/multicast e dove scegliamo invece unicast per ottenere
+garanzie migliori.
 
-### Cosa fa oggi il codice
+La risposta del professore richiede due giustificazioni:
 
-- `LanDiscoveryService` usa UDP broadcast solo per discovery dei broker.
-- `RaftRpcClient` usa TCP unicast per:
-  - `RequestVoteRequestMessage`;
-  - `AppendEntriesRequestMessage`.
-- `RaftRpcServer` accetta le RPC Raft tramite `ServerSocket`, quindi TCP.
-- `RaftElectionManager` e `RaftReplicationManager` sono gia' disaccoppiati
-  dal trasporto tramite:
-  - `RaftVoteRequestSender`;
-  - `RaftAppendEntriesSender`.
+- membership statica o dinamica, in funzione delle garanzie;
+- scelta dei singoli messaggi, broadcast/multicast o unicast, in funzione di garanzie
+  e traffico su LAN.
 
-### Cosa non rispetta bene la specifica
+---
 
-La specifica dice che:
+## 2. Scelta finale
 
-- i broker condividono una LAN;
-- il link-layer broadcast e' disponibile;
-- il traffico broker-broker Raft (`RequestVote`, `AppendEntries`) e'
-  pensato per essere trasportabile su UDP broadcast/multicast;
-- le risposte possono restare unicast, perche' il destinatario e'
-  specifico.
+La scelta implementativa e' un trasporto Raft ibrido.
 
-Oggi invece ogni `RequestVote` e ogni `AppendEntries` viene inviato a un
-peer preciso aprendo una connessione TCP separata. Questo significa che
-la modalita' Raft non sfrutta davvero la proprieta' LAN broadcast per la
-cooperazione tra broker.
+| Messaggio | Trasporto | Motivazione |
+| --- | --- | --- |
+| `RequestVote` request | UDP LAN broadcast | Messaggio piccolo, destinato naturalmente a tutti i voter. Riduce traffico ripetitivo rispetto a N connessioni separate. |
+| `RequestVote` response | Unicast verso il candidato | La risposta ha un destinatario specifico e contiene il voto di un singolo broker. |
+| `AppendEntries` vuoto, cioe' heartbeat | UDP LAN broadcast | Messaggio piccolo, periodico, destinato a tutti i follower. E' il caso piu' adatto al broadcast. |
+| `AppendEntries` con log entries | TCP unicast | Payload potenzialmente grande, serve affidabilita', ordine, retry e backtracking per follower. |
+| Proposal forwarding follower -> leader | TCP unicast | La proposta deve arrivare a un leader specifico. |
+| Client <-> broker | TCP | I client non sono sulla LAN dei broker, quindi il broadcast link-layer non e' applicabile. |
 
-## Architettura target
+Questa scelta sfrutta davvero la LAN broadcast dove porta vantaggio senza spostare su
+UDP la parte piu' rischiosa: la replica affidabile delle entry di log.
 
-La soluzione consigliata e' introdurre un trasporto Raft LAN-based, senza
-riscrivere la logica Raft.
+---
 
-La logica esistente deve rimanere nei manager:
+## 3. Componenti coinvolti
 
-- `RaftElectionManager` decide quando chiedere voti e come contarli.
-- `RaftReplicationManager` decide quando inviare `AppendEntries`, come
-  gestire conflict hints, `matchIndex`, commit, retry.
-- Il nuovo codice deve stare nel livello trasporto.
+- `RaftUdpBroadcastTransport`
+  - gestisce i datagram UDP broadcast per messaggi Raft piccoli;
+  - filtra messaggi del cluster sbagliato, messaggi locali e sender non votanti;
+  - evita di trasformare discovery o broadcast in membership dinamica.
 
-### Scelta consigliata
+- `RaftHybridTransport`
+  - decide quale canale usare;
+  - usa broadcast per vote request e heartbeat vuoti;
+  - delega al TCP path per append con payload.
 
-Implementare una modalita' ibrida:
+- `RaftRpcClient` / `RaftRpcServer`
+  - restano necessari per TCP;
+  - gestiscono entry replication con payload e proposal forwarding.
 
-1. **`RequestVote` via UDP broadcast/multicast.**
-   - E' piccolo.
-   - E' naturalmente destinato a tutti i peer votanti.
-   - E' direttamente nella parte leader election.
-   - Le risposte restano unicast.
+- `RaftConfig`
+  - contiene il set statico dei voter;
+  - contiene i parametri di broadcast Raft, per esempio porta comune, cluster id e
+    limite payload.
 
-2. **Heartbeat `AppendEntries` vuoti via UDP broadcast/multicast.**
-   - Sono piccoli.
-   - Sono inviati periodicamente a tutti.
-   - Permettono di dire che anche la leadership activity usa LAN
-     broadcast.
+- `LanDiscoveryService` / `PeerRegistry`
+  - sono separati dal trasporto Raft;
+  - non sono sorgente del quorum;
+  - sono ausiliari e non vanno presentati come requisito di safety.
 
-3. **`AppendEntries` con log entries via TCP unicast, almeno nella prima
-   implementazione.**
-   - Possono essere grandi.
-   - UDP ha limite pratico di payload.
-   - Su UDP servirebbero frammentazione, ritrasmissione e deduplica.
-   - TCP e' piu' sicuro per payload grandi e catch-up dopo crash.
+---
 
-Questa scelta e' difendibile: sfruttiamo davvero il broadcast LAN per la
-cooperazione frequente e per l'election, ma manteniamo TCP dove serve
-affidabilita' stream e payload potenzialmente grande.
+## 4. Perche' non full broadcast?
 
-### Alternativa full broadcast
-
-Per aderire al massimo alla specifica, anche `AppendEntries` con entry
-di log potrebbe passare su UDP broadcast/multicast. Pero' richiede una
+Portare anche `AppendEntries` con log entries su UDP broadcast richiederebbe una
 reliability layer applicativa:
 
-- limite dimensione datagram;
+- limite massimo del datagram;
 - frammentazione e riassemblaggio;
-- `messageId` per deduplica;
+- ACK/NACK per frammenti o entry;
 - retry selettivo;
-- ACK/NACK per frammenti;
-- backpressure per evitare di saturare la LAN.
+- deduplica;
+- backpressure;
+- gestione di follower lenti o appena riavviati.
 
-Questa alternativa e' piu' rischiosa e va fatta solo se il professore
-richiede esplicitamente che anche la replica log sia broadcast.
+Raft tollera perdita di messaggi, ma la replica efficiente del log dipende da retry,
+conflict hints, `nextIndex`, `matchIndex` e catch-up. TCP e' piu' adatto per questa
+parte perche' fornisce stream affidabile e ordinato. In una demo universitaria, full
+UDP per il payload aumenterebbe molto il rischio di bug senza migliorare le garanzie
+richieste.
 
-Ordine consigliato: questa opzione va affrontata **dopo** aver
-implementato e verificato il broadcast per `RequestVote`. Prima si porta
-l'election su LAN broadcast, poi si valuta l'estensione a `AppendEntries`
-su UDP broadcast affidabile. In questo modo si riduce il rischio: se il
-transport broadcast per election non e' stabile, non conviene usarlo
-anche per la replica del log.
+---
 
-## Modifiche di configurazione
+## 5. Membership e broadcast non sono la stessa cosa
 
-### `RaftConfig`
+Il broadcast non cambia chi vota.
 
-Aggiungere campi per il trasporto LAN:
+La membership votante resta statica e viene letta da `RaftConfig.getVoters()`. Un
+broker ricevuto via discovery LAN o visto su una porta broadcast non entra nel quorum
+automaticamente. Se non e' nel voter set configurato, i suoi messaggi non devono
+contare per Raft.
 
-- `raftTransportMode`
-  - `HYBRID`.
-- `raftBroadcastPort`
-  - porta UDP comune su cui tutti i broker ascoltano le RPC broadcast.
-- `raftMulticastGroup` opzionale
-  - esempio `230.0.0.10`;
-  - se assente, usare broadcast IPv4 sulle interfacce.
-- `udpMaxPayloadBytes`
-  - limite prudente, es. 1200-1400 byte se si vuole evitare
-    frammentazione IP.
-- `clusterId`
-  - stringa o UUID per ignorare pacchetti di altri cluster sulla stessa
-    LAN.
+Questa distinzione e' fondamentale per l'orale:
 
-Nota importante: oggi in `BrokerMain` la `udpPort` Raft e' costruita come
-`50002 + nodeId`. Per broadcast reale non va bene: tutti i broker devono
-ascoltare la stessa porta broadcast/multicast, oppure bisogna inviare un
-datagram per ogni porta, che torna ad assomigliare a unicast.
+> Usiamo broadcast come mezzo di comunicazione LAN, non come meccanismo di
+> reconfiguration. Il quorum deve restare identico su tutti i broker.
 
-### `BrokerMain`
+---
 
-Aggiornare la CLI Raft.
+## 6. Nota sulla discovery LAN
 
-Possibile forma:
+La discovery LAN e' utile per mostrare che i broker possono annunciarsi sulla LAN, ma
+non e' necessaria alla safety del consenso. Per la demo affidabile, gli endpoint dei
+voter possono essere configurati staticamente nel `votersCSV`.
 
-```text
-raft <nodeId> <rpcPort> <votersCSV> [clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]
+Attenzione: se ogni broker ascolta la discovery su una porta diversa, non bisogna
+dire che la discovery risolve automaticamente gli endpoint tra broker. Per una demo
+di discovery reale serve una porta discovery comune oppure una logica che invii a
+tutte le porte attese.
+
+Il broadcast Raft invece deve usare una porta comune di cluster, per esempio il
+parametro `raftBroadcastPort`.
+
+---
+
+## 7. Runbook minimo per demo locale
+
+Build:
+
+```powershell
+mvn -q -DskipTests package
 ```
 
-Esempio:
+Directory:
 
-```text
-raft 0 7000 0@host0:7000,1@host1:7001,2@host2:7002 50000 7100 demo-cluster 1400
+```powershell
+java -cp target/classes it.polimi.ds.chat.directory.DirectoryService
 ```
 
-Per demo locale va previsto un fallback, perche' piu' processi che
-ascoltano la stessa porta UDP sulla stessa macchina possono comportarsi
-in modo diverso tra sistemi operativi. Per i test in-process conviene
-tenere un transport fake/in-memory.
+Broker 0:
 
-## Nuovi messaggi/protocollo
-
-Conviene non mandare direttamente gli oggetti Raft nudi su UDP. Serve un
-envelope comune.
-
-### Nuova classe `RaftUdpEnvelope`
-
-Package consigliato:
-
-```text
-it.polimi.ds.chat.protocol.raft
+```powershell
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 0 7000 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50000 7100 demo-cluster 1400
 ```
 
-Campi:
+Broker 1:
 
-- `String clusterId`
-- `String messageId`
-- `int senderId`
-- `int targetId`
-  - `-1` per broadcast a tutti;
-  - id specifico per risposta unicast.
-- `RaftUdpMessageType type`
-  - `REQUEST_VOTE_REQUEST`
-  - `REQUEST_VOTE_RESPONSE`
-  - `APPEND_ENTRIES_REQUEST`
-  - `APPEND_ENTRIES_RESPONSE`
-- `long term`
-- `Object payload`
-- `long createdAtMillis`
-
-Scopi:
-
-- filtrare pacchetti di altri cluster;
-- ignorare pacchetti generati dal nodo stesso;
-- deduplicare ritrasmissioni;
-- distinguere richiesta e risposta;
-- evitare cast ambigui in ricezione.
-
-### Nuovo enum `RaftUdpMessageType`
-
-Package consigliato:
-
-```text
-it.polimi.ds.chat.protocol.raft
+```powershell
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 1 7001 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50001 7100 demo-cluster 1400
 ```
 
-Valori:
+Broker 2:
 
-```java
-REQUEST_VOTE_REQUEST,
-REQUEST_VOTE_RESPONSE,
-APPEND_ENTRIES_REQUEST,
-APPEND_ENTRIES_RESPONSE
+```powershell
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 2 7002 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50002 7100 demo-cluster 1400
 ```
 
-### Serializzazione
+I valori importanti da tenere allineati tra broker sono:
 
-Opzione piu' rapida:
+- stesso `votersCSV`;
+- stesso `raftBroadcastPort`, qui `7100`;
+- stesso `clusterId`, qui `demo-cluster`;
+- porte client e Raft TCP diverse per ogni processo.
 
-- continuare con Java serialization (`ObjectOutputStream`) dentro il
-  datagram.
+---
 
-Opzione migliore ma piu' lunga:
+## 8. Cosa verificare manualmente
 
-- serializzazione esplicita binaria o JSON.
+- Un solo leader viene eletto.
+- I follower ricevono heartbeat e non partono in election continua.
+- Un client collegato a un follower riesce a inviare tramite forwarding al leader.
+- Messaggi inviati da client su broker diversi vengono consegnati nello stesso ordine.
+- Dopo crash del leader, i due broker rimasti eleggono un nuovo leader.
+- Dopo restart, il vecchio leader rientra come follower e recupera il log.
 
-Per coerenza col codice attuale, Java serialization e' accettabile per
-una prima implementazione, ma va imposto un controllo sulla dimensione
-del datagram prima dell'invio.
+---
 
-## Nuovo trasporto Raft UDP
+## 9. Frase pronta per l'orale
 
-### Nuova classe `RaftUdpBroadcastTransport`
-
-Package:
-
-```text
-it.polimi.ds.chat.ordering.raft
-```
-
-Responsabilita':
-
-- aprire una `DatagramSocket` o `MulticastSocket`;
-- ascoltare la porta broadcast/multicast Raft;
-- inviare envelope broadcast a tutte le interfacce LAN;
-- inviare envelope unicast al mittente quando serve una risposta;
-- filtrare:
-  - `clusterId` diverso;
-  - `senderId == localNodeId`;
-  - `targetId` non locale e non broadcast;
-  - messaggi da broker non presenti in `RaftConfig.voters`;
-- dispatchare ai manager tramite handler gia' esistenti:
-  - `RequestVoteRequestMessage` -> `electionManager.onRequestVoteRequest`;
-  - `AppendEntriesRequestMessage` -> `replicationManager.handleAppendEntries`;
-  - `RequestVoteResponseMessage` -> `electionManager.onRequestVoteResponse`;
-  - `AppendEntriesResponseMessage` -> `replicationManager.handleAppendEntriesResponse`.
-
-Interfacce implementate:
-
-```java
-RaftVoteRequestSender
-RaftAppendEntriesSender
-```
-
-Metodi principali:
-
-```java
-void start()
-void stop()
-void attachHandlers(...)
-void sendRequestVote(int peerId, RequestVoteRequestMessage request)
-void sendAppendEntries(int peerId, AppendEntriesRequestMessage request)
-```
-
-### Semantica di `sendRequestVote`
-
-Oggi `RaftElectionManager` chiama `sendRequestVote(peerId, request)` in
-loop per ogni peer.
-
-Per usare broadcast senza cambiare il manager ci sono due opzioni:
-
-1. Il trasporto deduplica internamente e manda una sola broadcast per
-   `(term, candidateId, lastLogIndex, lastLogTerm)`, ignorando le chiamate
-   successive del loop.
-2. Si cambia `RaftElectionManager` aggiungendo un metodo nuovo tipo
-   `broadcastRequestVote(request)`.
-
-Consigliata la seconda opzione solo se si vuole pulizia architetturale.
-Per una patch meno invasiva, meglio la prima: il manager resta invariato
-e il trasporto decide come ottimizzare.
-
-### Semantica di `sendAppendEntries`
-
-Per `AppendEntries` serve distinguere:
-
-- heartbeat vuoto (`entries.isEmpty()`);
-- append con payload reale.
-
-In modalita' `HYBRID`:
-
-- heartbeat vuoto -> broadcast UDP una sola volta per round;
-- append con entries -> TCP unicast esistente.
-
-Per fare questo senza rompere il manager:
-
-- creare un transport composito:
-  - `RaftHybridTransport`;
-  - contiene `RaftRpcClient` TCP esistente;
-  - contiene `RaftUdpBroadcastTransport`;
-  - implementa entrambe le interfacce sender.
-
-Quando riceve `sendAppendEntries(peerId, request)`:
-
-- se `request.getEntries().isEmpty()`, invia broadcast una sola volta per
-  heartbeat round;
-- altrimenti delega a TCP.
-
-Deduplica suggerita:
-
-```text
-key = term + leaderId + prevLogIndex + prevLogTerm + leaderCommit
-```
-
-Serve per evitare di broadcastare lo stesso heartbeat N volte, una per
-ogni peer.
-
-## Modifiche ai file esistenti
-
-### `RaftOrderingService`
-
-Modifiche:
-
-- costruire sempre il trasporto ibrido LAN-aware;
-- mantenere `RaftRpcClient` come componente interno per payload-bearing
-  `AppendEntries` e forwarding delle proposte client;
-- usare `RaftUdpBroadcastTransport` per `RequestVote` e heartbeat vuoti.
-
-Punto del codice attuale:
-
-```java
-rpcClient = new RaftRpcClient(localNodeId, raftConfig.getVoters());
-```
-
-Va sostituito da una factory:
-
-```java
-RaftTransport transport = RaftTransportFactory.create(...);
-```
-
-Oppure, piu' semplice:
-
-```java
-RaftVoteRequestSender voteSender = ...
-RaftAppendEntriesSender appendSender = ...
-```
-
-Pero' oggi `RaftRpcClient` fa anche dispatch delle risposte tramite
-`attachHandlers`. Per pulizia conviene introdurre una piccola interfaccia
-comune.
-
-### Nuova interfaccia `RaftTransport`
-
-Package:
-
-```text
-it.polimi.ds.chat.ordering.raft
-```
-
-Firma:
-
-```java
-public interface RaftTransport extends RaftVoteRequestSender, RaftAppendEntriesSender {
-    void attachHandlers(
-        Consumer<RequestVoteResponseMessage> voteResponseHandler,
-        BiConsumer<Integer, AppendEntriesResponseMessage> appendResponseHandler
-    );
-    void start();
-    void stop();
-}
-```
-
-Poi:
-
-- `RaftRpcClient` implementa `RaftTransport`;
-- `RaftUdpBroadcastTransport` implementa `RaftTransport`;
-- `RaftHybridTransport` implementa `RaftTransport`.
-
-`RaftOrderingService` tiene:
-
-```java
-private RaftTransport raftTransport;
-```
-
-invece di:
-
-```java
-private RaftRpcClient rpcClient;
-```
-
-### `RaftRpcClient`
-
-Modifiche:
-
-- far implementare `RaftTransport`;
-- opzionalmente rinominarlo in `RaftTcpTransport`, ma non e' necessario;
-- tenerlo come fallback affidabile per append con payload.
-
-### `RaftRpcServer`
-
-In modalita' full UDP non sarebbe piu' necessario per le RPC Raft.
-Pero' in modalita' ibrida serve ancora per:
-
-- append con entries;
-- risposte se si decide di rispondere via TCP;
-- fallback in demo locale.
-
-Consigliato: non rimuoverlo. Tenerlo e farlo partire solo quando il
-transport mode lo richiede.
-
-### `RaftElectionManager`
-
-Possibile nessuna modifica se il transport deduplica le chiamate
-`sendRequestVote(peerId, request)`.
-
-Modifica migliore ma piu' invasiva:
-
-- introdurre una nuova interfaccia:
-
-```java
-interface RaftVoteBroadcaster {
-    void broadcastRequestVote(RequestVoteRequestMessage request);
-}
-```
-
-- cambiare `beginElectionTracking` per inviare una sola richiesta
-  broadcast invece del loop su ogni peer.
-
-Rischio: piu' test da aggiornare.
-
-### `RaftReplicationManager`
-
-Possibile nessuna modifica se il transport composito deduplica heartbeat
-broadcast.
-
-Modifica migliore ma piu' invasiva:
-
-- separare esplicitamente:
-  - `sendHeartbeatToAll`;
-  - `sendAppendEntriesToFollower`.
-
-Questo permetterebbe di broadcastare heartbeat in modo naturale e usare
-unicast solo per entry reali o backtracking.
-
-### `LanDiscoveryService`
-
-Due possibilita':
-
-1. Lasciarlo separato.
-   - Discovery resta discovery.
-   - Raft UDP transport ha la propria porta e il proprio protocollo.
-   - Meno rischio di mischiare pacchetti diversi.
-
-2. Riutilizzare parte del codice di broadcast.
-   - Estrarre utility comune:
-
-```text
-UdpBroadcastSupport
-```
-
-Responsabilita':
-
-- iterare network interface;
-- inviare datagram su ogni broadcast address;
-- ignorare loopback/down interface;
-- gestire `setBroadcast(true)`.
-
-Consigliata la seconda come refactor piccolo dopo aver fatto funzionare
-il transport.
-
-### `BrokerConfig`
-
-Oggi `udpPort` e' usato per discovery. In Raft serve distinguere:
-
-- `discoveryUdpPort`;
-- `raftBroadcastPort`.
-
-Se non si vuole refactorare troppo:
-
-- aggiungere solo `raftBroadcastPort` dentro `RaftConfig`;
-- lasciare `BrokerConfig.udpPort` per discovery.
-
-### `PeerRegistry`
-
-Non deve diventare sorgente di membership.
-
-Puo' servire per indirizzi di risposta unicast, ma il quorum deve restare
-basato su `RaftConfig.voters`.
-
-Regola da mantenere:
-
-- se arriva un pacchetto UDP da un broker non presente in `voters`, il
-  pacchetto si ignora.
-
-## Reliability layer necessaria
-
-UDP broadcast non garantisce consegna. Raft puo' tollerare perdita di
-messaggi, ma il transport deve evitare alcuni problemi pratici.
-
-### Deduplica
-
-Ogni envelope deve avere `messageId`.
-
-Ogni nodo mantiene una cache bounded:
-
-```text
-Map<String, Long> recentlySeenMessageIds
-```
-
-Con TTL breve, per esempio 30 secondi.
-
-Serve per ignorare:
-
-- ritrasmissioni;
-- duplicati causati dal broadcast su piu' interfacce;
-- pacchetti ricevuti due volte da OS/rete.
-
-### Retry
-
-Non serve ACK applicativo per `RequestVoteRequest`: se un voto si perde,
-l'election timeout genera una nuova elezione.
-
-Serve invece la normale risposta:
-
-- `RequestVoteResponseMessage` unicast al candidato.
-
-Per heartbeat persi:
-
-- non e' grave se sporadico;
-- se se ne perdono troppi, parte una nuova election, come in Raft.
-
-Per `AppendEntries` con log entries:
-
-- se resta TCP, la retry logic attuale resta valida.
-- se si passa full UDP, serve ACK/NACK e retry esplicito.
-
-### Dimensione pacchetti
-
-Per UDP bisogna evitare datagram grandi.
-
-Regola consigliata:
-
-- `RequestVote`: sempre UDP.
-- `AppendEntries` vuoto: sempre UDP.
-- `AppendEntries` con entries:
-  - se serialized size <= `udpMaxPayloadBytes`, opzionalmente UDP;
-  - altrimenti TCP.
-
-Per evitare bug, nella prima versione ibrida fare:
-
-- entries vuote -> UDP;
-- entries non vuote -> TCP.
-
-## Test da aggiungere
-
-### Unit test del transport
-
-Nuovo file consigliato:
-
-```text
-src/test/java/it/polimi/ds/chat/ordering/raft/RaftUdpBroadcastTransportTest.java
-```
-
-Test:
-
-- ignora pacchetti con `clusterId` diverso;
-- ignora pacchetti inviati da se stesso;
-- ignora sender non presente in `voters`;
-- deduplica `messageId`;
-- dispatcha `RequestVoteRequestMessage` al vote handler;
-- invia `RequestVoteResponseMessage` al candidato;
-- dispatcha heartbeat `AppendEntriesRequestMessage` all'append handler.
-
-### Test election con broadcast
-
-Nuovo o esteso:
-
-```text
-RaftElectionManagerTest
-```
-
-Test:
-
-- una election produce una sola broadcast `RequestVote`;
-- duplicati di `RequestVote` non causano doppio voto;
-- perdita di una request non rompe: nuova election dopo timeout.
-
-### Integration test 3 nodi
-
-Nuovo file consigliato:
-
-```text
-RaftUdpTransportIntegrationTest
-```
-
-Test:
-
-- 3 nodi sulla stessa porta UDP broadcast/multicast;
-- un nodo diventa candidate;
-- gli altri ricevono `RequestVote` via UDP;
-- il candidato riceve risposte unicast;
-- viene eletto un leader.
-
-Per CI e Windows, meglio avere anche un fake in-memory transport, perche'
-il broadcast reale puo' essere instabile o bloccato dall'ambiente.
-
-### Regression test TCP fallback
-
-Testare che `AppendEntries` con entries reali usi ancora TCP in modalita'
-`HYBRID`.
-
-## Roadmap consigliata
-
-### Fase 1 - Preparazione interfacce
-
-- Introdurre `RaftTransport`.
-- Far implementare `RaftTransport` a `RaftRpcClient`.
-- Cambiare `RaftOrderingService` per dipendere da `RaftTransport`.
-- Nessun cambio funzionale: deve compilare e passare i test esistenti.
-
-### Fase 2 - UDP broadcast per RequestVote
-
-- Aggiungere `RaftUdpEnvelope`.
-- Aggiungere `RaftUdpMessageType`.
-- Aggiungere `RaftUdpBroadcastTransport`.
-- In modalita' `HYBRID`, fare `RequestVote` via UDP broadcast.
-- Risposte `RequestVoteResponse` unicast.
-- Aggiornare report/tracking: H3 parzialmente risolto.
-
-### Fase 3 - UDP broadcast per heartbeat
-
-- Estendere `RaftHybridTransport`.
-- Broadcastare solo `AppendEntries` vuoti.
-- Lasciare entries reali su TCP.
-- Aggiungere test heartbeat.
-
-### Fase 4 - Valutare full UDP AppendEntries
-
-Solo se richiesto:
-
-- portare anche `AppendEntries` con log entries su UDP broadcast
-  affidabile;
-- frammentazione;
-- ACK/NACK frammenti;
-- riassemblaggio;
-- retry;
-- max payload;
-- test di perdita/duplicazione.
-
-Questa fase deve venire dopo la Fase 2 (`RequestVote` broadcast) e dopo
-una verifica pratica su LAN reale o ambiente di test equivalente.
-
-## Impatto sui ruoli del progetto
-
-### Person A
-
-Coinvolta soprattutto in:
-
-- `RequestVote` broadcast;
-- election con messaggi duplicati o persi;
-- test di leader election via broadcast;
-- documentazione della scelta.
-
-### Person B
-
-Coinvolta se si tocca:
-
-- `AppendEntries`;
-- heartbeat;
-- replication;
-- conflict hints;
-- commit.
-
-### Person C
-
-Coinvolta per:
-
-- transport layer;
-- `RaftOrderingService`;
-- config;
-- integration test;
-- demo cross-host.
-
-## Rischi principali
-
-- UDP broadcast puo' essere filtrato da firewall o rete universitaria.
-- In locale, piu' JVM sulla stessa porta UDP possono comportarsi in modo
-  diverso tra Windows/Linux/macOS.
-- Broadcast su piu' interfacce puo' generare duplicati.
-- UDP non garantisce ordine, consegna o assenza di duplicati.
-- Full UDP per `AppendEntries` rischia di introdurre piu' bug di quanti
-  ne risolva.
-
-## Raccomandazione finale
-
-Non conviene riscrivere tutta la replica Raft su UDP subito.
-
-La modifica migliore per aderire alla specifica e restare pragmatici e':
-
-1. introdurre transport Raft ibrido;
-2. usare UDP broadcast/multicast per `RequestVote`;
-3. usare UDP broadcast/multicast per heartbeat `AppendEntries` vuoti;
-4. mantenere TCP unicast per `AppendEntries` con log entries;
-5. documentare chiaramente che il broadcast LAN e' sfruttato per election
-   e leadership activity, mentre la replica payload resta TCP per evitare
-   frammentazione e ritrasmissione manuale.
-
-Questa soluzione permette di rispondere al professore:
-
-> Usiamo la LAN broadcast dove porta beneficio e dove il payload e'
-> piccolo: election e heartbeat. Manteniamo TCP per la replica delle log
-> entries perche' e' il punto dove affidabilita', dimensione payload e
-> backtracking sono piu' delicati. La membership resta statica e sicura:
-> il broadcast non cambia il quorum, serve solo come trasporto.
+> Abbiamo scelto membership statica per mantenere stabile il calcolo del quorum Raft.
+> Usiamo UDP broadcast sulla LAN per i messaggi piccoli e destinati a tutti, cioe'
+> `RequestVote` e heartbeat vuoti. Usiamo TCP unicast per le entry di log perche'
+> richiedono affidabilita', ordine, retry e catch-up. In questo modo sfruttiamo la
+> proprieta' della LAN indicata dalla specifica senza introdurre una reliability layer
+> UDP complessa e rischiosa.
