@@ -12,6 +12,7 @@ import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Paths;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,18 +33,31 @@ public class DirectoryService {
     // index by brokerId for fast lookup
     private final Map<Integer, BrokerConfig> brokersById = new ConcurrentHashMap<>();
 
+    // Static cluster topology (id -> endpoint). Configured at startup, served to brokers on request.
+    private final Map<Integer, RaftPeerEndpoint> clusterVoters;
+
     /**
      * Main entry point for the Directory Service.
      * Starts listeners for broker and client connections.
      *
-     * @param args command-line arguments (unused)
+     * @param args [0] = votersCSV (id@host:rpcPort[:clientPort],...)
      */
     public static void main(String[] args) {
         int brokerPort = 60000;
         int clientPort = 60001;
 
+        if (args.length < 1) {
+            System.err.println("Usage: DirectoryService <votersCSV>");
+            System.err.println("  votersCSV: id@host:rpcPort[:clientPort],id@host:rpcPort[:clientPort],...");
+            System.exit(2);
+        }
+
+        Map<Integer, RaftPeerEndpoint> voters = parseVoters(args[0]);
+
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: DIRECTORY SERVICE---");
-        DirectoryService service = new DirectoryService();
+        System.out.println("Configured cluster voters: " + voters.keySet());
+
+        DirectoryService service = new DirectoryService(voters);
 
         // Lister on brokerPort (register + heartbeat
         new Thread(() -> service.startBrokersListener(brokerPort), "Dir-BrokerListener").start();
@@ -53,10 +67,23 @@ public class DirectoryService {
     }
 
     /**
-     * Constructs a DirectoryService and starts the reaper thread for broker liveness.
+     * Constructs a DirectoryService with a preconfigured static cluster topology.
+     *
+     * @param clusterVoters static voter set served to brokers via GetClusterRequest
+     */
+    public DirectoryService(Map<Integer, RaftPeerEndpoint> clusterVoters) {
+        this.clusterVoters = (clusterVoters == null)
+                ? Collections.emptyMap()
+                : Collections.unmodifiableMap(new HashMap<>(clusterVoters));
+        startReaperThread();
+    }
+
+    /**
+     * Backwards-compatible constructor: no preconfigured cluster topology.
+     * Brokers requesting the cluster will receive a negative response.
      */
     public DirectoryService() {
-        startReaperThread();
+        this(Collections.emptyMap());
     }
 
     /**
@@ -157,14 +184,21 @@ public class DirectoryService {
 
     /**
      * Handles a broker connection, processing registration and heartbeats.
+     * Also handles one-shot GetClusterRequestMessage queries used at broker startup.
      *
      * @param socket the broker socket
      */
     private void handleConnection(Socket socket) {
         try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
 
-            // Expected first message: DirectoryRegisterMessage
+            // Expected first message: DirectoryRegisterMessage OR GetClusterRequestMessage
             Object first = in.readObject();
+
+            if (first instanceof GetClusterRequestMessage req) {
+                handleGetClusterRequest(socket, req);
+                return;
+            }
+
             if (!(first instanceof DirectoryRegisterMessage msg)) {
                 System.out.println("Unknown first object from " + socket.getRemoteSocketAddress() + ": " + first);
                 return;
@@ -197,6 +231,27 @@ public class DirectoryService {
                 socket.close();
             } catch (IOException ignored) {}
         }
+    }
+
+    /**
+     * Handles a broker's startup request for the static cluster topology.
+     * Writes a GetClusterResponseMessage and closes the connection.
+     */
+    private void handleGetClusterRequest(Socket socket, GetClusterRequestMessage req) throws IOException {
+        int nodeId = req.getNodeId();
+        boolean ok = !clusterVoters.isEmpty() && clusterVoters.containsKey(nodeId);
+
+        GetClusterResponseMessage resp = new GetClusterResponseMessage(
+                ok,
+                ok ? clusterVoters : Collections.emptyMap()
+        );
+
+        ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+        out.writeObject(resp);
+        out.flush();
+
+        System.out.println("Served cluster info to broker nodeId=" + nodeId
+                + " (ok=" + ok + ", voters=" + clusterVoters.keySet() + ")");
     }
 
     /**
@@ -322,5 +377,41 @@ public class DirectoryService {
         }
 
         return best;
+    }
+
+    /**
+     * Parses a comma-separated voters CSV (id@host:rpcPort[:clientPort],...) into a voter map.
+     * Moved from BrokerMain: the static cluster topology now lives on the Directory.
+     */
+    private static Map<Integer, RaftPeerEndpoint> parseVoters(String csv) {
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (String token : csv.split(",")) {
+            String trimmed = token.trim();
+            if (trimmed.isEmpty()) continue;
+
+            int at = trimmed.indexOf('@');
+            if (at <= 0) {
+                throw new IllegalArgumentException("Bad voter token: '" + trimmed
+                        + "' (expected id@host:rpcPort[:clientPort])");
+            }
+
+            int id = Integer.parseInt(trimmed.substring(0, at));
+            String endpoint = trimmed.substring(at + 1);
+            String[] parts = endpoint.split(":");
+
+            if (parts.length != 2 && parts.length != 3) {
+                throw new IllegalArgumentException("Bad voter token: '" + trimmed
+                        + "' (expected id@host:rpcPort[:clientPort])");
+            }
+
+            String host = parts[0];
+            int rpcPort = Integer.parseInt(parts[1]);
+            int clientPort = (parts.length == 3)
+                    ? Integer.parseInt(parts[2])
+                    : 50000 + id;
+
+            voters.put(id, new RaftPeerEndpoint(id, host, rpcPort, clientPort));
+        }
+        return voters;
     }
 }
