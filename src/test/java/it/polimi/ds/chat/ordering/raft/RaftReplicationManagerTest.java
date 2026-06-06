@@ -194,6 +194,35 @@ class RaftReplicationManagerTest {
     }
 
     @Test
+    // Ensures leader activity is reported only after releasing the replication manager lock.
+    void handleAppendEntriesShouldNotifyOutsideReplicationManagerLock() {
+        RaftNode node = followerNode(1);
+        RaftReplicationManager[] managerRef = new RaftReplicationManager[1];
+        boolean[] observerHeldLock = new boolean[1];
+
+        RaftLeaderActivityObserver observer = (term, leaderId) ->
+                observerHeldLock[0] = Thread.holdsLock(managerRef[0]);
+
+        RaftLog log = new RaftLog();
+        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+        managerRef[0] = newManager(node, log, commitManager, observer);
+
+        AppendEntriesRequestMessage request = new AppendEntriesRequestMessage(
+                2L,
+                5,
+                0L,
+                0L,
+                List.of(new RaftLogEntry(1L, 2L, command("a"))),
+                1L
+        );
+
+        AppendEntriesResponseMessage response = managerRef[0].handleAppendEntries(request);
+
+        assertTrue(response.isSuccess());
+        assertFalse(observerHeldLock[0]);
+    }
+
+    @Test
     // Advances commit index from a heartbeat even when no new entries are sent.
     void handleAppendEntriesShouldApplyLeaderCommitOnHeartbeat() {
         RaftNode node = followerNodeWithTerm(1, 1L);
@@ -592,13 +621,13 @@ class RaftReplicationManagerTest {
         return newManager(node, new RecordingObserver());
     }
 
-    private RaftReplicationManager newManager(RaftNode node, RecordingObserver observer) {
+    private RaftReplicationManager newManager(RaftNode node, RaftLeaderActivityObserver observer) {
         RaftLog log = new RaftLog();
         RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
         return newManager(node, log, commitManager, observer);
     }
 
-    private RaftReplicationManager newManager(RaftNode node, RaftLog log, RaftCommitManager commitManager, RecordingObserver observer) {
+    private RaftReplicationManager newManager(RaftNode node, RaftLog log, RaftCommitManager commitManager, RaftLeaderActivityObserver observer) {
         RaftReplicationManager manager = new RaftReplicationManager(
                 node.getNodeId(),
                 Set.of(node.getNodeId(), 2, 3),

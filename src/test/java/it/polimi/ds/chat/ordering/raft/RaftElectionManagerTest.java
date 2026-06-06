@@ -677,6 +677,49 @@ class RaftElectionManagerTest {
     }
 
     /**
+     * Verifies that listener callbacks are invoked after releasing the election manager lock.
+     */
+    @Test
+    void callbacksShouldRunOutsideElectionManagerLock() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RaftElectionManager[] managerRef = new RaftElectionManager[1];
+        boolean[] leaderElectedHeldLock = new boolean[1];
+        boolean[] heartbeatHeldLock = new boolean[1];
+        boolean[] steppedDownHeldLock = new boolean[1];
+
+        RaftElectionListener listener = new RaftElectionListener() {
+            @Override
+            public void onLeaderElected(int leaderId, long term) {
+                leaderElectedHeldLock[0] = Thread.holdsLock(managerRef[0]);
+            }
+
+            @Override
+            public void onSteppedDown(long newTerm, int knownLeaderId) {
+                steppedDownHeldLock[0] = Thread.holdsLock(managerRef[0]);
+            }
+
+            @Override
+            public void onHeartbeatRoundDue(long term) {
+                heartbeatHeldLock[0] = Thread.holdsLock(managerRef[0]);
+            }
+        };
+
+        managerRef[0] = newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+        RaftElectionManager manager = managerRef[0];
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire(); // become candidate in term 1
+        manager.onRequestVoteResponse(new RequestVoteResponseMessage(1L, true, 1)); // become leader
+        manager.onHeartbeatTick();
+        manager.onValidLeaderActivityObserved(5L, 1); // step down
+
+        assertFalse(leaderElectedHeldLock[0]);
+        assertFalse(heartbeatHeldLock[0]);
+        assertFalse(steppedDownHeldLock[0]);
+    }
+
+    /**
      * Verifies that a heartbeat tick does nothing when the local node is not leader.
      */
     @Test
@@ -1082,7 +1125,7 @@ class RaftElectionManagerTest {
             Set<Integer> votingSet,
             FakeClock fakeClock,
             RecordingVoteRequestSender sender,
-            RecordingElectionListener listener
+            RaftElectionListener listener
     ) {
         return new RaftElectionManager(
                 localNodeId,

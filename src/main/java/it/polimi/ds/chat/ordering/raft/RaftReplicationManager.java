@@ -119,58 +119,66 @@ public class RaftReplicationManager implements RaftElectionListener {
      * @param request append entries request from leader
      * @return AppendEntries response for the leader
      */
-    public synchronized AppendEntriesResponseMessage handleAppendEntries(AppendEntriesRequestMessage request) {
+    public AppendEntriesResponseMessage handleAppendEntries(AppendEntriesRequestMessage request) {
         Objects.requireNonNull(request, "request");
 
-        long localTerm = raftNode.getCurrentTerm();
-        if (request.getTerm() < localTerm) {
-            return new AppendEntriesResponseMessage(localTerm, false, localNodeId, 0L, -1L, 0L);
-        }
+        AppendEntriesResponseMessage response;
+        boolean notifyLeaderActivity;
 
-        if (request.getTerm() > localTerm || raftNode.getRole() != RaftRole.FOLLOWER) {
-            raftNode.becomeFollower(request.getTerm(), request.getLeaderId());
-        }
-
-        boolean appended = log.appendEntries(
-                request.getPrevLogIndex(),
-                request.getPrevLogTerm(),
-                request.getEntries()
-        );
-
-        if (!appended) {
-            long conflictTerm = -1L;
-            long conflictIndex = 0L;
-            long lastIndex = log.lastLogIndex();
-            if (request.getPrevLogIndex() > lastIndex) {
-                conflictIndex = lastIndex + 1L;
-            } else if (request.getPrevLogIndex() > 0L) {
-                conflictTerm = log.getTermAt(request.getPrevLogIndex());
-                conflictIndex = log.firstIndexOfTerm(conflictTerm);
+        synchronized (this) {
+            long localTerm = raftNode.getCurrentTerm();
+            if (request.getTerm() < localTerm) {
+                return new AppendEntriesResponseMessage(localTerm, false, localNodeId, 0L, -1L, 0L);
             }
-            return new AppendEntriesResponseMessage(
-                    raftNode.getCurrentTerm(),
-                    false,
-                    localNodeId,
-                    0L,
-                    conflictTerm,
-                    conflictIndex
+
+            if (request.getTerm() > localTerm || raftNode.getRole() != RaftRole.FOLLOWER) {
+                raftNode.becomeFollower(request.getTerm(), request.getLeaderId());
+            }
+
+            boolean appended = log.appendEntries(
+                    request.getPrevLogIndex(),
+                    request.getPrevLogTerm(),
+                    request.getEntries()
+            );
+
+            if (!appended) {
+                long conflictTerm = -1L;
+                long conflictIndex = 0L;
+                long lastIndex = log.lastLogIndex();
+                if (request.getPrevLogIndex() > lastIndex) {
+                    conflictIndex = lastIndex + 1L;
+                } else if (request.getPrevLogIndex() > 0L) {
+                    conflictTerm = log.getTermAt(request.getPrevLogIndex());
+                    conflictIndex = log.firstIndexOfTerm(conflictTerm);
+                }
+                return new AppendEntriesResponseMessage(
+                        raftNode.getCurrentTerm(),
+                        false,
+                        localNodeId,
+                        0L,
+                        conflictTerm,
+                        conflictIndex
+                );
+            }
+
+            commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
+
+            notifyLeaderActivity = leaderActivityObserver != null;
+            response = new AppendEntriesResponseMessage(
+                raftNode.getCurrentTerm(),
+                true,
+                localNodeId,
+                log.lastLogIndex(),
+                -1L,
+                0L
             );
         }
 
-        commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
-
-        if (leaderActivityObserver != null) {
+        if (notifyLeaderActivity) {
             leaderActivityObserver.onValidLeaderActivityObserved(request.getTerm(), request.getLeaderId());
         }
 
-        return new AppendEntriesResponseMessage(
-            raftNode.getCurrentTerm(),
-            true,
-            localNodeId,
-            log.lastLogIndex(),
-            -1L,
-            0L
-        );
+        return response;
     }
 
     /**

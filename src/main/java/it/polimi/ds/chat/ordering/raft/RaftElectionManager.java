@@ -227,33 +227,40 @@ public class RaftElectionManager {
      * Special case:
      * - if the static cluster majority is 1, the node wins immediately after self-vote
      */
-    synchronized void onElectionTimeoutFired() {
-        if (!running) {
-            return;
+    void onElectionTimeoutFired() {
+        Long leaderElectedTerm = null;
+
+        synchronized (this) {
+            if (!running) {
+                return;
+            }
+
+            if (raftNode.isLeader()) {
+                return;
+            }
+
+            long newElectionTerm = raftNode.startElection();
+            beginElectionTracking(newElectionTerm);
+
+            if (hasMajority(grantedVoters.size())) {
+                leaderElectedTerm = becomeLeaderForCurrentElection();
+            } else {
+                RequestVoteRequestMessage request = new RequestVoteRequestMessage(
+                        newElectionTerm,
+                        localNodeId,
+                        logMetadata.lastLogIndex(),
+                        logMetadata.lastLogTerm()
+                );
+
+                voteRequestSender.broadcastRequestVote(request, peerVotingNodeIds);
+
+                scheduleRandomElectionTimeout();
+            }
         }
 
-        if (raftNode.isLeader()) {
-            return;
+        if (leaderElectedTerm != null) {
+            electionListener.onLeaderElected(localNodeId, leaderElectedTerm);
         }
-
-        long newElectionTerm = raftNode.startElection();
-        beginElectionTracking(newElectionTerm);
-
-        if (hasMajority(grantedVoters.size())) {
-            becomeLeaderForCurrentElection();
-            return;
-        }
-
-        RequestVoteRequestMessage request = new RequestVoteRequestMessage(
-                newElectionTerm,
-                localNodeId,
-                logMetadata.lastLogIndex(),
-                logMetadata.lastLogTerm()
-        );
-
-        voteRequestSender.broadcastRequestVote(request, peerVotingNodeIds);
-
-        scheduleRandomElectionTimeout();
     }
 
     /**
@@ -271,28 +278,39 @@ public class RaftElectionManager {
      * @return the vote response produced by the underlying {@link RaftNode}
      * @throws NullPointerException if {@code request} is {@code null}
      */
-    synchronized RequestVoteResponseMessage onRequestVoteRequest(RequestVoteRequestMessage request) {
+    RequestVoteResponseMessage onRequestVoteRequest(RequestVoteRequestMessage request) {
         Objects.requireNonNull(request, "request");
 
-        long termBefore = raftNode.getCurrentTerm();
-        RaftRole roleBefore = raftNode.getRole();
+        RequestVoteResponseMessage response;
+        Long steppedDownTerm = null;
+        int steppedDownLeaderId = RaftNode.NO_LEADER;
 
-        RequestVoteResponseMessage response = raftNode.handleRequestVote(request, logMetadata);
+        synchronized (this) {
+            long termBefore = raftNode.getCurrentTerm();
+            RaftRole roleBefore = raftNode.getRole();
 
-        long termAfter = raftNode.getCurrentTerm();
-        RaftRole roleAfter = raftNode.getRole();
+            response = raftNode.handleRequestVote(request, logMetadata);
 
-        boolean steppedDownFromActiveRole =
-                (roleBefore == RaftRole.CANDIDATE || roleBefore == RaftRole.LEADER) && roleAfter == RaftRole.FOLLOWER;
+            long termAfter = raftNode.getCurrentTerm();
+            RaftRole roleAfter = raftNode.getRole();
 
-        if (steppedDownFromActiveRole) {
-            clearElectionTracking();
-            stopHeartbeatSchedule();
-            electionListener.onSteppedDown(termAfter, raftNode.getLeaderId());
+            boolean steppedDownFromActiveRole =
+                    (roleBefore == RaftRole.CANDIDATE || roleBefore == RaftRole.LEADER) && roleAfter == RaftRole.FOLLOWER;
+
+            if (steppedDownFromActiveRole) {
+                clearElectionTracking();
+                stopHeartbeatSchedule();
+                steppedDownTerm = termAfter;
+                steppedDownLeaderId = raftNode.getLeaderId();
+            }
+
+            if (response.isVoteGranted() || (termAfter > termBefore && steppedDownFromActiveRole)) {
+                resetElectionTimeout();
+            }
         }
 
-        if (response.isVoteGranted() || (termAfter > termBefore && steppedDownFromActiveRole)) {
-            resetElectionTimeout();
+        if (steppedDownTerm != null) {
+            electionListener.onSteppedDown(steppedDownTerm, steppedDownLeaderId);
         }
 
         return response;
@@ -317,53 +335,53 @@ public class RaftElectionManager {
      * @param term the term associated with the observed leader activity
      * @param leaderId the id of the leader that generated the activity
      */
-    synchronized void onValidLeaderActivityObserved(long term, int leaderId) {
-        if (!running) {
-            return;
+    void onValidLeaderActivityObserved(long term, int leaderId) {
+        boolean notifySteppedDown = false;
+        boolean notifyLeaderObserved = false;
+
+        synchronized (this) {
+            if (!running) {
+                return;
+            }
+
+            long localCurrentTerm = raftNode.getCurrentTerm();
+            RaftRole localRole = raftNode.getRole();
+            int previousLeaderId = raftNode.getLeaderId();
+
+            if (term < localCurrentTerm) {
+                return;
+            }
+
+            if (term > localCurrentTerm) {
+                raftNode.becomeFollower(term, leaderId);
+                clearElectionTracking();
+                stopHeartbeatSchedule();
+                resetElectionTimeout();
+                notifySteppedDown = true;
+                notifyLeaderObserved = previousLeaderId != leaderId;
+            } else if (localRole == RaftRole.CANDIDATE) {
+                raftNode.becomeFollower(term, leaderId);
+                clearElectionTracking();
+                stopHeartbeatSchedule();
+                resetElectionTimeout();
+                notifySteppedDown = true;
+                notifyLeaderObserved = previousLeaderId != leaderId;
+            } else if (localRole == RaftRole.FOLLOWER) {
+                raftNode.becomeFollower(term, leaderId);
+                resetElectionTimeout();
+                notifyLeaderObserved = previousLeaderId != leaderId;
+            }
+
+            // If localRole == LEADER and term == localCurrentTerm,
+            // this should normally not happen in a correct Raft flow.
+            // We ignore it for now.
         }
 
-        long localCurrentTerm = raftNode.getCurrentTerm();
-        RaftRole localRole = raftNode.getRole();
-        int previousLeaderId = raftNode.getLeaderId();
-
-        if (term < localCurrentTerm) {
-            return;
-        }
-
-        if (term > localCurrentTerm) {
-            raftNode.becomeFollower(term, leaderId);
-            clearElectionTracking();
-            stopHeartbeatSchedule();
-            resetElectionTimeout();
+        if (notifySteppedDown) {
             electionListener.onSteppedDown(term, leaderId);
-            notifyLeaderObservedIfChanged(previousLeaderId, leaderId, term);
-            return;
         }
-
-        if (localRole == RaftRole.CANDIDATE) {
-            raftNode.becomeFollower(term, leaderId);
-            clearElectionTracking();
-            stopHeartbeatSchedule();
-            resetElectionTimeout();
-            electionListener.onSteppedDown(term, leaderId);
-            notifyLeaderObservedIfChanged(previousLeaderId, leaderId, term);
-            return;
-        }
-
-        if (localRole == RaftRole.FOLLOWER) {
-            raftNode.becomeFollower(term, leaderId);
-            resetElectionTimeout();
-            notifyLeaderObservedIfChanged(previousLeaderId, leaderId, term);
-        }
-
-        // If localRole == LEADER and term == localCurrentTerm,
-        // this should normally not happen in a correct Raft flow.
-        // We ignore it for now.
-    }
-
-    private void notifyLeaderObservedIfChanged(int previousLeaderId, int newLeaderId, long term) {
-        if (previousLeaderId != newLeaderId) {
-            electionListener.onLeaderObserved(newLeaderId, term);
+        if (notifyLeaderObserved) {
+            electionListener.onLeaderObserved(leaderId, term);
         }
     }
 
@@ -380,51 +398,54 @@ public class RaftElectionManager {
      * - count each voter at most once
      * - become leader on majority
      */
-    synchronized void onRequestVoteResponse(RequestVoteResponseMessage response) {
+    void onRequestVoteResponse(RequestVoteResponseMessage response) {
         Objects.requireNonNull(response, "response");
 
-        if (!running) {
-            return;
+        Long steppedDownTerm = null;
+        Long leaderElectedTerm = null;
+
+        synchronized (this) {
+            if (!running) {
+                return;
+            }
+
+            if (raftNode.getRole() != RaftRole.CANDIDATE) {
+                return;
+            }
+
+            long localCurrentTerm = raftNode.getCurrentTerm();
+
+            if (response.getTerm() > localCurrentTerm) {
+                raftNode.stepDownIfHigherTerm(response.getTerm());
+                clearElectionTracking();
+                stopHeartbeatSchedule();
+                resetElectionTimeout();
+                steppedDownTerm = response.getTerm();
+            } else if (response.getTerm() < localCurrentTerm) {
+                return;
+            } else if (currentElectionTerm == null) {
+                return;
+            } else if (response.getTerm() != currentElectionTerm) {
+                return;
+            } else if (!response.isVoteGranted()) {
+                return;
+            } else {
+                boolean newVote = grantedVoters.add(response.getVoterId());
+                if (!newVote) {
+                    return;
+                }
+
+                if (hasMajority(grantedVoters.size())) {
+                    leaderElectedTerm = becomeLeaderForCurrentElection();
+                }
+            }
         }
 
-        if (raftNode.getRole() != RaftRole.CANDIDATE) {
-            return;
+        if (steppedDownTerm != null) {
+            electionListener.onSteppedDown(steppedDownTerm, RaftNode.NO_LEADER);
         }
-
-        long localCurrentTerm = raftNode.getCurrentTerm();
-
-        if (response.getTerm() > localCurrentTerm) {
-            raftNode.stepDownIfHigherTerm(response.getTerm());
-            clearElectionTracking();
-            stopHeartbeatSchedule();
-            resetElectionTimeout();
-            electionListener.onSteppedDown(response.getTerm(), RaftNode.NO_LEADER);
-            return;
-        }
-
-        if (response.getTerm() < localCurrentTerm) {
-            return;
-        }
-
-        if (currentElectionTerm == null) {
-            return;
-        }
-
-        if (response.getTerm() != currentElectionTerm) {
-            return;
-        }
-
-        if (!response.isVoteGranted()) {
-            return;
-        }
-
-        boolean newVote = grantedVoters.add(response.getVoterId());
-        if (!newVote) {
-            return;
-        }
-
-        if (hasMajority(grantedVoters.size())) {
-            becomeLeaderForCurrentElection();
+        if (leaderElectedTerm != null) {
+            electionListener.onLeaderElected(localNodeId, leaderElectedTerm);
         }
     }
 
@@ -437,16 +458,22 @@ public class RaftElectionManager {
      * <p>When invoked while leader, this method notifies the listener that a new
      * heartbeat round is due for the current term.
      */
-    synchronized void onHeartbeatTick() {
-        if (!running) {
-            return;
+    void onHeartbeatTick() {
+        Long heartbeatTerm = null;
+
+        synchronized (this) {
+            if (!running) {
+                return;
+            }
+
+            if (raftNode.getRole() != RaftRole.LEADER) {
+                return;
+            }
+
+            heartbeatTerm = raftNode.getCurrentTerm();
         }
 
-        if (raftNode.getRole() != RaftRole.LEADER) {
-            return;
-        }
-
-        electionListener.onHeartbeatRoundDue(raftNode.getCurrentTerm());
+        electionListener.onHeartbeatRoundDue(heartbeatTerm);
     }
 
     /**
@@ -505,12 +532,12 @@ public class RaftElectionManager {
      * election timeout, starts heartbeat scheduling, and notifies the listener
      * that leadership has been acquired.
      */
-    private synchronized void becomeLeaderForCurrentElection() {
+    private long becomeLeaderForCurrentElection() {
         raftNode.becomeLeader();
         clearElectionTracking();
         cancelElectionTimeout();
         startHeartbeatSchedule();
-        electionListener.onLeaderElected(localNodeId, raftNode.getCurrentTerm());
+        return raftNode.getCurrentTerm();
     }
 
     /**
