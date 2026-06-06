@@ -219,6 +219,31 @@ public class HoldBackQueueTest {
         assertEquals(4, queue.getExpectedSeq());
     }
 
+    @Test
+    @DisplayName("Queue blocks when Raft order violates local vector-clock order")
+    void queueBlocksWhenRaftOrderViolatesLocalVectorClockOrder() {
+        HoldBackQueue queue = new HoldBackQueue();
+
+        VectorClock vc2 = new VectorClock();
+        vc2.increment(1);
+        vc2.increment(1);
+
+        VectorClock vc1 = new VectorClock();
+        vc1.increment(1);
+
+        ChatDeliverMessage secondMessageFirstInRaft =
+                new ChatDeliverMessage(1, 1, "alice", "second", vc2);
+
+        ChatDeliverMessage firstMessageSecondInRaft =
+                new ChatDeliverMessage(2, 1, "bob", "first", vc1);
+
+        assertTrue(queue.enqueue(secondMessageFirstInRaft).isEmpty());
+        assertTrue(queue.enqueue(firstMessageSecondInRaft).isEmpty());
+
+        assertEquals(1, queue.getExpectedSeq());
+        assertTrue(queue.hasPendingMessages());
+    }
+
     // =========================================================================
     // HELPER METHODS
     // =========================================================================

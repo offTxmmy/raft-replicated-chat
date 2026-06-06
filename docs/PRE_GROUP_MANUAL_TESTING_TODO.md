@@ -3,7 +3,7 @@
 Documento operativo per arrivare al testing manuale del gruppo, senza usare le classi
 di test JUnit.
 
-Aggiornato al 2026-06-03.
+Aggiornato al 2026-06-06.
 
 ---
 
@@ -37,14 +37,12 @@ integrate nei due documenti principali.
 
 ### P0 - Correttezza funzionale
 
-- Sistemare o validare il retry client con vector clock.
-  - Problema: il broker incrementa il vector clock quando costruisce il
-    `ChatReqMessage`, anche se la proposta puo' poi essere rifiutata o ritentata.
-  - Rischio: la hold-back queue puo' bloccarsi se vede un salto nel clock del broker
-    sorgente.
-  - Soluzione consigliata: cache lato broker per `(username, clientTimestamp)`, cosi'
-    ogni retry riusa lo stesso comando, lo stesso vector clock e lo stesso
+- Retry client con vector clock: sistemato per il retry dello stesso messaggio.
+  - Il broker usa una cache per `(username, clientTimestamp)`.
+  - Ogni retry riusa lo stesso comando, lo stesso vector clock e lo stesso
     `localMsgId`.
+  - Resta da ragionare separatamente sulla concorrenza tra messaggi diversi
+    provenienti dallo stesso broker.
 
 - Chiarire deduplicazione effettiva.
   - Oggi Raft deduplica usando `(username, MSG timestamp)`.
@@ -52,12 +50,11 @@ integrate nei due documenti principali.
     esiste davvero nel codice.
   - Se si vuole la versione piu' pulita, aggiungere un vero sequence number client.
 
-- Decidere cosa fare con la discovery LAN.
-  - Opzione A: correggerla usando una porta discovery comune per tutti i broker.
-  - Opzione B: dichiararla come discovery ausiliaria e non usarla come parte della
-    demo principale.
-  - Non dire che la discovery LAN risolve davvero gli endpoint se in demo ogni broker
-    usa una porta discovery diversa.
+- Discovery LAN dei broker: non usarla come parte della demo principale.
+  - Il cluster dei broker e' statico.
+  - Il `votersCSV` viene configurato nella `DirectoryService`.
+  - Non dire che `LanDiscoveryService` o `PeerRegistry` risolvono gli endpoint Raft
+    o cambiano il quorum.
 
 ### P1 - Demo manuale
 
@@ -95,25 +92,25 @@ mvn -q -DskipTests package
 Directory:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.directory.DirectoryService
+java -cp target/classes it.polimi.ds.chat.directory.DirectoryService "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002"
 ```
 
 Broker 0:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 0 7000 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50000 7100 demo-cluster 1400
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 0 7000 50000 7100 demo-cluster 1400
 ```
 
 Broker 1:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 1 7001 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50001 7100 demo-cluster 1400
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 1 7001 50001 7100 demo-cluster 1400
 ```
 
 Broker 2:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 2 7002 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50002 7100 demo-cluster 1400
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 2 7002 50002 7100 demo-cluster 1400
 ```
 
 Client:
@@ -135,9 +132,9 @@ Note:
 
 ### Scenario A - Avvio base
 
-- Avviare DirectoryService.
-- Avviare broker 0, 1 e 2 con stesso `votersCSV`, stesso `raftBroadcastPort` e stesso
-  `clusterId`.
+- Avviare DirectoryService con il `votersCSV` statico.
+- Avviare broker 0, 1 e 2 con stesso `raftBroadcastPort` e stesso `clusterId`.
+- Verificare dai log che ogni broker recuperi dalla Directory lo stesso voter set.
 - Verificare dai log che venga eletto un solo leader.
 - Verificare che i follower conoscano il leader dopo heartbeat.
 
@@ -217,6 +214,7 @@ Esito atteso:
 - Non aggiungere refactor grandi non necessari.
 - Non presentare DirectoryService come parte del consenso.
 - Non presentare PeerRegistry/discovery come sorgente del quorum.
+- Non presentare la LAN discovery come meccanismo di discovery dei broker Raft.
 
 ---
 
@@ -225,7 +223,8 @@ Esito atteso:
 Membership:
 
 > La membership votante e' statica per preservare la safety del quorum Raft. La
-> discovery puo' aiutare a trovare broker o indirizzi, ma non puo' cambiare chi vota.
+> Directory distribuisce ai broker il voter set configurato all'avvio tramite
+> `votersCSV`, ma non partecipa al consenso. La LAN discovery non cambia chi vota.
 > Dynamic membership richiederebbe config entries replicate, learner e promozione
 > controllata.
 

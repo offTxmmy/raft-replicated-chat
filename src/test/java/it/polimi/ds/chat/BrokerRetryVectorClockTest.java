@@ -57,6 +57,23 @@ public class BrokerRetryVectorClockTest {
         }
     }
 
+    private static final class RecordingBroker extends Broker {
+        private final List<String> deliveredMessages = new ArrayList<>();
+
+        RecordingBroker(BrokerConfig config) {
+            super(config);
+        }
+
+        @Override
+        public void onChatDeliver(long seq, String sender, String text) {
+            deliveredMessages.add(seq + ":" + sender + ":" + text);
+        }
+
+        List<String> deliveredMessages() {
+            return deliveredMessages;
+        }
+    }
+
     @Test
     public void retryWithSameTimestampReusesTheSameChatRequest() {
         // The broker should treat retries for the same logical client message as one proposal.
@@ -77,5 +94,38 @@ public class BrokerRetryVectorClockTest {
         VectorClock proposalClock = orderingService.proposals.get(0).getVectorClock();
         assertEquals(1, proposalClock.getTimeStamp(1));
         assertEquals(1, broker.getSendVectorClock().getTimeStamp(1));
+    }
+
+    @Test
+    public void differentMessagesFromSameBrokerShouldNotBlockWhenRaftOrdersThemDifferently() {
+        RecordingBroker broker = new RecordingBroker(TestConfigs.raftBrokerConfig(1, 5000));
+        CapturingOrderingService orderingService = new CapturingOrderingService();
+        broker.setOrderingService(orderingService);
+
+        broker.onClientMessage(new ClientMessage("alice", "first", 100L));
+        broker.onClientMessage(new ClientMessage("bob", "second", 101L));
+
+        assertEquals(2, orderingService.proposals.size());
+
+        ChatReqMessage firstProposal = orderingService.proposals.get(0);
+        ChatReqMessage secondProposal = orderingService.proposals.get(1);
+        assertEquals(1, firstProposal.getVectorClock().getTimeStamp(1));
+        assertEquals(2, secondProposal.getVectorClock().getTimeStamp(1));
+
+        broker.handleOrderedMessage(toDeliver(1L, secondProposal));
+        broker.handleOrderedMessage(toDeliver(2L, firstProposal));
+
+        assertEquals(
+                List.of("1:bob:second", "2:alice:first"),
+                broker.deliveredMessages());
+    }
+
+    private static ChatDeliverMessage toDeliver(long seq, ChatReqMessage request) {
+        return new ChatDeliverMessage(
+                seq,
+                request.getBrokerId(),
+                request.getUsername(),
+                request.getText(),
+                new VectorClock(request.getVectorClock()));
     }
 }

@@ -46,6 +46,9 @@ The old centralized sequencer is not the production path.
 
 The Raft voting set is configured statically at broker startup through
 `RaftConfig.getVoters()`. Quorum is computed only from this static set.
+The static topology is provided to the `DirectoryService` at startup as a
+`votersCSV`; each broker fetches the same voter map from the Directory through a
+one-shot `GetClusterRequestMessage`.
 
 We chose static membership because it gives a stable majority definition. If brokers
 could join the voting set dynamically without replicated configuration entries, two
@@ -73,15 +76,15 @@ small messages addressed to all brokers, especially elections and heartbeat roun
 TCP remains better for log-entry replication because it avoids UDP fragmentation,
 manual ACK/NACK handling, selective retransmission and payload-size problems.
 
-### 2.4 LAN discovery is auxiliary
+### 2.4 Broker discovery is not part of membership
 
-`LanDiscoveryService` and `PeerRegistry` are auxiliary discovery components. They
-must not be presented as the source of Raft membership or quorum.
+`LanDiscoveryService` and `PeerRegistry` are not the source of Raft membership or
+quorum and are not part of the reliable demo path for broker cluster setup.
 
-The current reliable demo path is based on statically configured voter endpoints.
-Discovery can be shown only as a LAN helper if its configuration is made consistent
-for all brokers. In particular, discovery cannot be claimed to resolve all Raft
-endpoints if each broker listens on a different discovery UDP port.
+The current reliable demo path is based on the static voter endpoints configured
+in the Directory at startup. LAN is still used where it is useful, especially for
+Raft broadcast control traffic, but not to dynamically discover or change the
+broker voting set.
 
 ### 2.5 No application-level message storage
 
@@ -182,10 +185,10 @@ The system combines:
 - a hold-back delivery rule that avoids delivering a message before its causal
   predecessors.
 
-Important implementation note for final hardening: the broker must not create causal
-clock gaps when a client retries a message. A retry of the same client message should
-reuse the same broker-side command identity and causal metadata. The current risk is
-documented in `PRE_GROUP_MANUAL_TESTING_TODO.md`.
+Retry of the same client message reuses the same broker-side command identity and
+causal metadata through a broker-side cache keyed by `(username, clientTimestamp)`.
+The remaining hardening topic is concurrency between different client messages
+originating from the same broker.
 
 ### 4.5 Deduplication
 
@@ -263,12 +266,12 @@ broker failures. The checklist is in `PRE_GROUP_MANUAL_TESTING_TODO.md`.
 
 ### Must fix or explicitly validate
 
-- Retry/vector-clock gap risk in `Broker.buildChatReq`.
+- Manual validation of concurrent messages from the same broker with vector-clock
+  metadata.
 - Manual 3-broker demo with clients attached to different brokers.
 - Manual test of follower proposal forwarding.
 - Manual leader crash and new election.
 - Manual restart of the crashed broker with persisted Raft state.
-- Decision on whether to fix or only document auxiliary LAN discovery.
 
 ### Should document in the slides
 

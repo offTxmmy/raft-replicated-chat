@@ -108,14 +108,13 @@ Questa distinzione e' fondamentale per l'orale:
 
 ## 6. Nota sulla discovery LAN
 
-La discovery LAN e' utile per mostrare che i broker possono annunciarsi sulla LAN, ma
-non e' necessaria alla safety del consenso. Per la demo affidabile, gli endpoint dei
-voter possono essere configurati staticamente nel `votersCSV`.
+La discovery LAN non viene usata per costruire il cluster dei broker. La membership
+votante e' statica: il `votersCSV` viene passato alla `DirectoryService` all'avvio e
+i broker recuperano da li' la stessa topologia tramite `GetClusterRequestMessage`.
 
-Attenzione: se ogni broker ascolta la discovery su una porta diversa, non bisogna
-dire che la discovery risolve automaticamente gli endpoint tra broker. Per una demo
-di discovery reale serve una porta discovery comune oppure una logica che invii a
-tutte le porte attese.
+Quindi non bisogna presentare `LanDiscoveryService` o `PeerRegistry` come sorgente
+degli endpoint Raft, della membership o del quorum. La LAN resta sfruttata per il
+trasporto broadcast dei messaggi Raft piccoli.
 
 Il broadcast Raft invece deve usare una porta comune di cluster, per esempio il
 parametro `raftBroadcastPort`.
@@ -133,30 +132,30 @@ mvn -q -DskipTests package
 Directory:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.directory.DirectoryService
+java -cp target/classes it.polimi.ds.chat.directory.DirectoryService "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002"
 ```
 
 Broker 0:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 0 7000 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50000 7100 demo-cluster 1400
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 0 7000 50000 7100 demo-cluster 1400
 ```
 
 Broker 1:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 1 7001 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50001 7100 demo-cluster 1400
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 1 7001 50001 7100 demo-cluster 1400
 ```
 
 Broker 2:
 
 ```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 2 7002 "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002" 50002 7100 demo-cluster 1400
+java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 2 7002 50002 7100 demo-cluster 1400
 ```
 
 I valori importanti da tenere allineati tra broker sono:
 
-- stesso `votersCSV`;
+- stesso `votersCSV` configurato nella `DirectoryService`;
 - stesso `raftBroadcastPort`, qui `7100`;
 - stesso `clusterId`, qui `demo-cluster`;
 - porte client e Raft TCP diverse per ogni processo.
@@ -177,6 +176,8 @@ I valori importanti da tenere allineati tra broker sono:
 ## 9. Frase pronta per l'orale
 
 > Abbiamo scelto membership statica per mantenere stabile il calcolo del quorum Raft.
+> Il `votersCSV` viene configurato nella Directory all'avvio e non viene scoperto
+> dinamicamente via LAN.
 > Usiamo UDP broadcast sulla LAN per i messaggi piccoli e destinati a tutti, cioe'
 > `RequestVote` e heartbeat vuoti. Usiamo TCP unicast per le entry di log perche'
 > richiedono affidabilita', ordine, retry e catch-up. In questo modo sfruttiamo la
