@@ -10,6 +10,8 @@ import java.util.Map;
  * Each entry maps a broker/client id to its logical timestamp.
  */
 public class VectorClock implements Serializable {
+    private static final long serialVersionUID = 1L;
+
     private Map<Integer, Integer> clock; // key: broker/client id, value timestamp
 
     /**

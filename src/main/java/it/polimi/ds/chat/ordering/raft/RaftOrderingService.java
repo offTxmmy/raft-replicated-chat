@@ -12,6 +12,7 @@ import it.polimi.ds.chat.ordering.api.OrderingServiceCallback;
 
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -26,33 +27,6 @@ import java.util.function.Consumer;
 
 /**
  * Raft-based implementation of {@link OrderingService}.
- *
- * <p>Wires together: durable {@code (term, vote)} state, the in-memory Raft
- * log, the commit manager, the election manager, the replication manager,
- * an RPC server and an RPC client. Committed log entries are translated into
- * application-level {@link ChatDeliverMessage} delivery via
- * {@link RaftStateMachineAdapter}.
- *
- * <p>Lifecycle:
- * <ol>
- *   <li>{@link #start()} loads persisted state, constructs all Raft
- *       components, attaches the RPC client response handlers, then starts
- *       (in order): RPC server, RPC client, replication manager, election
- *       manager. Inbound RPCs are answerable as soon as the server is up.
- *   <li>{@link #stop()} reverses the start order and shuts down the clock
- *       and persistence-backed components.
- * </ol>
- *
- * <p>{@link #propose(ChatReqMessage)}: the current leader appends the command
- * to the local log; followers proxy proposals to the known leader. Client
- * retries are idempotent on the leader by (username, MSG timestamp), so a
- * duplicate pending proposal waits for the original commit and a duplicate
- * committed proposal returns success without another append. Replication to
- * peers happens on the next heartbeat tick.
- *
- * <p>Both {@code (currentTerm, votedFor)} and log entries are persisted.
- * On startup, the replicated log is rebuilt from durable storage before
- * election and replication components are created.
  */
 public final class RaftOrderingService implements OrderingService {
 
@@ -80,7 +54,7 @@ public final class RaftOrderingService implements OrderingService {
     private static final long PROPOSE_COMMIT_TIMEOUT_MS = 5_000L;
 
     private final ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits =
-        new ConcurrentHashMap<>();
+            new ConcurrentHashMap<>();
 
     // Guards the check-and-register sequence for retry idempotency.
     private final Set<String> committedProposalKeys = ConcurrentHashMap.newKeySet();
@@ -118,7 +92,15 @@ public final class RaftOrderingService implements OrderingService {
         raftNode = new RaftNode(localNodeId, persistence,
                 persisted.currentTerm(), persisted.votedFor());
         raftLog  = new RaftLog(persistence);
-        raftLog.loadFromPersistence(persistence.loadLogEntries());
+        List<RaftLogEntry> persistedEntries = persistence.loadLogEntries();
+        raftLog.loadFromPersistence(persistedEntries);
+
+        for (RaftLogEntry entry : persistedEntries) {
+            ChatCommand cmd = entry.getCommand();
+            if (cmd != null) {
+                committedProposalKeys.add(proposalKey(cmd));
+            }
+        }
 
         // 3. State machine: deliver committed entries as ChatDeliverMessage.
         RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
@@ -127,20 +109,25 @@ public final class RaftOrderingService implements OrderingService {
             completePendingCommit(entry);
         });
 
-        // 4. TCP client and outbound Raft transport. The TCP client remains available
-        //    for forwarding client proposals to the leader even when Raft RPCs become hybrid.
+        raftLog.setCommitIndexSupplier(commitManager::getCommitIndex);
+        raftLog.setTruncationHook(entry -> {
+            ChatCommand cmd = entry.getCommand();
+            if (cmd != null) {
+                committedProposalKeys.remove(proposalKey(cmd));
+            }
+        });
+
+        // 4. TCP client and outbound Raft transport.
         tcpClient = new RaftRpcClient(localNodeId, raftConfig.getVoters());
         raftTransport = createRaftTransport(tcpClient);
 
         // 5. Clock for election timeout and heartbeat scheduling.
         raftClock = new DefaultRaftClock();
 
-        // 6. Voter id set, derived from the static voter map (Contract A).
+        // 6. Voter id set, derived from the static voter map.
         Set<Integer> allVoterIds = new HashSet<>(raftConfig.getVoters().keySet());
 
         // 7. Leader-activity observer: forwards to the election manager.
-        //    Field `electionManager` is null at this point but the lambda
-        //    reads it lazily, so it resolves correctly once assigned below.
         RaftLeaderActivityObserver leaderActivityObserver =
                 (term, leaderId) -> electionManager.onValidLeaderActivityObserved(term, leaderId);
 
@@ -159,6 +146,9 @@ public final class RaftOrderingService implements OrderingService {
             @Override
             public void onLeaderElected(int leaderId, long term) {
                 replicationManager.onLeaderElected(leaderId, term);
+                if (leaderId == localNodeId) {
+                    replicationManager.appendCommandAsLeader(null);
+                }
                 notifyLeaderChanged(leaderId, term);
             }
 
@@ -179,7 +169,7 @@ public final class RaftOrderingService implements OrderingService {
             }
         };
 
-        // 9. Election manager. Uses a consistent log-tip snapshot (Contract B).
+        // 9. Election manager.
         electionManager = new RaftElectionManager(
                 localNodeId,
                 allVoterIds,
@@ -193,8 +183,7 @@ public final class RaftOrderingService implements OrderingService {
                 electionListener
         );
 
-        // 10. Wire Raft transport response handlers (package-private callbacks
-        //     on the election manager are visible here).
+        // 10. Wire Raft transport response handlers.
         raftTransport.attachHandlers(
                 electionManager::onRequestVoteResponse,
                 replicationManager::handleAppendEntriesResponse
@@ -236,7 +225,8 @@ public final class RaftOrderingService implements OrderingService {
                 + ", restoredTerm=" + persisted.currentTerm()
                 + ", restoredVote=" + persisted.votedFor()
                 + ", restoredLogLastIndex=" + raftLog.lastLogIndex()
-                + ", restoredLogLastTerm=" + raftLog.lastLogTerm());
+                + ", restoredLogLastTerm=" + raftLog.lastLogTerm()
+                + ", restoredDedupKeys=" + committedProposalKeys.size());
     }
 
     @Override

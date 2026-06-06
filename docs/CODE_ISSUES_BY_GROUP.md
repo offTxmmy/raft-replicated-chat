@@ -73,7 +73,7 @@ Le priorita sono:
 
 ### P0
 
-- Follower sovrastima `matchIndex`.
+- [FATTO] Follower sovrastima `matchIndex`.
   - In `handleAppendEntries`, il follower risponde con `log.lastLogIndex()`.
   - Su heartbeat o append vuoto con `prevLogIndex` vecchio, il leader puo credere
     che il follower abbia replicato piu entry di quelle effettivamente confermate
@@ -83,7 +83,7 @@ Le priorita sono:
   - Fix suggerito: rispondere con `min(prevLogIndex + entries.size(),
     log.lastLogIndex())` per quella specifica RPC.
 
-- Deduplica Raft non persistente/rebuildata.
+- [FATTO] Deduplica Raft non persistente/rebuildata.
   - `committedProposalKeys` vive solo in memoria e viene svuotata allo stop.
   - Dopo crash/restart, un retry gia committato puo essere riappeso come nuova
     entry.
@@ -92,7 +92,7 @@ Le priorita sono:
 
 ### P1
 
-- No-op all'elezione mancante.
+- [FATTO] No-op all'elezione mancante.
   - Owner suggerito: Replication / AppendEntries / Log.
   - Il leader rifiuta correttamente di committare entry di term passati basandosi
     solo su majority match.
@@ -108,22 +108,22 @@ Le priorita sono:
     delivery applicativa.
   - Importante soprattutto se si fa demo con restart del broker.
 
-- `RaftLog.append` non atomico tra persistenza e `entries.add`.
+- [FATTO] `RaftLog.append` non atomico tra persistenza e `entries.add`.
   - L'entry viene scritta su disco prima di essere aggiunta alla lista in memoria.
   - Un crash in mezzo non e necessariamente safety-breaking, ma puo creare
     divergenza temporanea tra memoria e disco.
 
-- Truncate non verifica esplicitamente di non troncare entry committate.
+- [FATTO] Truncate non verifica esplicitamente di non troncare entry committate.
   - In Raft non si dovrebbero troncare entry gia committate.
   - Il controllo oggi non e espresso nel log layer.
 
-- Cluster Raft a un solo nodo non committa.
+- [FATTO] Cluster Raft a un solo nodo non committa.
   - L'avanzamento del commit avviene oggi tramite response dei follower.
   - Non blocca la demo a tre broker, ma e un buco del caso base Raft.
 
 ### P2
 
-- `serialVersionUID` mancante su classi serializzate nel log.
+- [FATTO] `serialVersionUID` mancante su classi serializzate nel log.
   - Rischio: vecchi file Raft persistiti possono non essere leggibili dopo piccole
     modifiche alle classi.
   - Rilevante se si riusa stato persistito tra versioni diverse del codice.

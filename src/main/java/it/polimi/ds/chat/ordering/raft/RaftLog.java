@@ -6,6 +6,9 @@ import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.function.LongSupplier;
 
 /**
  * In-memory Raft log implementation.
@@ -18,12 +21,33 @@ public class RaftLog implements RaftLogMetadata {
     private final List<RaftLogEntry> entries = new ArrayList<>();
     private final RaftPersistence persistence;
 
+    private Consumer<RaftLogEntry> truncationHook = entry -> {};
+
+    private LongSupplier commitIndexSupplier = () -> 0L;
+
     public RaftLog() {
         this(RaftPersistence.NO_OP);
     }
 
     public RaftLog(RaftPersistence persistence) {
         this.persistence = persistence;
+    }
+
+    /**
+     * Registers a hook called once per entry removed by {@link #truncateFrom(long)}.
+     * Passing {@code null} restores the default no-op hook.
+     */
+    public synchronized void setTruncationHook(Consumer<RaftLogEntry> hook) {
+        this.truncationHook = (hook != null) ? hook : entry -> {};
+    }
+
+    /**
+     * Registers a supplier used by {@link #truncateFrom(long)} to enforce the
+     * Raft invariant that committed entries are never truncated.
+     * Passing {@code null} restores the default supplier returning 0.
+     */
+    public synchronized void setCommitIndexSupplier(LongSupplier supplier) {
+        this.commitIndexSupplier = (supplier != null) ? supplier : () -> 0L;
     }
 
     @Override
@@ -45,8 +69,6 @@ public class RaftLog implements RaftLogMetadata {
     /**
      * Returns a RaftLogMetadata view backed by a single log tip snapshot.
      * Use this when passing metadata to the election layer.
-     * 
-     * FOR PERSON C: This can be used to pass a consistent log metadata snapshot to the RaftElectionManager.
      */
     public synchronized RaftLogMetadata snapshotMetadata() {
         final long snapshotIndex;
@@ -74,13 +96,6 @@ public class RaftLog implements RaftLogMetadata {
         };
     }
 
-    /**
-     * Returns the term at the given log index.
-     *
-     * @param index log index (1-based). Index 0 returns term 0 by convention.
-     * @return the term for that index
-     * @throws IllegalArgumentException if index is negative or beyond the log tip
-     */
     public synchronized long getTermAt(long index) {
         if (index == 0L) {
             return 0L;
@@ -91,9 +106,6 @@ public class RaftLog implements RaftLogMetadata {
         return entries.get((int) index - 1).getTerm();
     }
 
-    /**
-     * Returns the first index where the given term appears, or 0 if not present.
-     */
     public synchronized long firstIndexOfTerm(long term) {
         if (term <= 0L) {
             return 0L;
@@ -106,9 +118,6 @@ public class RaftLog implements RaftLogMetadata {
         return 0L;
     }
 
-    /**
-     * Returns the last index where the given term appears, or 0 if not present.
-     */
     public synchronized long lastIndexOfTerm(long term) {
         if (term <= 0L) {
             return 0L;
@@ -122,12 +131,6 @@ public class RaftLog implements RaftLogMetadata {
         return 0L;
     }
 
-    /**
-     * Returns the entry at the given index, or null if not present.
-     *
-     * @param index log index (1-based)
-     * @return entry or null
-     */
     public synchronized RaftLogEntry getEntry(long index) {
         if (index <= 0L || index > lastLogIndex()) {
             return null;
@@ -135,12 +138,6 @@ public class RaftLog implements RaftLogMetadata {
         return entries.get((int) index - 1);
     }
 
-    /**
-     * Returns a copy of all entries from the given index (inclusive).
-     *
-     * @param startIndex first index to include
-     * @return immutable list of entries
-     */
     public synchronized List<RaftLogEntry> getEntriesFrom(long startIndex) {
         if (startIndex <= 0L || startIndex > lastLogIndex()) {
             return Collections.emptyList();
@@ -149,12 +146,6 @@ public class RaftLog implements RaftLogMetadata {
         return Collections.unmodifiableList(new ArrayList<>(entries.subList(from, entries.size())));
     }
 
-    /**
-     * Rebuilds the in-memory log from persisted entries during startup.
-     * This method must not write the loaded entries back to persistence.
-     *
-     * @param persistedEntries entries loaded from durable storage
-     */
     public synchronized void loadFromPersistence(List<RaftLogEntry> persistedEntries) {
         if (!entries.isEmpty()) {
             throw new IllegalStateException("Cannot load persisted entries into a non-empty RaftLog");
@@ -175,24 +166,26 @@ public class RaftLog implements RaftLogMetadata {
     }
 
     /**
-     * Appends a single entry at the end of the log.
+     * Appends a single entry at the end of the log atomically with persistence.
+     * Either both in-memory state and durable storage are updated, or neither.
      *
      * @param term    term of the entry
-     * @param command chat command payload
+     * @param command chat command payload (may be null for a no-op entry)
      * @return the appended entry
      */
     public synchronized RaftLogEntry append(long term, ChatCommand command) {
         long index = lastLogIndex() + 1L;
         RaftLogEntry entry = new RaftLogEntry(index, term, command);
-        persistence.appendLogEntry(entry);
         entries.add(entry);
+        try {
+            persistence.appendLogEntry(entry);
+        } catch (RuntimeException e) {
+            entries.remove(entries.size() - 1);
+            throw e;
+        }
         return entry;
     }
 
-    /**
-     * Checks whether the log contains an entry matching index and term.
-     * Index 0 with term 0 always matches the empty base.
-     */
     public synchronized boolean matches(long index, long term) {
         if (index == 0L && term == 0L) {
             return true;
@@ -203,14 +196,6 @@ public class RaftLog implements RaftLogMetadata {
         return entries.get((int) index - 1).getTerm() == term;
     }
 
-    /**
-     * Applies an AppendEntries-style update.
-     *
-     * @param prevLogIndex index immediately preceding new entries
-     * @param prevLogTerm term for prevLogIndex
-     * @param newEntries entries to append (may be empty for heartbeat)
-     * @return true if the log matched prevLogIndex/prevLogTerm and entries were applied
-     */
     public synchronized boolean appendEntries(long prevLogIndex, long prevLogTerm, List<RaftLogEntry> newEntries) {
         if (!matches(prevLogIndex, prevLogTerm)) {
             return false;
@@ -244,8 +229,13 @@ public class RaftLog implements RaftLogMetadata {
             if (incoming.getIndex() != expectedIndex) {
                 throw new IllegalArgumentException("Non-contiguous entries at index " + expectedIndex);
             }
-            persistence.appendLogEntry(incoming);
             entries.add(incoming);
+            try {
+                persistence.appendLogEntry(incoming);
+            } catch (RuntimeException e) {
+                entries.remove(entries.size() - 1);
+                throw e;
+            }
             expectedIndex++;
         }
 
@@ -255,14 +245,38 @@ public class RaftLog implements RaftLogMetadata {
     /**
      * Removes all entries from the given index (inclusive) to the end.
      *
+     * <p>Refuses to truncate entries that fall within the committed prefix,
+     * as required by the Raft safety invariant: a committed entry is durable
+     * by virtue of being on a majority and must never be overwritten.
+     *
      * @param fromIndex index to truncate from
+     * @throws IllegalStateException if {@code fromIndex} targets a committed entry
      */
     public synchronized void truncateFrom(long fromIndex) {
         if (fromIndex <= 0L || fromIndex > lastLogIndex()) {
             return;
         }
-        persistence.truncateLogFrom(fromIndex);
+
+        long committedUpTo = commitIndexSupplier.getAsLong();
+        if (fromIndex <= committedUpTo) {
+            throw new IllegalStateException(
+                    "Refusing to truncate committed entry at index " + fromIndex
+                            + " (commitIndex=" + committedUpTo + ")");
+        }
+
         int from = (int) fromIndex - 1;
+        List<RaftLogEntry> removed = new ArrayList<>(entries.subList(from, entries.size()));
+
+        persistence.truncateLogFrom(fromIndex);
         entries.subList(from, entries.size()).clear();
+
+        for (RaftLogEntry e : removed) {
+            try {
+                truncationHook.accept(e);
+            } catch (RuntimeException hookFailure) {
+                // A hook failure must not corrupt the truncated state. Surface only the first.
+                Objects.requireNonNull(hookFailure);
+            }
+        }
     }
 }

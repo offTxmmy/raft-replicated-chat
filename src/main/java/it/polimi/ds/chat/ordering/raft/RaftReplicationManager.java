@@ -16,15 +16,6 @@ import java.util.Set;
 
 /**
  * Replication counterpart to RaftElectionManager.
- *
- * Responsibilities:
- * - Follower-side handling of AppendEntries requests.
- * - Leader-side replication driver on heartbeat ticks.
- * - Tracking per-follower replication state (nextIndex/matchIndex).
- * - Advancing commit index on majority.
- *
- * This class is transport-agnostic and communicates externally only through
- * RaftAppendEntriesSender and RaftLeaderActivityObserver.
  */
 public class RaftReplicationManager implements RaftElectionListener {
 
@@ -64,9 +55,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         this.leaderActivityObserver = leaderActivityObserver;
     }
 
-    /**
-     * Starts the replication manager and resets leader-side state.
-     */
     public synchronized void start() {
         if (running) {
             return;
@@ -75,17 +63,11 @@ public class RaftReplicationManager implements RaftElectionListener {
         replicationState.clear();
     }
 
-    /**
-     * Stops the replication manager and clears leader-side replication state.
-     */
     public synchronized void stop() {
         running = false;
         replicationState.clear();
     }
 
-    /**
-     * Returns whether this replication manager is active.
-     */
     public boolean isRunning() {
         return running;
     }
@@ -93,32 +75,23 @@ public class RaftReplicationManager implements RaftElectionListener {
     /**
      * Appends a new command to the log when this node is leader.
      *
-     * <p>If the local node is not leader, the call is ignored and null is returned.
-     * The leader is expected to replicate new entries on the next heartbeat round.
+     * <p>Commit advancement is attempted immediately after the append so that
+     * a single-node cluster (no peers) can commit without ever receiving an
+     * AppendEntries response; in multi-node clusters this is a no-op until
+     * peers acknowledge.
      *
-     * @param command application command to append
+     * @param command application command to append; {@code null} produces a no-op entry
      * @return appended log entry, or null if not leader
      */
     public synchronized RaftLogEntry appendCommandAsLeader(ChatCommand command) {
         if (raftNode.getRole() != RaftRole.LEADER) {
             return null;
         }
-        return log.append(raftNode.getCurrentTerm(), command);
+        RaftLogEntry entry = log.append(raftNode.getCurrentTerm(), command);
+        advanceCommitFromMatches();
+        return entry;
     }
 
-    /**
-     * Handles an incoming AppendEntries request on the follower side.
-     *
-     * <p>Flow:
-     * - reject stale terms
-     * - step down if term is newer or local role is not FOLLOWER
-     * - validate prevLogIndex/prevLogTerm and append entries
-     * - update commit index from leader
-     * - notify leader activity observer on success
-     *
-     * @param request append entries request from leader
-     * @return AppendEntries response for the leader
-     */
     public AppendEntriesResponseMessage handleAppendEntries(AppendEntriesRequestMessage request) {
         Objects.requireNonNull(request, "request");
 
@@ -163,14 +136,16 @@ public class RaftReplicationManager implements RaftElectionListener {
             } else {
                 commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
 
+                long ackedMatchIndex = request.getPrevLogIndex() + request.getEntries().size();
+
                 notifyLeaderActivity = leaderActivityObserver != null;
                 response = new AppendEntriesResponseMessage(
-                    raftNode.getCurrentTerm(),
-                    true,
-                    localNodeId,
-                    log.lastLogIndex(),
-                    -1L,
-                    0L
+                        raftNode.getCurrentTerm(),
+                        true,
+                        localNodeId,
+                        ackedMatchIndex,
+                        -1L,
+                        0L
                 );
             }
         }
@@ -182,19 +157,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         return response;
     }
 
-    /**
-     * Handles an AppendEntries response on the leader side.
-     *
-     * <p>Flow:
-     * - ignore if not running or not leader
-     * - step down on higher term
-     * - ignore stale responses
-     * - on failure, decrement nextIndex to backtrack
-     * - on success, update matchIndex/nextIndex and try to advance commit
-     *
-     * @param followerId responding follower id
-     * @param response append entries response
-     */
     public synchronized void handleAppendEntriesResponse(int followerId, AppendEntriesResponseMessage response) {
         Objects.requireNonNull(response, "response");
 
@@ -248,12 +210,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         advanceCommitFromMatches();
     }
 
-    /**
-     * Initializes leader-side replication state when this node becomes leader.
-     *
-     * @param leaderId elected leader id
-     * @param term current term
-     */
     @Override
     public synchronized void onLeaderElected(int leaderId, long term) {
         if (!running || leaderId != localNodeId) {
@@ -267,12 +223,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         }
     }
 
-    /**
-     * Clears replication state when stepping down from leader.
-     *
-     * @param newTerm new term observed
-     * @param knownLeaderId known leader id for the term
-     */
     @Override
     public synchronized void onSteppedDown(long newTerm, int knownLeaderId) {
         if (!running) {
@@ -281,14 +231,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         replicationState.clear();
     }
 
-    /**
-     * Sends AppendEntries to all peers on each heartbeat round.
-     *
-     * <p>Each follower receives entries starting from its nextIndex; if no new
-     * entries are available, an empty AppendEntries acts as a heartbeat.
-     *
-     * @param term current term from the election heartbeat tick
-     */
     @Override
     public synchronized void onHeartbeatRoundDue(long term) {
         if (!running || raftNode.getRole() != RaftRole.LEADER) {
@@ -307,12 +249,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         sendAppendEntries(sendPlans, replicationState.size());
     }
 
-    /**
-     * Builds AppendEntries requests for all followers before sending them.
-     *
-     * <p>This keeps request construction separate from transport selection and
-     * allows identical empty heartbeats to be grouped into a single broadcast.
-     */
     private void sendAppendEntries(List<AppendEntriesSendPlan> sendPlans, int followerCount) {
         Map<EmptyHeartbeatKey, HeartbeatBroadcastPlan> emptyHeartbeats = new LinkedHashMap<>();
 
@@ -346,9 +282,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         }
     }
 
-    /**
-     * Builds an AppendEntries request for a single follower.
-     */
     private AppendEntriesSendPlan buildAppendEntriesSendPlan(int peerId, RaftPeerReplicationState state) {
         long nextIndex = state.getNextIndex();
         long prevLogIndex = nextIndex - 1L;
@@ -365,9 +298,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         ));
     }
 
-    /**
-     * Advances commit index based on current matchIndex values.
-     */
     private void advanceCommitFromMatches() {
         List<Long> matchIndexes = new ArrayList<>();
         matchIndexes.add(log.lastLogIndex());
@@ -379,17 +309,11 @@ public class RaftReplicationManager implements RaftElectionListener {
         commitManager.tryAdvanceCommitIndex(matchIndexes, majority, raftNode.getCurrentTerm());
     }
 
-    /**
-     * Returns an immutable copy of the provided static voting set.
-     */
     private static Set<Integer> immutableVotingSet(Set<Integer> allVotingNodeIds) {
         Objects.requireNonNull(allVotingNodeIds, "allVotingNodeIds");
         return Collections.unmodifiableSet(new LinkedHashSet<>(allVotingNodeIds));
     }
 
-    /**
-     * Validates that the static voting set is non-empty and includes the local node.
-     */
     private static void validateVotingSet(int localNodeId, Set<Integer> allVotingNodeIds) {
         if (allVotingNodeIds.isEmpty()) {
             throw new IllegalArgumentException("The static voting set must not be empty");
@@ -400,9 +324,6 @@ public class RaftReplicationManager implements RaftElectionListener {
         }
     }
 
-    /**
-     * Builds the immutable set of peer voters by removing the local node id.
-     */
     private static Set<Integer> buildPeerVotingSet(int localNodeId, Set<Integer> allVotingNodeIds) {
         LinkedHashSet<Integer> peers = new LinkedHashSet<>(allVotingNodeIds);
         peers.remove(localNodeId);
