@@ -22,7 +22,7 @@ Le priorita sono:
 
 ### P0
 
-- Deadlock AB-BA tra `RaftElectionManager` e `RaftReplicationManager`.
+- [FATTO] Deadlock AB-BA tra `RaftElectionManager` e `RaftReplicationManager`.
   - `RaftElectionManager` puo tenere il proprio lock e chiamare il listener di
     replication.
   - `RaftReplicationManager` puo tenere il proprio lock e chiamare
@@ -30,27 +30,26 @@ Le priorita sono:
   - Effetto: il cluster puo bloccarsi.
   - Fix suggerito: non chiamare callback/listener mentre si tiene un lock
     `synchronized`, oppure dispatchare la leader activity fuori dal lock.
+  - Risolto in `f5c1871`: i callback election/replication vengono chiamati fuori
+    dai lock dei manager, con test anti-regressione dedicati.
 
-- Gestione della leader activity troppo intrecciata con replication.
+- [FATTO] Gestione della leader activity troppo intrecciata con replication.
   - E lo stesso rischio architetturale del punto precedente.
   - Va separato il path di gestione `AppendEntries` dal path di reset election
     timeout / osservazione leader.
+  - Risolto in `f5c1871`: `handleAppendEntries` completa la gestione replication
+    sotto lock e notifica la leader activity solo dopo il rilascio del lock.
 
 ### P1
 
-- No-op all'elezione mancante.
-  - Il leader rifiuta correttamente di committare entry di term passati basandosi
-    solo su majority match.
-  - Senza no-op all'inizio del nuovo term, entry gia replicate di term vecchi
-    possono restare non committate finche non arriva nuovo traffico.
-  - Fix suggerito: quando un nodo diventa leader, appendere una no-op entry nel
-    nuovo term.
-
-- Election timeout non resettato su `AppendEntries` respinto.
+- [FATTO] Election timeout non resettato su `AppendEntries` respinto.
   - Se il follower rifiuta per mismatch di log, oggi non sempre viene considerata
     leader activity valida.
   - Effetto: elezioni spurie durante il catch-up.
   - Non e un problema primario di safety, ma puo peggiorare molto la liveness.
+  - Risolto: `handleAppendEntries` notifica la leader activity anche quando
+    respinge la RPC per mismatch di log, mantenendo invariata la response di
+    conflitto.
 
 - `PeerRegistry.getQuorumSize()` e API ingannevole.
   - La membership Raft e statica e viene da `RaftConfig.getVoters()`.
@@ -92,6 +91,15 @@ Le priorita sono:
     oppure persistere metadati di deduplica.
 
 ### P1
+
+- No-op all'elezione mancante.
+  - Owner suggerito: Replication / AppendEntries / Log.
+  - Il leader rifiuta correttamente di committare entry di term passati basandosi
+    solo su majority match.
+  - Senza no-op all'inizio del nuovo term, entry gia replicate di term vecchi
+    possono restare non committate finche non arriva nuovo traffico.
+  - Fix suggerito: quando un nodo diventa leader, appendere una no-op entry nel
+    nuovo term.
 
 - `commitIndex` / `lastApplied` non persistiti o non ricostruiti in modo esplicito.
   - Al restart il servizio ricarica il log, ma il commit manager riparte da
@@ -255,7 +263,7 @@ Le priorita sono:
 
 ## 5. Top Fix Prima Della Demo
 
-1. Sistemare il deadlock tra election e replication.
+1. [FATTO] Sistemare il deadlock tra election e replication.
 2. Correggere il `matchIndex` restituito dal follower in `AppendEntries`.
 3. Introdurre `(clientId, clientSeq)` e limitare/purgare la cache di deduplica.
 4. Usare un writer unico o un lock comune per `ObjectOutputStream` lato client.

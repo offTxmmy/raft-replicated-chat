@@ -151,7 +151,8 @@ public class RaftReplicationManager implements RaftElectionListener {
                     conflictTerm = log.getTermAt(request.getPrevLogIndex());
                     conflictIndex = log.firstIndexOfTerm(conflictTerm);
                 }
-                return new AppendEntriesResponseMessage(
+                notifyLeaderActivity = leaderActivityObserver != null;
+                response = new AppendEntriesResponseMessage(
                         raftNode.getCurrentTerm(),
                         false,
                         localNodeId,
@@ -159,19 +160,19 @@ public class RaftReplicationManager implements RaftElectionListener {
                         conflictTerm,
                         conflictIndex
                 );
+            } else {
+                commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
+
+                notifyLeaderActivity = leaderActivityObserver != null;
+                response = new AppendEntriesResponseMessage(
+                    raftNode.getCurrentTerm(),
+                    true,
+                    localNodeId,
+                    log.lastLogIndex(),
+                    -1L,
+                    0L
+                );
             }
-
-            commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
-
-            notifyLeaderActivity = leaderActivityObserver != null;
-            response = new AppendEntriesResponseMessage(
-                raftNode.getCurrentTerm(),
-                true,
-                localNodeId,
-                log.lastLogIndex(),
-                -1L,
-                0L
-            );
         }
 
         if (notifyLeaderActivity) {

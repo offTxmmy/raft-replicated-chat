@@ -273,7 +273,9 @@ class RaftReplicationManagerTest {
 
         assertFalse(response.isSuccess());
         assertEquals(1L, log.lastLogIndex());
-        assertEquals(0, observer.calls);
+        assertEquals(1, observer.calls);
+        assertEquals(1L, observer.lastTerm);
+        assertEquals(2, observer.lastLeaderId);
         assertEquals(1L, response.getConflictTerm());
         assertEquals(1L, response.getConflictIndex());
     }
