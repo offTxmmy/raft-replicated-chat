@@ -3,6 +3,7 @@ package it.polimi.ds.chat.client.messaging;
 import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
 
 import java.io.ObjectOutputStream;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Manages the heartbeat mechanism on the client side.
@@ -25,6 +26,9 @@ public class ClientHeartbeatManager implements Runnable {
 
     // contatore di heartbeat consecutivi non confermati
     private int consecutiveMissed = 0;
+
+    // Monotonic per-client sequence number used as heartbeat correlation id.
+    private final AtomicLong seqCounter = new AtomicLong(0);
 
 
     /**
@@ -76,7 +80,7 @@ public class ClientHeartbeatManager implements Runnable {
     public void run() {
         try {
             while (running) {
-                long ts = System.currentTimeMillis();
+                long ts = seqCounter.incrementAndGet();
 
                 HeartbeatMessage hb = new HeartbeatMessage(ts);
 

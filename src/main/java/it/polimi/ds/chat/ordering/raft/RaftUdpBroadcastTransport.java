@@ -28,6 +28,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -53,6 +54,9 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
 
     private final ConcurrentHashMap<String, Long> recentlySeenMessageIds = new ConcurrentHashMap<>();
 
+    // Monotonic per-transport sequence number used as envelope creation marker.
+    private final AtomicLong envelopeSeq = new AtomicLong(0);
+
     private DatagramSocket socket;
     private ExecutorService receiveExecutor;
 
@@ -63,7 +67,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
         this.raftConfig = Objects.requireNonNull(raftConfig, "raftConfig");
         if (!raftConfig.getVoters().containsKey(localNodeId)) {
             throw new IllegalArgumentException(
-                "Local node id " + localNodeId + " is not in the static voter set");
+                    "Local node id " + localNodeId + " is not in the static voter set");
         }
     }
 
@@ -105,7 +109,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
             socket = openSocket();
         } catch (SocketException e) {
             throw new RuntimeException("Failed to start Raft UDP transport on port "
-                + raftConfig.getRaftBroadcastPort(), e);
+                    + raftConfig.getRaftBroadcastPort(), e);
         }
 
         receiveExecutor = Executors.newSingleThreadExecutor(r -> {
@@ -296,7 +300,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
 
     private void purgeExpiredSeenMessages(long now) {
         recentlySeenMessageIds.entrySet().removeIf(
-            entry -> now - entry.getValue() > SEEN_MESSAGE_TTL_MS);
+                entry -> now - entry.getValue() > SEEN_MESSAGE_TTL_MS);
     }
 
     private void broadcastEnvelope(RaftUdpEnvelope envelope) {
@@ -345,7 +349,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
                 type,
                 term,
                 payload,
-                System.currentTimeMillis());
+                envelopeSeq.incrementAndGet());
     }
 
     private void sendEnvelopeToPeer(int peerId, RaftUdpEnvelope envelope) {
@@ -357,19 +361,19 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
         if (endpoint == null) {
             return;
         }
-        
+
         try {
             byte[] data = serialize(envelope);
             InetAddress address = InetAddress.getByName(endpoint.host());
             DatagramPacket packet = new DatagramPacket(
-                data,
-                data.length,
-                address,
-                raftConfig.getRaftBroadcastPort());
+                    data,
+                    data.length,
+                    address,
+                    raftConfig.getRaftBroadcastPort());
             socket.send(packet);
         } catch (IOException e) {
             System.err.println("[RaftUdpBroadcastTransport] failed to send UDP envelope to peer "
-                + peerId + ": " + e.getMessage());
+                    + peerId + ": " + e.getMessage());
         }
     }
 
@@ -390,7 +394,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
         byte[] data = bytes.toByteArray();
         if (data.length > raftConfig.getUdpMaxPayloadBytes()) {
             throw new IOException("Serialized Raft UDP envelope exceeds max payload: "
-                + data.length + " > " + raftConfig.getUdpMaxPayloadBytes());
+                    + data.length + " > " + raftConfig.getUdpMaxPayloadBytes());
         }
         return data;
     }
@@ -400,7 +404,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
             Object value = in.readObject();
             if (!(value instanceof RaftUdpEnvelope envelope)) {
                 throw new IOException("Unexpected UDP payload type: "
-                    + (value == null ? "null" : value.getClass().getName()));
+                        + (value == null ? "null" : value.getClass().getName()));
             }
             return envelope;
         }

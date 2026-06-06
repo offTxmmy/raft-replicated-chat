@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Broker node in the replicated chat infrastructure.
@@ -82,6 +83,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     // Latch to synchronize startup with ID assignment
     private final CountDownLatch brokerIdLatch = new CountDownLatch(1);
+
+    // Monotonic per-broker sequence number used as id for directory heartbeats.
+    private final transient AtomicLong directoryHeartbeatSeq = new AtomicLong(0);
 
     /**
      * Construct a broker with the given configuration.
@@ -339,8 +343,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
             sendAckToClient(message.getUsername(), message.getTimestamp());
         } else {
             System.err.println("[Broker " + brokerId + "] Proposal rejected for "
-                + message.getUsername()
-                + ". Known leader = " + orderingService.getLeaderId());
+                    + message.getUsername()
+                    + ". Known leader = " + orderingService.getLeaderId());
         }
     }
 
@@ -399,16 +403,16 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // =========================================================================
 
     /**
-        * Build or reuse a ChatReqMessage for the given client timestamp.
+     * Build or reuse a ChatReqMessage for the given client timestamp.
      *
-        * The first request for a stable client timestamp increments the broker send vector clock,
-        * creates a local message id, and stores the resulting proposal in a local cache.
-        * Retries with the same username and timestamp reusing the cached request so the
-        * vector clock is not incremented again.
+     * The first request for a stable client timestamp increments the broker send vector clock,
+     * creates a local message id, and stores the resulting proposal in a local cache.
+     * Retries with the same username and timestamp reusing the cached request so the
+     * vector clock is not incremented again.
      *
      * @param username sender username
      * @param text     message text
-        * @param clientTimestamp stable client retry timestamp
+     * @param clientTimestamp stable client retry timestamp
      * @return constructed ChatReqMessage ready for proposing to the ordering service
      */
     private synchronized ChatReqMessage buildChatReq(String username, String text, long clientTimestamp) {
@@ -466,7 +470,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
         Thread t = new Thread(() -> {
             while (true) {
                 try {
-                    HeartbeatMessage hb = new HeartbeatMessage(this.brokerId, System.currentTimeMillis());
+                    HeartbeatMessage hb = new HeartbeatMessage(this.brokerId, directoryHeartbeatSeq.incrementAndGet());
 
                     synchronized (directoryLock) {
                         directoryOut.writeObject(hb);

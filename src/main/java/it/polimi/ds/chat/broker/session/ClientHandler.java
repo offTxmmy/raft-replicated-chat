@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Handles a single client connection to the broker.
@@ -23,6 +24,9 @@ public class ClientHandler implements Runnable {
     private ObjectOutputStream out;
     private final Object outLock = new Object();
     private String username = "anonymous";
+
+    // Monotonic per-handler sequence number used as id for join/quit control messages.
+    private final AtomicLong seqCounter = new AtomicLong(0);
 
     /**
      * Constructs a ClientHandler for a given client socket and broker.
@@ -69,7 +73,7 @@ public class ClientHandler implements Runnable {
     @Override
     public void run() {
         try (
-            ObjectInputStream in = new ObjectInputStream(socket.getInputStream())
+                ObjectInputStream in = new ObjectInputStream(socket.getInputStream())
         ) {
             out = new ObjectOutputStream(socket.getOutputStream());
             Object obj;
@@ -131,10 +135,10 @@ public class ClientHandler implements Runnable {
         if (line == null) return null;
         if (ClientJoinMessage.isJoin(line)) {
             String parsed = ClientJoinMessage.parseJoin(line);
-            return new ClientJoinMessage(parsed, "", System.currentTimeMillis());
+            return new ClientJoinMessage(parsed, "", seqCounter.incrementAndGet());
         }
         if (ClientQuitMessage.isQuit(line)) {
-            return new ClientQuitMessage(currentUsername, "", System.currentTimeMillis());
+            return new ClientQuitMessage(currentUsername, "", seqCounter.incrementAndGet());
         }
         if (ClientMessage.isMsg(line)) {
             return ClientMessage.fromClientLine(currentUsername, line);

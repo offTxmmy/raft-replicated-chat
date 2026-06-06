@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.io.ObjectOutputStream;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Handles sending user messages to the server and retransmitting messages that have not yet been
@@ -20,6 +21,9 @@ public class ClientMessageSender implements Runnable {
 
     private final long ackTimeoutMs;
     private final Map<Long, ClientPendingMessage> pendingMessages = new ConcurrentHashMap<>();
+
+    // Monotonic per-client sequence number used as message id (replaces wall-clock timestamp).
+    private final AtomicLong seqCounter = new AtomicLong(0);
 
     private volatile boolean running = true;
 
@@ -53,7 +57,7 @@ public class ClientMessageSender implements Runnable {
      * @param text the message text to send
      */
     public void sendUserMessage(String text) {
-        long timestamp = System.currentTimeMillis();
+        long timestamp = seqCounter.incrementAndGet();
         String wireLine = buildMsgWire(timestamp, text);
 
         ClientPendingMessage pm = new ClientPendingMessage(timestamp, wireLine);

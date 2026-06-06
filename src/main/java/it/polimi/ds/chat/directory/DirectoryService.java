@@ -211,8 +211,10 @@ public class DirectoryService {
             while (true) {
                 Object obj = in.readObject();
                 if (obj instanceof HeartbeatMessage hb) {
-                    // update last heartbeat time
-                    lastHeartbeats.put(brokerId, hb.getTimestamp());
+                    // update last heartbeat time using the local receive clock; the
+                    // heartbeat payload now carries a monotonic sequence number
+                    // (not a wall-clock value), so we can't subtract it from `now`.
+                    lastHeartbeats.put(brokerId, System.currentTimeMillis());
                     // System.out.println("Heartbeat from broker " + brokerId);
                 } else if (obj instanceof ClientCountUpdateMessage cc) {
                     updateClientCount(cc);
