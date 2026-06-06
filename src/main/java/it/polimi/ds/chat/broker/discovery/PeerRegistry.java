@@ -7,10 +7,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
 /**
- * Registry that maintains the list of known broker peers.
- * Only updated via LAN discovery (no DirectoryService refresh).
- * Essential for Raft implementation where brokers need to communicate directly
- * for leader election and log replication.
+ * Registry that maintains the list of broker peers discovered on the LAN.
+ *
+ * <p>This registry is auxiliary discovery state. It is not the source of Raft
+ * membership or quorum decisions, which are defined by RaftConfig.
  */
 public class PeerRegistry {
     private final int localBrokerId;
@@ -94,15 +94,6 @@ public class PeerRegistry {
     }
 
     /**
-     * Calculates the quorum size (majority) for Raft consensus.
-     *
-     * @return quorum size
-     */
-    public int getQuorumSize() {
-        return (getClusterSize() / 2) + 1;
-    }
-
-    /**
      * Adds or updates a peer discovered via LAN broadcast.
      * If the peer list effectively changes, notifies listeners.
      *
@@ -143,7 +134,7 @@ public class PeerRegistry {
     }
 
     /**
-     * Returns a string representation of the PeerRegistry, including cluster size and quorum.
+     * Returns a string representation of the PeerRegistry, including discovered cluster size.
      *
      * @return string describing the PeerRegistry
      */
@@ -152,8 +143,7 @@ public class PeerRegistry {
         return "PeerRegistry{" +
                 "localBrokerId=" + localBrokerId +
                 ", peers=" + peers.values() +
-                ", clusterSize=" + getClusterSize() +
-                ", quorum=" + getQuorumSize() +
+                ", discoveredClusterSize=" + getClusterSize() +
                 '}';
     }
 }

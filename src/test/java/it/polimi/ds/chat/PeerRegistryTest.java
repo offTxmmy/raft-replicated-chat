@@ -45,22 +45,6 @@ public class PeerRegistryTest {
     }
 
     @Test
-    @DisplayName("PeerRegistry calculates quorum correctly")
-    void testQuorumCalculation() {
-        // Quorum formula: (N / 2) + 1
-        // 1 node: quorum = 1
-        // 2 nodes: quorum = 2
-        // 3 nodes: quorum = 2
-        // 4 nodes: quorum = 3
-        // 5 nodes: quorum = 3
-
-        PeerRegistry registry = new PeerRegistry( 1);
-
-        // With 0 nodes, quorum is 1 (0/2 + 1)
-        assertEquals(1, registry.getQuorumSize());
-    }
-
-    @Test
     @DisplayName("PeerInfo toString provides readable output")
     void testPeerInfoToString() {
         PeerInfo peer = new PeerInfo(1, "localhost", 5000);

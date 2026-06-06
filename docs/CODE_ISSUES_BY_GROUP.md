@@ -51,10 +51,11 @@ Le priorita sono:
     respinge la RPC per mismatch di log, mantenendo invariata la response di
     conflitto.
 
-- `PeerRegistry.getQuorumSize()` e API ingannevole.
+- [FATTO] `PeerRegistry.getQuorumSize()` e API ingannevole.
   - La membership Raft e statica e viene da `RaftConfig.getVoters()`.
   - Un quorum calcolato su discovery LAN non deve essere usato per Raft.
-  - Fix suggerito: rimuovere il metodo, rinominarlo, o documentarlo come non-Raft.
+  - Risolto: rimosso il metodo da `PeerRegistry`; il quorum Raft resta esposto
+    solo da `RaftConfig`.
 
 ### P2
 
