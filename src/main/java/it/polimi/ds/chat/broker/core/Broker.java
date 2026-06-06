@@ -20,6 +20,8 @@ import java.net.SocketException;
 import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -73,6 +75,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
+
+    // Cache of client proposals keyed by username + stable client timestamp.
+    // Retries must reuse the same ChatReqMessage so the vector clock advances once.
+    private final Map<String, ChatReqMessage> cachedClientRequests = new ConcurrentHashMap<>();
 
     // Latch to synchronize startup with ID assignment
     private final CountDownLatch brokerIdLatch = new CountDownLatch(1);
@@ -393,18 +399,29 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // =========================================================================
 
     /**
-     * Build a ChatReqMessage including an updated vector clock and a unique local message id.
+        * Build or reuse a ChatReqMessage for the given client timestamp.
      *
-     * This method increments the local vector clock for this broker and generates a localMsgId.
+        * The first request for a stable client timestamp increments the broker send vector clock,
+        * creates a local message id, and stores the resulting proposal in a local cache.
+        * Retries with the same username and timestamp reusing the cached request so the
+        * vector clock is not incremented again.
      *
      * @param username sender username
      * @param text     message text
+        * @param clientTimestamp stable client retry timestamp
      * @return constructed ChatReqMessage ready for proposing to the ordering service
      */
     private synchronized ChatReqMessage buildChatReq(String username, String text, long clientTimestamp) {
-        vectorClock.increment(brokerId);
-        String localMsgId = brokerId + "-" + (++localMsgCounter);
-        return new ChatReqMessage(localMsgId, brokerId, username, text, new VectorClock(vectorClock), clientTimestamp);
+        String proposalKey = clientProposalKey(username, clientTimestamp);
+        return cachedClientRequests.computeIfAbsent(proposalKey, key -> {
+            vectorClock.increment(brokerId);
+            String localMsgId = brokerId + "-" + (++localMsgCounter);
+            return new ChatReqMessage(localMsgId, brokerId, username, text, new VectorClock(vectorClock), clientTimestamp);
+        });
+    }
+
+    private static String clientProposalKey(String username, long clientTimestamp) {
+        return username + ":" + clientTimestamp;
     }
 
     /**
