@@ -220,8 +220,13 @@ public class HoldBackQueueTest {
     }
 
     @Test
-    @DisplayName("Queue blocks when Raft order violates local vector-clock order")
-    void queueBlocksWhenRaftOrderViolatesLocalVectorClockOrder() {
+    @DisplayName("Same-broker messages reordered by Raft are delivered in Raft order")
+    void sameBrokerMessagesReorderedByRaftAreDeliveredInRaftOrder() {
+        // Two messages produced by the same broker get reordered by Raft:
+        // the message with the higher propose-time vector-clock arrives first
+        // in the committed log. The queue must still deliver both in Raft
+        // (sequence) order — Raft total order is authoritative for same-sender
+        // events, and propose-time vector-clock components must not block.
         HoldBackQueue queue = new HoldBackQueue();
 
         VectorClock vc2 = new VectorClock();
@@ -237,11 +242,16 @@ public class HoldBackQueueTest {
         ChatDeliverMessage firstMessageSecondInRaft =
                 new ChatDeliverMessage(2, 1, "bob", "first", vc1);
 
-        assertTrue(queue.enqueue(secondMessageFirstInRaft).isEmpty());
-        assertTrue(queue.enqueue(firstMessageSecondInRaft).isEmpty());
+        List<ChatDeliverMessage> firstBatch = queue.enqueue(secondMessageFirstInRaft);
+        assertEquals(1, firstBatch.size());
+        assertEquals("second", firstBatch.get(0).getText());
 
-        assertEquals(1, queue.getExpectedSeq());
-        assertTrue(queue.hasPendingMessages());
+        List<ChatDeliverMessage> secondBatch = queue.enqueue(firstMessageSecondInRaft);
+        assertEquals(1, secondBatch.size());
+        assertEquals("first", secondBatch.get(0).getText());
+
+        assertEquals(3, queue.getExpectedSeq());
+        assertFalse(queue.hasPendingMessages());
     }
 
     // =========================================================================
@@ -259,4 +269,3 @@ public class HoldBackQueueTest {
         return vc;
     }
 }
-

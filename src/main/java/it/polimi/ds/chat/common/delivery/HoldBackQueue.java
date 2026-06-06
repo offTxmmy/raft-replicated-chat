@@ -91,7 +91,7 @@ public class HoldBackQueue {
                 break;
             }
 
-            // Check causal order: all dependencies must have been delivered
+            // Check causal order: all cross-broker dependencies must have been delivered
             if (!canDeliverCausally(head)) {
                 // Causal dependency not yet satisfied - must wait
                 // Note: This should not happen when Raft applies committed entries in order,
@@ -116,11 +116,16 @@ public class HoldBackQueue {
     /**
      * Check if a message's causal dependencies are satisfied.
      *
-     * A message M from sender S can be delivered if:
-     * <ul>
-     *   <li>For all brokers K != S: messageClock[K] <= deliveredClock[K]</li>
-     *   <li>For sender S: messageClock[S] == deliveredClock[S] + 1</li>
-     * </ul>
+     * <p>A message M from sender S can be delivered when, for every broker
+     * K != S referenced in M's vector clock,
+     * {@code messageClock[K] <= deliveredClock[K]}.
+     *
+     * <p>The sender's own component is intentionally not checked: Raft total
+     * order is authoritative for ordering events from the same broker.
+     * Propose-time vector-clock increments can disagree with the committed
+     * Raft log order (two concurrent proposals from the same broker may be
+     * reordered by Raft), so enforcing strict per-sender FIFO here would
+     * permanently block such cases without adding any real safety.
      *
      * @param message the message to check
      * @return true if causal dependencies are satisfied, false otherwise
@@ -134,13 +139,13 @@ public class HoldBackQueue {
 
         int senderId = message.getBrokerId();
 
-        // Check dependencies from other brokers
+        // Check dependencies from other brokers; the sender's own component is
+        // ignored on purpose (see javadoc).
         for (Map.Entry<Integer, Integer> entry : messageClock.getClock().entrySet()) {
             int brokerId = entry.getKey();
             int msgTimestamp = entry.getValue();
 
             if (brokerId == senderId) {
-                // Check sender's component separately
                 continue;
             }
 
@@ -151,11 +156,7 @@ public class HoldBackQueue {
             }
         }
 
-        // Check sender's component: must be exactly the next message from sender
-        int deliveredSenderTs = deliveredClock.getTimeStamp(senderId);
-        int msgSenderTs = messageClock.getTimeStamp(senderId);
-
-        return msgSenderTs == deliveredSenderTs + 1;
+        return true;
     }
 
     /**
@@ -214,7 +215,7 @@ public class HoldBackQueue {
     @Override
     public synchronized String toString() {
         return "HoldBackQueue{expectedSeq=" + expectedSeq +
-               ", pending=" + pendingMessages.size() +
-               ", deliveredClock=" + deliveredClock + "}";
+                ", pending=" + pendingMessages.size() +
+                ", deliveredClock=" + deliveredClock + "}";
     }
 }
