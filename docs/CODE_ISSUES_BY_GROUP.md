@@ -151,13 +151,13 @@ Le priorita sono:
   - Anche gli ACK usano `(clientId, clientSeq)` e vengono inviati dal
     `ClientHandler` sulla stessa connessione che ha inviato il messaggio.
 
-- Username usato come identita tecnica.
+- [FATTO] Username usato come identita tecnica.
   - ACK e deduplica non usano piu il nome utente: usano `(clientId, clientSeq)`.
-  - Resta pero il filtro del mittente in delivery basato su username.
-  - Due client con lo stesso username possono ancora non vedere messaggi come
-    atteso a causa del filtro di consegna.
-  - Fix residuo suggerito: usare un id di connessione/client anche per distinguere
-    il mittente nella delivery locale, oppure consegnare anche al mittente.
+  - Il client invia il `clientId` anche nel JOIN e il `ClientHandler` lo associa
+    alla connessione.
+  - `ChatDeliverMessage` trasporta il `clientId` del mittente.
+  - `Broker.onChatDeliver` esclude solo la connessione con lo stesso `clientId`,
+    quindi due client con lo stesso username restano distinguibili.
 
 - Scritture concorrenti sullo stesso `ObjectOutputStream` lato client.
   - Sender, retry, heartbeat, JOIN e QUIT possono scrivere sullo stesso stream
@@ -256,12 +256,11 @@ Le priorita sono:
   - Fix suggerito: aggiornare il clock per ogni messaggio rilasciato dalla
     hold-back queue prima dell'I/O verso i client.
 
-- Il mittente non riceve il proprio messaggio committato.
-  - `Broker.onChatDeliver` esclude i client con username uguale al sender.
-  - Questo indebolisce la proprieta "tutti i client connessi vedono lo stesso
-    ordine".
-  - Fix suggerito: consegnare anche al mittente e lasciare al client distinguere
-    i propri messaggi.
+- [FATTO] Esclusione del mittente basata su username.
+  - La scelta applicativa resta: il mittente non riceve l'echo del proprio
+    messaggio committato.
+  - Il filtro pero non usa piu lo username: usa il `clientId` tecnico del
+    mittente, evitando collisioni tra utenti con lo stesso nome visualizzato.
 
 ### P2
 
@@ -280,5 +279,6 @@ Le priorita sono:
 1. [FATTO] Sistemare il deadlock tra election e replication.
 2. [FATTO] Correggere il `matchIndex` restituito dal follower in `AppendEntries`.
 3. [FATTO] Introdurre `(clientId, clientSeq)` per deduplica e ACK.
-4. Usare un writer unico o un lock comune per `ObjectOutputStream` lato client.
-5. [FATTO] Ricostruire la deduplica Raft dal log al restart.
+4. [FATTO] Usare `clientId` anche per distinguere il mittente nella delivery.
+5. Usare un writer unico o un lock comune per `ObjectOutputStream` lato client.
+6. [FATTO] Ricostruire la deduplica Raft dal log al restart.

@@ -33,6 +33,7 @@ public final class RaftStateMachineAdapter implements Consumer<RaftLogEntry> {
                 entry.getIndex(),
                 cmd.getBrokerId(),
                 cmd.getUsername(),
+                cmd.getClientId(),
                 cmd.getText(),
                 cmd.getVectorClock()
         );

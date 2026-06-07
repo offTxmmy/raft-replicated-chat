@@ -2,6 +2,7 @@ package it.polimi.ds.chat;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.broker.core.Broker;
+import it.polimi.ds.chat.broker.session.ClientHandler;
 import it.polimi.ds.chat.common.clock.VectorClock;
 import it.polimi.ds.chat.ordering.api.OrderingService;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
@@ -9,6 +10,8 @@ import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.client.ClientMessage;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Field;
+import java.net.Socket;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Consumer;
@@ -66,7 +69,38 @@ public class BrokerRetryVectorClockTest {
         }
 
         @Override
-        public void onChatDeliver(long seq, String sender, String text) {
+        public void onChatDeliver(long seq, String sender, String senderClientId, String text) {
+            deliveredMessages.add(seq + ":" + sender + ":" + text);
+        }
+
+        List<String> deliveredMessages() {
+            return deliveredMessages;
+        }
+    }
+
+    private static final class RecordingClientHandler extends ClientHandler {
+        private final String username;
+        private final String clientId;
+        private final List<String> deliveredMessages = new ArrayList<>();
+
+        RecordingClientHandler(Broker broker, String username, String clientId) {
+            super(new Socket(), broker);
+            this.username = username;
+            this.clientId = clientId;
+        }
+
+        @Override
+        public String getUsername() {
+            return username;
+        }
+
+        @Override
+        public String getClientId() {
+            return clientId;
+        }
+
+        @Override
+        public void sendMessageToClient(long seq, String sender, String text) {
             deliveredMessages.add(seq + ":" + sender + ":" + text);
         }
 
@@ -113,6 +147,21 @@ public class BrokerRetryVectorClockTest {
     }
 
     @Test
+    public void sameUsernameDifferentClientIdStillReceivesOtherClientMessages() throws Exception {
+        TestBroker broker = new TestBroker(TestConfigs.raftBrokerConfig(1, 5000));
+        RecordingClientHandler clientA = new RecordingClientHandler(broker, "alice", "client-a");
+        RecordingClientHandler clientB = new RecordingClientHandler(broker, "alice", "client-b");
+
+        connectedClients(broker).add(clientA);
+        connectedClients(broker).add(clientB);
+
+        broker.onChatDeliver(1L, "alice", "client-a", "hello from A");
+
+        assertEquals(List.of(), clientA.deliveredMessages());
+        assertEquals(List.of("1:alice:hello from A"), clientB.deliveredMessages());
+    }
+
+    @Test
     public void differentMessagesFromSameBrokerShouldNotBlockWhenRaftOrdersThemDifferently() {
         RecordingBroker broker = new RecordingBroker(TestConfigs.raftBrokerConfig(1, 5000));
         CapturingOrderingService orderingService = new CapturingOrderingService();
@@ -141,7 +190,15 @@ public class BrokerRetryVectorClockTest {
                 seq,
                 request.getBrokerId(),
                 request.getUsername(),
+                request.getClientId(),
                 request.getText(),
                 new VectorClock(request.getVectorClock()));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<ClientHandler> connectedClients(Broker broker) throws Exception {
+        Field field = Broker.class.getDeclaredField("clients");
+        field.setAccessible(true);
+        return (List<ClientHandler>) field.get(broker);
     }
 }

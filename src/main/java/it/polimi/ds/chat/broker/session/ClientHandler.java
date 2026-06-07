@@ -25,6 +25,7 @@ public class ClientHandler implements Runnable {
     private ObjectOutputStream out;
     private final Object outLock = new Object();
     private String username = "anonymous";
+    private String clientId;
 
     // Monotonic per-handler sequence number used as id for join/quit control messages.
     private final AtomicLong seqCounter = new AtomicLong(0);
@@ -47,6 +48,10 @@ public class ClientHandler implements Runnable {
      */
     public String getUsername() {
         return username;
+    }
+
+    public String getClientId() {
+        return clientId;
     }
 
     /**
@@ -102,6 +107,7 @@ public class ClientHandler implements Runnable {
             Object msg = parseLineToMessage(line, username);
             if (msg instanceof ClientJoinMessage) {
                 username = ClientJoinMessage.parseJoin(line);
+                clientId = ClientJoinMessage.parseClientId(line);
                 sendLine(ClientJoinMessage.welcome(username));
                 broker.notifyJoin(username);
             } else if (msg instanceof ClientQuitMessage) {
@@ -110,6 +116,9 @@ public class ClientHandler implements Runnable {
                 } catch (IOException ignored) {}
             } else if (msg instanceof ClientMessage) {
                 ClientMessage clientMessage = (ClientMessage) msg;
+                if (clientId == null) {
+                    clientId = clientMessage.getClientId();
+                }
                 if (broker.onClientMessage(clientMessage)) {
                     sendLine(ClientAckMessages.buildAck(
                             clientMessage.getClientId(),
@@ -141,7 +150,8 @@ public class ClientHandler implements Runnable {
         if (line == null) return null;
         if (ClientJoinMessage.isJoin(line)) {
             String parsed = ClientJoinMessage.parseJoin(line);
-            return new ClientJoinMessage(parsed, "", seqCounter.incrementAndGet());
+            String parsedClientId = ClientJoinMessage.parseClientId(line);
+            return new ClientJoinMessage(parsed, parsedClientId, "", seqCounter.incrementAndGet());
         }
         if (ClientQuitMessage.isQuit(line)) {
             return new ClientQuitMessage(currentUsername, "", seqCounter.incrementAndGet());

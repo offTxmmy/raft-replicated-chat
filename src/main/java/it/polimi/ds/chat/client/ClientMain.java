@@ -68,7 +68,7 @@ public class ClientMain {
 
             ObjectOutputStream out = connection.getObjectOutputStream();
             System.out.println("[MAIN] Invio JOIN per utente '" + username + "' al broker iniziale...");
-            out.writeObject(ClientJoinMessage.joinCommand(username));
+            out.writeObject(ClientJoinMessage.joinCommand(username, clientId));
             out.flush();
             System.out.println("[MAIN] JOIN inviato.");
 
@@ -159,7 +159,7 @@ public class ClientMain {
                 ObjectOutputStream newOut = connection.getObjectOutputStream();
 
                 System.err.println("[HB] Invio nuovamente JOIN per utente '" + username + "' al nuovo broker...");
-                newOut.writeObject(ClientJoinMessage.joinCommand(username));
+                newOut.writeObject(ClientJoinMessage.joinCommand(username, clientId));
                 newOut.flush();
                 System.err.println("[HB] JOIN verso nuovo broker inviato.");
 

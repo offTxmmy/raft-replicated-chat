@@ -313,9 +313,18 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param text   message text
      */
     public void onChatDeliver(long seq, String sender, String text) {
+        onChatDeliver(seq, sender, null, text);
+    }
+
+    /**
+     * Deliver a message to all locally connected clients except the originating client.
+     *
+     * The client id is used as technical identity; username is only a display name.
+     */
+    public void onChatDeliver(long seq, String sender, String senderClientId, String text) {
         synchronized (clients) {
             for (ClientHandler handler : clients) {
-                if (!handler.getUsername().equals(sender)) {  // Don't send the message to the sender
+                if (senderClientId == null || !senderClientId.equals(handler.getClientId())) {
                     handler.sendMessageToClient(seq, sender, text);
                 }
             }
@@ -374,7 +383,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
         // Deliver all ready messages to local clients
         for (ChatDeliverMessage msg : readyMessages) {
-            onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getText());
+            onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getClientId(), msg.getText());
         }
 
         synchronized(this) {

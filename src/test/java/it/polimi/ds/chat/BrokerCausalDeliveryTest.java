@@ -28,7 +28,7 @@ public class BrokerCausalDeliveryTest {
         }
 
         @Override
-        public void onChatDeliver(long seq, String sender, String text) {
+        public void onChatDeliver(long seq, String sender, String senderClientId, String text) {
             delivered.add(seq + ":" + sender + ":" + text);
         }
 
