@@ -7,7 +7,7 @@ import java.util.List;
 
 /**
  * Durable storage hook for Raft state that must survive a crash:
- * {@code currentTerm}, {@code votedFor}, and the replicated log.
+ * {@code currentTerm}, {@code votedFor}, the replicated log, and commit progress.
  *
  * <p>Raft safety requires that a vote, once granted, is never forgotten in the
  * same term. Without durable {@code votedFor}, a node could vote for candidate X,
@@ -20,11 +20,15 @@ import java.util.List;
  * (typically {@link RaftNode}) invokes the term/vote hook before any side effect
  * that exposes the new state to the outside world (e.g. before returning a vote
  * response or sending an RPC that reflects the new term).
+
+ * <p>Persisting {@code commitIndex}/{@code lastApplied} is not a Raft election
+ * requirement, but it provides deterministic restart behavior for the local
+ * state machine: after a crash, the node can resume from the last applied
+ * position instead of replaying from index 1.
  *
- * <p>Log methods are default no-op so that test doubles only interested in the
- * term/vote hook do not need to implement them.
+ * <p>Log and commit-progress methods are default no-op so that test doubles only
+ * interested in election state do not need to implement them.
  *
- * <p>Person C owns the production implementation ({@link FileRaftPersistence}).
  * Tests use an in-memory fake.
  */
 public interface RaftPersistence {
@@ -71,10 +75,44 @@ public interface RaftPersistence {
     }
 
     /**
+     * Persists the current commit progress of the state machine.
+        *
+        * <p>Implementations should persist atomically and synchronously, so that
+        * on restart the node can reconstruct a consistent applied prefix.
+     *
+     * @param commitIndex highest committed log index known by the node
+     * @param lastApplied highest log index already applied to the state machine
+     */
+    default void persistCommitProgress(long commitIndex, long lastApplied) {
+        // default no-op for test doubles that do not exercise restart recovery
+    }
+
+    /**
+     * Loads the persisted commit progress, or {@link CommitProgress#EMPTY} if
+     * no progress has been recorded yet.
+     *
+     * <p>The loaded values are expected to satisfy:
+     * {@code 0 <= lastApplied <= commitIndex}.
+     */
+    default CommitProgress loadCommitProgress() {
+        return CommitProgress.EMPTY;
+    }
+
+    /**
      * Snapshot of the durable (currentTerm, votedFor) pair.
      */
     record PersistedState(long currentTerm, Integer votedFor) {
         public static final PersistedState EMPTY = new PersistedState(0L, null);
+    }
+
+    /**
+     * Snapshot of the persisted commit progress.
+     *
+     * @param commitIndex highest known committed index
+     * @param lastApplied highest index already applied to the local state machine
+     */
+    record CommitProgress(long commitIndex, long lastApplied) {
+        public static final CommitProgress EMPTY = new CommitProgress(0L, 0L);
     }
 
     /**

@@ -102,12 +102,13 @@ Le priorita sono:
   - Risolto: quando il nodo locale diventa leader, viene appesa una no-op entry
     nel nuovo term.
 
-- `commitIndex` / `lastApplied` non persistiti o non ricostruiti in modo esplicito.
-  - Al restart il servizio ricarica il log, ma il commit manager riparte da
-    `commitIndex = 0` e `lastApplied = 0`.
-  - Rischio: replay indesiderato o difficolta a distinguere history tecnica da
-    delivery applicativa.
-  - Importante soprattutto se si fa demo con restart del broker.
+- [FATTO] `commitIndex` / `lastApplied` persistiti e ripristinati esplicitamente.
+  - Al restart il servizio ricarica il log e ripristina anche il progresso di
+    commit da `commit.bin`.
+  - `RaftCommitManager` riparte dallo stato persistito e completa solo gli entry
+    ancora non applicati.
+  - Il progresso viene aggiornato in modo incrementale durante l'applicazione
+    delle entry committate, cosi il restart non ricomincia piu da zero.
 
 - [FATTO] `RaftLog.append` non atomico tra persistenza e `entries.add`.
   - L'entry viene scritta su disco prima di essere aggiunta alla lista in memoria.

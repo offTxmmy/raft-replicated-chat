@@ -76,6 +76,27 @@ class RaftCommitManagerTest {
         assertEquals(3L, commitManager.getLastApplied());
     }
 
+    @Test
+    void restoredCommitProgressShouldResumeFromPersistedState() {
+        RaftLog log = new RaftLog();
+        log.append(1L, command("a"));
+        log.append(1L, command("b"));
+        log.append(2L, command("c"));
+
+        List<Long> applied = new ArrayList<>();
+        RaftCommitManager commitManager = new RaftCommitManager(
+                log,
+                entry -> applied.add(entry.getIndex()),
+                3L,
+                1L,
+                (commitIndex, lastApplied) -> { }
+        );
+
+        assertEquals(List.of(2L, 3L), applied);
+        assertEquals(3L, commitManager.getCommitIndex());
+        assertEquals(3L, commitManager.getLastApplied());
+    }
+
     private ChatCommand command(String localMsgId) {
         return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
     }
