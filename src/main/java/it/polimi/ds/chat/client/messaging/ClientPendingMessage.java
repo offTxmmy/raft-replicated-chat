@@ -2,33 +2,40 @@ package it.polimi.ds.chat.client.messaging;
 
 /**
  * Represents a message sent by the client that is pending acknowledgment (ACK) from the server.
- * Stores the message timestamp, the wire format line, and the last time it was sent.
+ * Stores the client sequence, the wire format line, and the last time it was sent.
  */
 public class ClientPendingMessage {
 
-    private final long timestamp;
+    private final long clientSeq;
     private final String wireLine;   // stringa così come viene mandata su socket
     private volatile long lastSendTime;
 
     /**
-     * Constructs a ClientPendingMessage with the given timestamp and wire line.
+     * Constructs a ClientPendingMessage with the given client sequence and wire line.
      *
-     * @param timestamp the timestamp of the message
+     * @param clientSeq the sequence of the message for this client process
      * @param wireLine the message in wire format as sent on the socket
      */
-    public ClientPendingMessage(long timestamp, String wireLine) {
-        this.timestamp = timestamp;
+    public ClientPendingMessage(long clientSeq, String wireLine) {
+        this.clientSeq = clientSeq;
         this.wireLine = wireLine;
         this.lastSendTime = System.currentTimeMillis();
     }
 
     /**
-     * Returns the timestamp of the message.
+     * Returns the client sequence of the message.
      *
-     * @return the message timestamp
+     * @return the message client sequence
+     */
+    public long getClientSeq() {
+        return clientSeq;
+    }
+
+    /**
+     * Legacy name kept for older call sites.
      */
     public long getTimestamp() {
-        return timestamp;
+        return clientSeq;
     }
 
     /**

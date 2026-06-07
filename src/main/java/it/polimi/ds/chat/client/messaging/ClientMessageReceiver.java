@@ -15,7 +15,7 @@ public class ClientMessageReceiver implements Runnable {
 
     private final ObjectInputStream in;
     private final ClientMessageSender sender;
-    private final String username;
+    private final String clientId;
     private final ClientHeartbeatManager heartbeatManager;
 
     private volatile boolean running = true;
@@ -25,16 +25,16 @@ public class ClientMessageReceiver implements Runnable {
      *
      * @param in               the ObjectInputStream to receive messages from the broker
      * @param sender           the ClientMessageSender to handle ACKs
-     * @param username         the username of the client
+     * @param clientId         the stable id of this client process
      * @param heartbeatManager the heartbeat manager to notify on heartbeat ACKs
      */
     public ClientMessageReceiver(ObjectInputStream in,
                                  ClientMessageSender sender,
-                                 String username,
+                                 String clientId,
                                  ClientHeartbeatManager heartbeatManager) {
         this.in = in;
         this.sender = sender;
-        this.username = username;
+        this.clientId = clientId;
         this.heartbeatManager = heartbeatManager;
     }
 
@@ -80,11 +80,11 @@ public class ClientMessageReceiver implements Runnable {
                     String line = (String) obj;
                     if (ClientAckMessages.isAck(line)) {
                         try {
-                            long ts = ClientAckMessages.parseTimestamp(line);
-                            String ackUser = ClientAckMessages.parseUsername(line);
+                            String ackClientId = ClientAckMessages.parseClientId(line);
+                            long clientSeq = ClientAckMessages.parseClientSeq(line);
 
-                            if (username.equals(ackUser)) {
-                                sender.handleAck(ts);
+                            if (clientId.equals(ackClientId)) {
+                                sender.handleAck(ackClientId, clientSeq);
                             }
                         } catch (Exception e) {
                             System.err.println("Errore parsing ACK: " + e.getMessage());

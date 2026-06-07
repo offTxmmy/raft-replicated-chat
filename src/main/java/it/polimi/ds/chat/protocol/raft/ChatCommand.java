@@ -14,8 +14,8 @@ import java.io.Serializable;
  * - brokerId/username/text/vectorClock as the message content
  *
  * localMsgId is preserved for tracing. Client-originated commands also carry
- * the original MSG timestamp so the leader can de-duplicate retries by
- * (username, timestamp).
+ * the stable client identity so the leader can de-duplicate retries by
+ * (clientId, clientSeq).
  */
 public class ChatCommand implements Serializable {
     private static final long serialVersionUID = 1L;
@@ -23,29 +23,36 @@ public class ChatCommand implements Serializable {
     private final String localMsgId;
     private final int brokerId;
     private final String username;
+    private final String clientId;
+    private final long clientSeq;
     private final String text;
     private final VectorClock vectorClock;
-    private final long clientTimestamp;
-    private final boolean hasClientTimestamp;
+    private final boolean hasClientIdentity;
 
     public ChatCommand(String localMsgId, int brokerId, String username, String text, VectorClock vectorClock) {
-        this(localMsgId, brokerId, username, text, vectorClock, 0L, false);
+        this(localMsgId, brokerId, username, null, 0L, text, vectorClock, false);
     }
 
     public ChatCommand(String localMsgId, int brokerId, String username, String text,
-                       VectorClock vectorClock, long clientTimestamp) {
-        this(localMsgId, brokerId, username, text, vectorClock, clientTimestamp, true);
+                       VectorClock vectorClock, long clientSeq) {
+        this(localMsgId, brokerId, username, username, clientSeq, text, vectorClock, true);
     }
 
-    private ChatCommand(String localMsgId, int brokerId, String username, String text,
-                        VectorClock vectorClock, long clientTimestamp, boolean hasClientTimestamp) {
+    public ChatCommand(String localMsgId, int brokerId, String username, String text,
+                       VectorClock vectorClock, String clientId, long clientSeq) {
+        this(localMsgId, brokerId, username, clientId, clientSeq, text, vectorClock, true);
+    }
+
+    private ChatCommand(String localMsgId, int brokerId, String username, String clientId,
+                        long clientSeq, String text, VectorClock vectorClock, boolean hasClientIdentity) {
         this.localMsgId = localMsgId;
         this.brokerId = brokerId;
         this.username = username;
+        this.clientId = clientId;
+        this.clientSeq = clientSeq;
         this.text = text;
         this.vectorClock = vectorClock;
-        this.clientTimestamp = clientTimestamp;
-        this.hasClientTimestamp = hasClientTimestamp;
+        this.hasClientIdentity = hasClientIdentity;
     }
 
     public String getLocalMsgId() {
@@ -60,6 +67,14 @@ public class ChatCommand implements Serializable {
         return username;
     }
 
+    public String getClientId() {
+        return clientId;
+    }
+
+    public long getClientSeq() {
+        return clientSeq;
+    }
+
     public String getText() {
         return text;
     }
@@ -69,10 +84,14 @@ public class ChatCommand implements Serializable {
     }
 
     public long getClientTimestamp() {
-        return clientTimestamp;
+        return clientSeq;
     }
 
     public boolean hasClientTimestamp() {
-        return hasClientTimestamp;
+        return hasClientIdentity;
+    }
+
+    public boolean hasClientIdentity() {
+        return hasClientIdentity;
     }
 }

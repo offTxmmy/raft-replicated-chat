@@ -77,7 +77,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
 
-    // Cache of client proposals keyed by username + stable client timestamp.
+    // Cache of client proposals keyed by stable client id + client sequence.
     // Retries must reuse the same ChatReqMessage so the vector clock advances once.
     private final Map<String, ChatReqMessage> cachedClientRequests = new ConcurrentHashMap<>();
 
@@ -330,22 +330,24 @@ public class Broker implements Serializable, OrderingServiceCallback {
      *
      * @param message raw client message received by this broker
      */
-    public void onClientMessage(ClientMessage message) {
+    public boolean onClientMessage(ClientMessage message) {
         // In Raft mode followers proxy the proposal to the known leader, so
         // clients can stay connected to the broker selected by DirectoryService.
-        ChatReqMessage chatReq = buildChatReq(message.getUsername(), message.getText(), message.getTimestamp());
+        ChatReqMessage chatReq = buildChatReq(
+                message.getUsername(),
+                message.getClientId(),
+                message.getClientSeq(),
+                message.getText());
 
         // Propose to ordering service.
         boolean accepted = orderingService.propose(chatReq);
 
-        // ACK only if the ordering service accepted and committed the proposal.
-        if (accepted) {
-            sendAckToClient(message.getUsername(), message.getTimestamp());
-        } else {
+        if (!accepted) {
             System.err.println("[Broker " + brokerId + "] Proposal rejected for "
                     + message.getUsername()
                     + ". Known leader = " + orderingService.getLeaderId());
         }
+        return accepted;
     }
 
     /**
@@ -403,29 +405,37 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // =========================================================================
 
     /**
-     * Build or reuse a ChatReqMessage for the given client timestamp.
+     * Build or reuse a ChatReqMessage for the given stable client message id.
      *
-     * The first request for a stable client timestamp increments the broker send vector clock,
+     * The first request for a stable client id/sequence increments the broker send vector clock,
      * creates a local message id, and stores the resulting proposal in a local cache.
-     * Retries with the same username and timestamp reusing the cached request so the
+     * Retries with the same client id and sequence reuse the cached request so the
      * vector clock is not incremented again.
      *
      * @param username sender username
+     * @param clientId stable client process id
+     * @param clientSeq stable per-client message sequence
      * @param text     message text
-     * @param clientTimestamp stable client retry timestamp
      * @return constructed ChatReqMessage ready for proposing to the ordering service
      */
-    private synchronized ChatReqMessage buildChatReq(String username, String text, long clientTimestamp) {
-        String proposalKey = clientProposalKey(username, clientTimestamp);
+    private synchronized ChatReqMessage buildChatReq(String username, String clientId, long clientSeq, String text) {
+        String proposalKey = clientProposalKey(clientId, clientSeq);
         return cachedClientRequests.computeIfAbsent(proposalKey, key -> {
             vectorClock.increment(brokerId);
             String localMsgId = brokerId + "-" + (++localMsgCounter);
-            return new ChatReqMessage(localMsgId, brokerId, username, text, new VectorClock(vectorClock), clientTimestamp);
+            return new ChatReqMessage(
+                    localMsgId,
+                    brokerId,
+                    username,
+                    text,
+                    new VectorClock(vectorClock),
+                    clientId,
+                    clientSeq);
         });
     }
 
-    private static String clientProposalKey(String username, long clientTimestamp) {
-        return username + ":" + clientTimestamp;
+    private static String clientProposalKey(String clientId, long clientSeq) {
+        return clientId + ":" + clientSeq;
     }
 
     /**
@@ -551,23 +561,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
             }
         }
         System.out.println("[Broker " + brokerId + "] Peer discovery started (LAN broadcast only)");
-    }
-
-    /**
-     * Send an ACK line to a specific connected client (by username).
-     *
-     * @param username  recipient username
-     * @param timestamp original client message timestamp to include in the ACK
-     */
-    private void sendAckToClient(String username, long timestamp) {
-        synchronized (clients) {
-            for (ClientHandler handler : clients) {
-                if (username.equals(handler.getUsername())) {
-                    handler.sendLine(ClientAckMessages.buildAck(timestamp, username));
-                    break;
-                }
-            }
-        }
     }
 
 }

@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -63,6 +64,7 @@ public class ClientMain {
 
             System.out.print("Enter username: ");
             String username = stdin.nextLine();
+            String clientId = UUID.randomUUID().toString();
 
             ObjectOutputStream out = connection.getObjectOutputStream();
             System.out.println("[MAIN] Invio JOIN per utente '" + username + "' al broker iniziale...");
@@ -70,9 +72,12 @@ public class ClientMain {
             out.flush();
             System.out.println("[MAIN] JOIN inviato.");
 
-            ClientMessageSender sender = new ClientMessageSender(connection.getObjectOutputStream(), ACK_TIMEOUT_MS);
+            ClientMessageSender sender = new ClientMessageSender(
+                    connection.getObjectOutputStream(),
+                    ACK_TIMEOUT_MS,
+                    clientId);
 
-            startReceiverAndHeartbeat(ctx, connection, sender, username);
+            startReceiverAndHeartbeat(ctx, connection, sender, username, clientId);
 
             Thread senderThread = new Thread(sender, "MessageSender");
             senderThread.setDaemon(true);
@@ -126,7 +131,8 @@ public class ClientMain {
     private static void startReceiverAndHeartbeat(ClientRuntimeContext ctx,
                                                   ClientConnection connection,
                                                   ClientMessageSender sender,
-                                                  String username) {
+                                                  String username,
+                                                  String clientId) {
         System.out.println("[MAIN] startReceiverAndHeartbeat() - broker corrente: " +
                 connection.getHost() + ":" + connection.getPort());
 
@@ -161,7 +167,7 @@ public class ClientMain {
                 sender.updateOutputStream(newOut);
 
                 System.err.println("[HB] Avvio nuovo receiver + heartbeat per il nuovo broker...");
-                startReceiverAndHeartbeat(ctx, connection, sender, username);
+                startReceiverAndHeartbeat(ctx, connection, sender, username, clientId);
                 ctx.reconnecting.set(false);
 
             } catch (IOException e) {
@@ -175,7 +181,7 @@ public class ClientMain {
                 new ClientHeartbeatManager(out, failureHandler);
 
         ClientMessageReceiver receiver =
-                new ClientMessageReceiver(in, sender, username, heartbeatManager);
+                new ClientMessageReceiver(in, sender, clientId, heartbeatManager);
 
         ctx.receiver = receiver;
         ctx.heartbeatManager = heartbeatManager;

@@ -4,6 +4,7 @@ import it.polimi.ds.chat.broker.core.Broker;
 import it.polimi.ds.chat.protocol.client.ClientJoinMessage;
 import it.polimi.ds.chat.protocol.client.ClientQuitMessage;
 import it.polimi.ds.chat.protocol.client.ClientMessage;
+import it.polimi.ds.chat.protocol.client.ClientAckMessages;
 import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
 import it.polimi.ds.chat.protocol.client.HeartbeatAckMessage;
 
@@ -108,7 +109,12 @@ public class ClientHandler implements Runnable {
                     socket.close();
                 } catch (IOException ignored) {}
             } else if (msg instanceof ClientMessage) {
-                broker.onClientMessage((ClientMessage) msg);
+                ClientMessage clientMessage = (ClientMessage) msg;
+                if (broker.onClientMessage(clientMessage)) {
+                    sendLine(ClientAckMessages.buildAck(
+                            clientMessage.getClientId(),
+                            clientMessage.getClientSeq()));
+                }
             } else if (msg instanceof HeartbeatMessage) {
                 HeartbeatMessage hb = (HeartbeatMessage) msg;
                 HeartbeatAckMessage ack = new HeartbeatAckMessage(hb.getTimestamp(), broker.getBrokerId());

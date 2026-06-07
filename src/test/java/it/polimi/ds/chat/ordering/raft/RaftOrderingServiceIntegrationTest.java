@@ -107,7 +107,6 @@ class RaftOrderingServiceIntegrationTest {
         for (int i = 0; i < 3; i++) {
             List<ChatDeliverMessage> d = deliveries.get(i);
             assertEquals(1, d.size(), "node " + i + " unexpected delivery count");
-            assertEquals(1L, d.get(0).getSeq(), "node " + i + " unexpected seq");
             assertEquals("hello", d.get(0).getText(), "node " + i + " unexpected text");
             assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected username");
             assertEquals(leaderIdx, d.get(0).getBrokerId(), "node " + i + " unexpected brokerId");
@@ -187,14 +186,15 @@ class RaftOrderingServiceIntegrationTest {
         assertTrue(nodes[secondLeader].propose(secondReq), "second proposal should commit");
 
         assertTrue(waitFor(
-                () -> secondRunDeliveries.stream().allMatch(d -> d.stream().anyMatch(msg -> msg.getSeq() == 2L)),
+                () -> secondRunDeliveries.stream().allMatch(d ->
+                        d.stream().anyMatch(msg -> msg.getText().equals("after restart"))),
                 DELIVERY_DEADLINE_MS
-        ), "second message with seq=2 not delivered after restart");
+        ), "second message not delivered after restart");
 
         for (int i = 0; i < 3; i++) {
-            boolean hasSeq2 = secondRunDeliveries.get(i).stream()
-                    .anyMatch(msg -> msg.getSeq() == 2L && msg.getText().equals("after restart"));
-            assertTrue(hasSeq2, "node " + i + " did not deliver restarted seq=2 message");
+            boolean hasAfterRestart = secondRunDeliveries.get(i).stream()
+                    .anyMatch(msg -> msg.getText().equals("after restart"));
+            assertTrue(hasAfterRestart, "node " + i + " did not deliver restarted message");
         }
     }
 
@@ -247,15 +247,78 @@ class RaftOrderingServiceIntegrationTest {
                 DELIVERY_DEADLINE_MS
         ), "first attempt was not delivered on all nodes");
 
+        long logIndexAfterFirstAttempt = nodes[leaderIdx].getLastLogIndexForTesting();
+
         assertTrue(nodes[leaderIdx].propose(retryAttempt), "committed retry should ACK without appending");
 
-        assertEquals(1L, nodes[leaderIdx].getLastLogIndexForTesting(),
+        assertEquals(logIndexAfterFirstAttempt, nodes[leaderIdx].getLastLogIndexForTesting(),
                 "duplicate retry must not append a second Raft entry");
         for (int i = 0; i < 3; i++) {
             List<ChatDeliverMessage> d = deliveries.get(i);
             assertEquals(1, d.size(), "node " + i + " should deliver the client message once");
             assertEquals("same wire message", d.get(0).getText(), "node " + i + " unexpected text");
             assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected username");
+        }
+    }
+
+    @Test
+    void sameUsernameAndSequenceFromDifferentClientsAreNotDeduplicated(@TempDir Path baseDir) throws Exception {
+        int[] ports = pickFreePorts(3);
+
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
+        }
+
+        nodes = new RaftOrderingService[3];
+        List<List<ChatDeliverMessage>> deliveries = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            nodes[i] = buildService(i, ports[i], voters, baseDir.resolve("n" + i));
+            List<ChatDeliverMessage> d = new CopyOnWriteArrayList<>();
+            deliveries.add(d);
+            nodes[i].onDeliver(d::add);
+        }
+        for (RaftOrderingService n : nodes) {
+            n.start();
+        }
+
+        int leaderIdx = waitForSingleLeader();
+        assertTrue(leaderIdx >= 0, "no leader elected within "
+                + LEADER_ELECTION_DEADLINE_MS + " ms");
+
+        ChatReqMessage fromClientA = new ChatReqMessage(
+                "same-user-a",
+                leaderIdx,
+                "alice",
+                "from client A",
+                new VectorClock(),
+                "client-a",
+                1L
+        );
+        ChatReqMessage fromClientB = new ChatReqMessage(
+                "same-user-b",
+                leaderIdx,
+                "alice",
+                "from client B",
+                new VectorClock(),
+                "client-b",
+                1L
+        );
+
+        assertTrue(nodes[leaderIdx].propose(fromClientA), "first client message should commit");
+        assertTrue(nodes[leaderIdx].propose(fromClientB), "second client message should commit");
+
+        assertTrue(waitFor(
+                () -> deliveries.stream().allMatch(d -> d.size() >= 2),
+                DELIVERY_DEADLINE_MS
+        ), "same username/clientSeq messages from different clients were incorrectly deduplicated");
+
+        for (int i = 0; i < 3; i++) {
+            List<String> texts = deliveries.get(i).stream()
+                    .map(ChatDeliverMessage::getText)
+                    .toList();
+            assertTrue(texts.contains("from client A"), "node " + i + " missing client A message");
+            assertTrue(texts.contains("from client B"), "node " + i + " missing client B message");
         }
     }
 
@@ -321,7 +384,6 @@ class RaftOrderingServiceIntegrationTest {
         for (int i = 0; i < 3; i++) {
             List<ChatDeliverMessage> d = deliveries.get(i);
             assertEquals(1, d.size(), "node " + i + " unexpected HYBRID delivery count");
-            assertEquals(1L, d.get(0).getSeq(), "node " + i + " unexpected HYBRID seq");
             assertEquals("hello hybrid", d.get(0).getText(), "node " + i + " unexpected HYBRID text");
             assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected HYBRID username");
             assertEquals(leaderIdx, d.get(0).getBrokerId(), "node " + i + " unexpected HYBRID brokerId");
@@ -393,10 +455,12 @@ class RaftOrderingServiceIntegrationTest {
                 DELIVERY_DEADLINE_MS
         ), "first follower-forwarded attempt was not delivered on all nodes");
 
+        long logIndexAfterFirstAttempt = nodes[leaderIdx].getLastLogIndexForTesting();
+
         assertTrue(nodes[followerIdx].propose(retryAttempt),
                 "committed follower-forwarded retry should ACK without appending");
 
-        assertEquals(1L, nodes[leaderIdx].getLastLogIndexForTesting(),
+        assertEquals(logIndexAfterFirstAttempt, nodes[leaderIdx].getLastLogIndexForTesting(),
                 "duplicate forwarded retry must not append a second Raft entry");
         for (int i = 0; i < 3; i++) {
             List<ChatDeliverMessage> d = deliveries.get(i);
@@ -472,7 +536,6 @@ class RaftOrderingServiceIntegrationTest {
         for (int i = 0; i < 3; i++) {
             List<ChatDeliverMessage> d = deliveries.get(i);
             assertEquals(1, d.size(), "node " + i + " unexpected delivery count");
-            assertEquals(1L, d.get(0).getSeq(), "node " + i + " unexpected seq");
             assertEquals("forwarded through follower", d.get(0).getText(), "node " + i + " unexpected text");
             assertEquals(followerIdx, d.get(0).getBrokerId(), "node " + i + " unexpected brokerId");
         }

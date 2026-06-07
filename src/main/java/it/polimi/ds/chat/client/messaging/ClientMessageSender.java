@@ -3,6 +3,7 @@ package it.polimi.ds.chat.client.messaging;
 import java.io.IOException;
 import java.io.ObjectOutputStream;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -19,6 +20,7 @@ public class ClientMessageSender implements Runnable {
      */
     private volatile ObjectOutputStream out;
 
+    private final String clientId;
     private final long ackTimeoutMs;
     private final Map<Long, ClientPendingMessage> pendingMessages = new ConcurrentHashMap<>();
 
@@ -34,8 +36,13 @@ public class ClientMessageSender implements Runnable {
      * @param ackTimeoutMs the timeout in milliseconds to wait for an ACK before retransmitting
      */
     public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs) {
+        this(out, ackTimeoutMs, UUID.randomUUID().toString());
+    }
+
+    public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs, String clientId) {
         this.out = out;
         this.ackTimeoutMs = ackTimeoutMs;
+        this.clientId = clientId;
     }
 
     /**
@@ -52,16 +59,16 @@ public class ClientMessageSender implements Runnable {
     }
 
     /**
-     * Sends a user message to the server, assigning a timestamp and adding it to the pending queue.
+     * Sends a user message to the server, assigning a client sequence and adding it to the pending queue.
      *
      * @param text the message text to send
      */
     public void sendUserMessage(String text) {
-        long timestamp = seqCounter.incrementAndGet();
-        String wireLine = buildMsgWire(timestamp, text);
+        long clientSeq = seqCounter.incrementAndGet();
+        String wireLine = buildMsgWire(clientSeq, text);
 
-        ClientPendingMessage pm = new ClientPendingMessage(timestamp, wireLine);
-        pendingMessages.put(timestamp, pm);
+        ClientPendingMessage pm = new ClientPendingMessage(clientSeq, wireLine);
+        pendingMessages.put(clientSeq, pm);
 
         ObjectOutputStream currentOut = this.out;
         if (currentOut == null) {
@@ -79,28 +86,41 @@ public class ClientMessageSender implements Runnable {
 
     /**
      * Builds the wire format line for the server.
-     * Format: "MSG &lt;timestamp&gt; &lt;text&gt;"
+     * Format: "MSG &lt;clientId&gt; &lt;clientSeq&gt; &lt;text&gt;"
      *
-     * @param timestamp the message timestamp
+     * @param clientSeq the message sequence for this client process
      * @param text      the message text
      * @return the formatted wire line
      */
-    private String buildMsgWire(long timestamp, String text) {
-        return "MSG " + timestamp + " " + text;
+    private String buildMsgWire(long clientSeq, String text) {
+        return "MSG " + clientId + " " + clientSeq + " " + text;
     }
 
     /**
      * Called by the MessageReceiver when a valid ACK is received.
      * Removes the acknowledged message from the pending queue.
      *
-     * @param timestamp the timestamp of the acknowledged message
+     * @param clientId the id of the acknowledged client
+     * @param clientSeq the sequence of the acknowledged message
      */
-    public void handleAck(long timestamp) {
-        ClientPendingMessage removed = pendingMessages.remove(timestamp);
+    public void handleAck(String clientId, long clientSeq) {
+        if (!this.clientId.equals(clientId)) {
+            System.out.println("[ACK] Ignorato ACK per clientId diverso: " + clientId);
+            return;
+        }
+
+        ClientPendingMessage removed = pendingMessages.remove(clientSeq);
         if (removed == null) {
-            System.out.println("[ACK] Ricevuto ACK per timestamp sconosciuto: " + timestamp);
+            System.out.println("[ACK] Ricevuto ACK per clientSeq sconosciuto: " + clientSeq);
         }
         // Se removed != null, il messaggio è stato confermato e rimosso dai pendenti.
+    }
+
+    /**
+     * Legacy ACK handler kept for tests or older protocol paths.
+     */
+    public void handleAck(long clientSeq) {
+        handleAck(clientId, clientSeq);
     }
 
     /**
@@ -133,7 +153,7 @@ public class ClientMessageSender implements Runnable {
                             currentOut.writeObject(pm.getWireLine());
                             currentOut.flush();
                             pm.updateLastSendTime();
-                            System.out.println("[RETRY] Ritrasmesso messaggio con timestamp " + pm.getTimestamp());
+                            System.out.println("[RETRY] Ritrasmesso messaggio con clientSeq " + pm.getClientSeq());
                         } catch (IOException e) {
                             System.err.println("[RETRY] Errore ritrasmissione: " + e.getMessage());
                         }

@@ -1,6 +1,6 @@
 # Code Issues by Group
 
-Aggiornato al 2026-06-06.
+Aggiornato al 2026-06-07.
 
 Questo documento raccoglie in una lista unica i problemi emersi dalla review del
 codice, divisi secondo le aree di lavoro del gruppo:
@@ -81,15 +81,15 @@ Le priorita sono:
     da quella RPC.
   - Effetto: `nextIndex` puo avanzare oltre il log del leader e rompere il path di
     heartbeat/replication.
-  - Fix suggerito: rispondere con `min(prevLogIndex + entries.size(),
-    log.lastLogIndex())` per quella specifica RPC.
+  - Risolto: il follower risponde con l'indice effettivamente confermato dalla
+    RPC, cioe `prevLogIndex + entries.size()`.
 
 - [FATTO] Deduplica Raft non persistente/rebuildata.
   - `committedProposalKeys` vive solo in memoria e viene svuotata allo stop.
   - Dopo crash/restart, un retry gia committato puo essere riappeso come nuova
     entry.
-  - Fix suggerito: ricostruire le chiavi deduplicate dal log persistito all'avvio,
-    oppure persistere metadati di deduplica.
+  - Risolto: all'avvio `RaftOrderingService` ricostruisce le chiavi di deduplica
+    dalle entry del log persistito.
 
 ### P1
 
@@ -99,8 +99,8 @@ Le priorita sono:
     solo su majority match.
   - Senza no-op all'inizio del nuovo term, entry gia replicate di term vecchi
     possono restare non committate finche non arriva nuovo traffico.
-  - Fix suggerito: quando un nodo diventa leader, appendere una no-op entry nel
-    nuovo term.
+  - Risolto: quando il nodo locale diventa leader, viene appesa una no-op entry
+    nel nuovo term.
 
 - `commitIndex` / `lastApplied` non persistiti o non ricostruiti in modo esplicito.
   - Al restart il servizio ricarica il log, ma il commit manager riparte da
@@ -140,20 +140,24 @@ Le priorita sono:
 
 ### P0
 
-- Deduplica client fragile.
+- [FATTO] Deduplica client fragile.
   - Il client usa un contatore locale che riparte da `1` a ogni avvio.
   - Broker e Raft deduplicano usando `(username, clientTimestamp)`.
   - Effetto: dopo reconnect/restart client, un messaggio nuovo puo collidere con
     uno vecchio e venire perso o sostituito.
-  - Fix suggerito: usare `(clientId, clientSeq)`; `clientId` deve distinguere la
-    sessione/processo client dal solo username.
+  - Risolto: il client genera un `clientId` stabile per processo e usa un
+    `clientSeq` monotono per i messaggi. Broker e Raft deduplicano su
+    `(clientId, clientSeq)`.
+  - Anche gli ACK usano `(clientId, clientSeq)` e vengono inviati dal
+    `ClientHandler` sulla stessa connessione che ha inviato il messaggio.
 
 - Username usato come identita tecnica.
-  - ACK, filtro del mittente e deduplica usano il nome utente.
-  - Due client con lo stesso username possono ricevere ACK sbagliati, non vedere
-    messaggi o collidere nella deduplica.
-  - Fix suggerito: introdurre un id di connessione/client separato dal nome
-    visualizzato.
+  - ACK e deduplica non usano piu il nome utente: usano `(clientId, clientSeq)`.
+  - Resta pero il filtro del mittente in delivery basato su username.
+  - Due client con lo stesso username possono ancora non vedere messaggi come
+    atteso a causa del filtro di consegna.
+  - Fix residuo suggerito: usare un id di connessione/client anche per distinguere
+    il mittente nella delivery locale, oppure consegnare anche al mittente.
 
 - Scritture concorrenti sullo stesso `ObjectOutputStream` lato client.
   - Sender, retry, heartbeat, JOIN e QUIT possono scrivere sullo stesso stream
@@ -191,7 +195,10 @@ Le priorita sono:
 - Forward proposal e ACK perso.
   - Se la response TCP dal leader al follower si perde dopo commit, il retry puo
     coprire il caso.
-  - Il problema residuo e che la deduplica in memoria cresce e non e persistente.
+  - La deduplica Raft viene ricostruita dal log al restart.
+  - La chiave applicativa ora usa `(clientId, clientSeq)`.
+  - Il problema residuo e' solo la crescita non limitata delle cache di deduplica
+    in processi long-running.
 
 - Reconnect ricorsivo nel client.
   - La riconnessione richiama `startReceiverAndHeartbeat` in modo ricorsivo.
@@ -204,6 +211,12 @@ Le priorita sono:
   - Se la Directory cade, i broker possono essere vivi ma i client non hanno modo
     di scegliere un nuovo broker.
   - Accettabile se dichiarato come limite.
+
+- Cache di deduplica applicativa non limitate.
+  - `cachedClientRequests` e le chiavi di deduplica Raft possono crescere nel
+    tempo se il sistema resta attivo a lungo.
+  - Non rompe la demo, ma andrebbe aggiunta una politica di purge/TTL per un
+    servizio long-running.
 
 - Heartbeat client migliorabile.
   - Il meccanismo puo essere reso piu pulito separando heartbeat inviati,
@@ -265,8 +278,7 @@ Le priorita sono:
 ## 5. Top Fix Prima Della Demo
 
 1. [FATTO] Sistemare il deadlock tra election e replication.
-2. Correggere il `matchIndex` restituito dal follower in `AppendEntries`.
-3. Introdurre `(clientId, clientSeq)` e limitare/purgare la cache di deduplica.
+2. [FATTO] Correggere il `matchIndex` restituito dal follower in `AppendEntries`.
+3. [FATTO] Introdurre `(clientId, clientSeq)` per deduplica e ACK.
 4. Usare un writer unico o un lock comune per `ObjectOutputStream` lato client.
-5. Gestire restart e retry: ricostruire la deduplica dal log e prevenire replay
-   applicativo indesiderato.
+5. [FATTO] Ricostruire la deduplica Raft dal log al restart.

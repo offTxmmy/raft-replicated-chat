@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 public class BrokerRetryVectorClockTest {
@@ -94,6 +95,21 @@ public class BrokerRetryVectorClockTest {
         VectorClock proposalClock = orderingService.proposals.get(0).getVectorClock();
         assertEquals(1, proposalClock.getTimeStamp(1));
         assertEquals(1, broker.getSendVectorClock().getTimeStamp(1));
+    }
+
+    @Test
+    public void sameUsernameAndSequenceFromDifferentClientsAreDifferentRequests() {
+        TestBroker broker = new TestBroker(TestConfigs.raftBrokerConfig(1, 5000));
+        CapturingOrderingService orderingService = new CapturingOrderingService();
+        broker.setOrderingService(orderingService);
+
+        broker.onClientMessage(new ClientMessage("alice", "client-a", 1L, "first"));
+        broker.onClientMessage(new ClientMessage("alice", "client-b", 1L, "second"));
+
+        assertEquals(2, orderingService.proposals.size());
+        assertNotSame(orderingService.proposals.get(0), orderingService.proposals.get(1));
+        assertEquals(1, orderingService.proposals.get(0).getVectorClock().getTimeStamp(1));
+        assertEquals(2, orderingService.proposals.get(1).getVectorClock().getTimeStamp(1));
     }
 
     @Test

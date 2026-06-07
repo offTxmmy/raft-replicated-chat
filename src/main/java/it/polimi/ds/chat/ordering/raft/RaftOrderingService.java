@@ -281,14 +281,15 @@ public final class RaftOrderingService implements OrderingService {
 
         if (owner) {
             ChatCommand command;
-            if (request.hasClientTimestamp()) {
+            if (request.hasClientIdentity()) {
                 command = new ChatCommand(
                         request.getLocalMsgId(),
                         request.getBrokerId(),
                         request.getUsername(),
                         request.getText(),
                         request.getVectorClock(),
-                        request.getClientTimestamp()
+                        request.getClientId(),
+                        request.getClientSeq()
                 );
             } else {
                 command = new ChatCommand(
@@ -419,15 +420,15 @@ public final class RaftOrderingService implements OrderingService {
     }
 
     private static String proposalKey(ChatReqMessage request) {
-        if (request.hasClientTimestamp()) {
-            return "client:" + request.getUsername() + ":" + request.getClientTimestamp();
+        if (request.hasClientIdentity()) {
+            return "client:" + request.getClientId() + ":" + request.getClientSeq();
         }
         return "local:" + request.getLocalMsgId();
     }
 
     private static String proposalKey(ChatCommand command) {
-        if (command.hasClientTimestamp()) {
-            return "client:" + command.getUsername() + ":" + command.getClientTimestamp();
+        if (command.hasClientIdentity()) {
+            return "client:" + command.getClientId() + ":" + command.getClientSeq();
         }
         return "local:" + command.getLocalMsgId();
     }
