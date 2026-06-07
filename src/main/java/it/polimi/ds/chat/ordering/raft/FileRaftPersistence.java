@@ -26,6 +26,7 @@ import java.util.List;
  * <p>Layout under {@code storageDir}:
  * <ul>
  *   <li>{@code state.bin} — (currentTerm, votedFor) written via tmp-file + atomic rename + fsync.
+ *   <li>{@code commit.bin} — (commitIndex, lastApplied) written via tmp-file + atomic rename + fsync.
  *   <li>{@code log.bin}   — append-only, length-prefixed serialized {@link RaftLogEntry} records.
  * </ul>
  *
@@ -33,9 +34,15 @@ import java.util.List;
  * <ul>
  *   <li>State writes go to {@code state.bin.tmp} first, are fsynced, then atomically renamed.
  *       A crash mid-write leaves the previous {@code state.bin} intact.
+ *   <li>Commit-progress writes follow the same tmp-file + fsync + atomic rename strategy,
+ *       so {@code commit.bin} is either old or new, never partially updated.
  *   <li>Log appends are fsynced after each write. A crash during a partial append leaves a
  *       truncated tail, which {@link #loadLogEntries()} silently drops.
  * </ul>
+
+ * <p>The persisted commit progress is used only for local restart recovery
+ * ({@code commitIndex}/{@code lastApplied}); Raft consensus for new commits
+ * still follows leader/quorum rules at runtime.
  *
  * <p>Thread safety: all public methods are {@code synchronized} on the instance.
  */
@@ -43,11 +50,15 @@ public final class FileRaftPersistence implements RaftPersistence {
 
     private static final String STATE_FILE = "state.bin";
     private static final String STATE_TMP  = "state.bin.tmp";
+    private static final String COMMIT_FILE = "commit.bin";
+    private static final String COMMIT_TMP  = "commit.bin.tmp";
     private static final String LOG_FILE   = "log.bin";
     private static final String LOG_TMP    = "log.bin.tmp";
 
     private final Path stateFile;
     private final Path stateTmp;
+    private final Path commitFile;
+    private final Path commitTmp;
     private final Path logFile;
     private final Path logTmp;
 
@@ -59,6 +70,8 @@ public final class FileRaftPersistence implements RaftPersistence {
         }
         this.stateFile = storageDir.resolve(STATE_FILE);
         this.stateTmp  = storageDir.resolve(STATE_TMP);
+        this.commitFile = storageDir.resolve(COMMIT_FILE);
+        this.commitTmp  = storageDir.resolve(COMMIT_TMP);
         this.logFile   = storageDir.resolve(LOG_FILE);
         this.logTmp    = storageDir.resolve(LOG_TMP);
 
@@ -112,6 +125,45 @@ public final class FileRaftPersistence implements RaftPersistence {
             return new PersistedState(term, votedFor);
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to read state file", e);
+        }
+    }
+
+    // --- Commit progress (commitIndex / lastApplied) ----------------------
+    @Override
+    public synchronized void persistCommitProgress(long commitIndex, long lastApplied) {
+        try (DataOutputStream out = new DataOutputStream(
+                new BufferedOutputStream(Files.newOutputStream(commitTmp,
+                        StandardOpenOption.CREATE,
+                        StandardOpenOption.TRUNCATE_EXISTING,
+                        StandardOpenOption.WRITE)))) {
+            out.writeLong(commitIndex);
+            out.writeLong(lastApplied);
+            out.flush();
+        } catch (IOException e) {
+            throw new RaftPersistenceException("Failed to write commit progress tmp", e);
+        }
+        fsync(commitTmp);
+        try {
+            Files.move(commitTmp, commitFile,
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new RaftPersistenceException("Failed to rename commit progress file", e);
+        }
+    }
+
+    @Override
+    public synchronized CommitProgress loadCommitProgress() {
+        if (!Files.exists(commitFile)) {
+            return CommitProgress.EMPTY;
+        }
+        try (DataInputStream in = new DataInputStream(
+                new BufferedInputStream(Files.newInputStream(commitFile)))) {
+            long commitIndex = in.readLong();
+            long lastApplied = in.readLong();
+            return new CommitProgress(commitIndex, lastApplied);
+        } catch (IOException e) {
+            throw new RaftPersistenceException("Failed to read commit progress file", e);
         }
     }
 

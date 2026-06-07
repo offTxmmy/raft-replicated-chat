@@ -10,27 +10,68 @@ import java.util.Objects;
 import java.util.function.Consumer;
 
 /**
- * Tracks commit progress and applies committed entries in order.
+ * Manages Raft commit progression and state-machine application.
  *
- * Responsibilities:
- * - Keep commitIndex monotonic.
- * - Apply log entries exactly once and in index order.
- * - Enforce Raft's leader commit rule (only commit entries from current term
- *   when advancing based on majority match indexes).
+ * <p>This component tracks two indexes:
+ * <ul>
+ *   <li>{@code commitIndex}: highest log entry known to be committed.</li>
+ *   <li>{@code lastApplied}: highest log entry already applied locally.</li>
+ * </ul>
+ *
+ * <p>Main responsibilities:
+ * <ul>
+ *   <li>keep {@code commitIndex} monotonic;</li>
+ *   <li>apply entries in strict index order, without gaps;</li>
+ *   <li>enforce Raft leader commit rule when advancing from match indexes
+ *       (commit only entries from the current term).</li>
+ * </ul>
+ *
+ * <p>On startup, callers may provide persisted commit progress. In that case
+ * the manager resumes from the supplied state and applies only the missing
+ * suffix in {@code (lastApplied, commitIndex]}.
  */
 public class RaftCommitManager {
 
+    /**
+     * Callback used to persist the current commit progress after it changes.
+     */
+    @FunctionalInterface
+    public interface CommitProgressListener {
+        void onProgress(long commitIndex, long lastApplied);
+    }
+
     private final RaftLog log;
     private final Consumer<RaftLogEntry> applyCallback;
+    private final CommitProgressListener progressListener;
 
     private long commitIndex;
     private long lastApplied;
 
     public RaftCommitManager(RaftLog log, Consumer<RaftLogEntry> applyCallback) {
+        this(log, applyCallback, 0L, 0L, (commitIndex, lastApplied) -> {});
+    }
+
+    /**
+     * Builds a commit manager with explicit initial progress.
+     *
+     * <p>The initial state is normalized to keep invariants valid:
+     * {@code commitIndex >= 0} and {@code 0 <= lastApplied <= commitIndex}.
+     * Any unapplied portion up to {@code commitIndex} is applied immediately.
+     */
+    public RaftCommitManager(
+            RaftLog log,
+            Consumer<RaftLogEntry> applyCallback,
+            long initialCommitIndex,
+            long initialLastApplied,
+            CommitProgressListener progressListener
+    ) {
         this.log = Objects.requireNonNull(log, "log must not be null");
         this.applyCallback = Objects.requireNonNull(applyCallback, "applyCallback must not be null");
-        this.commitIndex = 0L;
-        this.lastApplied = 0L;
+        this.progressListener = Objects.requireNonNull(progressListener, "progressListener must not be null");
+        this.commitIndex = Math.max(0L, initialCommitIndex);
+        this.lastApplied = Math.max(0L, Math.min(initialLastApplied, this.commitIndex));
+        applyCommittedEntries();
+        notifyProgress();
     }
 
     public synchronized long getCommitIndex() {
@@ -53,6 +94,7 @@ public class RaftCommitManager {
 
         commitIndex = newCommitIndex;
         applyCommittedEntries();
+        notifyProgress();
     }
 
     /**
@@ -68,6 +110,7 @@ public class RaftCommitManager {
 
         commitIndex = cappedCommitIndex;
         applyCommittedEntries();
+        notifyProgress();
     }
 
     /**
@@ -105,6 +148,7 @@ public class RaftCommitManager {
 
         commitIndex = candidateIndex;
         applyCommittedEntries();
+        notifyProgress();
         return commitIndex;
     }
 
@@ -123,6 +167,11 @@ public class RaftCommitManager {
             }
             applyCallback.accept(entry);
             lastApplied = nextIndex;
+            notifyProgress();
         }
+    }
+
+    private void notifyProgress() {
+        progressListener.onProgress(commitIndex, lastApplied);
     }
 }

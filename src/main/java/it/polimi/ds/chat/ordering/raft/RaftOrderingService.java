@@ -102,12 +102,17 @@ public final class RaftOrderingService implements OrderingService {
             }
         }
 
+        RaftPersistence.CommitProgress persistedProgress = persistence.loadCommitProgress();
+        long restoredCommitIndex = Math.min(persistedProgress.commitIndex(), raftLog.lastLogIndex());
+        long restoredLastApplied = Math.min(persistedProgress.lastApplied(), restoredCommitIndex);
+
         // 3. State machine: deliver committed entries as ChatDeliverMessage.
         RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
         commitManager = new RaftCommitManager(raftLog, entry -> {
             applyHook.accept(entry);
             completePendingCommit(entry);
-        });
+        }, restoredCommitIndex, restoredLastApplied, (commitIndex, lastApplied) ->
+                persistence.persistCommitProgress(commitIndex, lastApplied));
 
         raftLog.setCommitIndexSupplier(commitManager::getCommitIndex);
         raftLog.setTruncationHook(entry -> {

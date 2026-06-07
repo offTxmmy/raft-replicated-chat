@@ -57,6 +57,18 @@ class FileRaftPersistenceTest {
     }
 
     @Test
+    void persistAndReloadCommitProgress(@TempDir Path dir) {
+        FileRaftPersistence p = new FileRaftPersistence(dir);
+        p.persistCommitProgress(9L, 7L);
+
+        FileRaftPersistence restored = new FileRaftPersistence(dir);
+        RaftPersistence.CommitProgress progress = restored.loadCommitProgress();
+
+        assertEquals(9L, progress.commitIndex());
+        assertEquals(7L, progress.lastApplied());
+    }
+
+    @Test
     void overwriteKeepsLatestValue(@TempDir Path dir) {
         FileRaftPersistence p = new FileRaftPersistence(dir);
         p.persistTermAndVote(1L, 1);
@@ -147,13 +159,16 @@ class FileRaftPersistenceTest {
     void noLeftoverTmpFilesAfterPersistAndTruncate(@TempDir Path dir) {
         FileRaftPersistence p = new FileRaftPersistence(dir);
         p.persistTermAndVote(5L, 2);
+        p.persistCommitProgress(5L, 4L);
         p.appendLogEntry(entry(1L, 1L, "a"));
         p.appendLogEntry(entry(2L, 1L, "b"));
         p.truncateLogFrom(2L);
 
         assertTrue(Files.exists(dir.resolve("state.bin")));
+        assertTrue(Files.exists(dir.resolve("commit.bin")));
         assertTrue(Files.exists(dir.resolve("log.bin")));
         assertTrue(Files.notExists(dir.resolve("state.bin.tmp")));
+        assertTrue(Files.notExists(dir.resolve("commit.bin.tmp")));
         assertTrue(Files.notExists(dir.resolve("log.bin.tmp")));
     }
 
