@@ -180,10 +180,9 @@ class RaftVoteHandlingTest {
     }
 
     /**
-         * Test-only fake implementation.
-         * In production, Person B's RaftLog should implement RaftLogMetadata.
-         */
-        private record FakeLogMetadata(long lastLogIndex, long lastLogTerm) implements RaftLogMetadata {
+     * Test-only fake implementation.
+     */
+    private record FakeLogMetadata(long lastLogIndex, long lastLogTerm) implements RaftLogMetadata {
 
     }
 }

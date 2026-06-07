@@ -372,9 +372,8 @@ public class RaftElectionManager {
                 notifyLeaderObserved = previousLeaderId != leaderId;
             }
 
-            // If localRole == LEADER and term == localCurrentTerm,
-            // this should normally not happen in a correct Raft flow.
-            // We ignore it for now.
+            // A same-term leader observing another same-term leader is not a
+            // valid Raft transition; keep local state unchanged.
         }
 
         if (notifySteppedDown) {

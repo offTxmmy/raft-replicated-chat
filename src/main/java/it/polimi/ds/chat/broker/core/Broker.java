@@ -36,7 +36,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class Broker implements Serializable, OrderingServiceCallback {
 
-    // Directory Service config (for now hardcoded)
+    // Default Directory Service config.
     private static final String DIRECTORY_HOST = "localhost";
     private static final int DIRECTORY_PORT = 60000;
     private static final int DIRECTORY_CLIENT_PORT = 60001; // Port for peer list queries

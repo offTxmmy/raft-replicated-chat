@@ -7,9 +7,9 @@ import java.io.Serializable;
 /**
  * Application command stored in the Raft log for chat delivery.
  *
- * This is the payload that the Raft layer replicates. Person C can map a
- * committed {@link ChatCommand} into a {@link it.polimi.ds.chat.protocol.chat.ChatDeliverMessage}
- * by using:
+ * This is the payload that the Raft layer replicates. A committed
+ * {@link ChatCommand} maps into a {@link it.polimi.ds.chat.protocol.chat.ChatDeliverMessage}
+ * using:
  * - log index as the global sequence number
  * - brokerId/username/text/vectorClock as the message content
  *

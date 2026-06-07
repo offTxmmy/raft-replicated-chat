@@ -59,14 +59,15 @@ Le priorita sono:
 
 ### P2
 
-- Mancato fsync della parent directory dopo rename atomico in persistence.
+- [FATTO] Mancato fsync della parent directory dopo rename atomico in persistence.
   - Tecnicamente rilevante per crash-safety molto rigorosa.
-  - Per la demo non e una priorita rispetto ai bug di liveness/deduplica.
+  - `FileRaftPersistence` ora fsynca best-effort la directory dopo i rename
+    atomici di `state.bin`, `commit.bin` e `log.bin`.
 
-- Commenti/API rimasti con riferimenti storici.
+- [FATTO] Commenti/API rimasti con riferimenti storici.
   - Esempi: riferimenti a persone del gruppo, "for now", note di integrazione
     vecchie.
-  - Non rompe il codice, ma indebolisce la qualita del progetto presentato.
+  - Ripuliti i riferimenti storici nei commenti del core Raft.
 
 ---
 

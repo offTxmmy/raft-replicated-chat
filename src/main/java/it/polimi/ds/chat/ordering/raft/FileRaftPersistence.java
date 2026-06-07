@@ -25,17 +25,20 @@ import java.util.List;
  *
  * <p>Layout under {@code storageDir}:
  * <ul>
- *   <li>{@code state.bin} — (currentTerm, votedFor) written via tmp-file + atomic rename + fsync.
- *   <li>{@code commit.bin} — (commitIndex, lastApplied) written via tmp-file + atomic rename + fsync.
+ *   <li>{@code state.bin} — (currentTerm, votedFor) written via tmp-file + fsync + atomic rename.
+ *   <li>{@code commit.bin} — (commitIndex, lastApplied) written via tmp-file + fsync + atomic rename.
  *   <li>{@code log.bin}   — append-only, length-prefixed serialized {@link RaftLogEntry} records.
  * </ul>
  *
  * <p>Crash safety:
  * <ul>
  *   <li>State writes go to {@code state.bin.tmp} first, are fsynced, then atomically renamed.
+ *       The storage directory is fsynced after the rename when the platform supports it.
  *       A crash mid-write leaves the previous {@code state.bin} intact.
  *   <li>Commit-progress writes follow the same tmp-file + fsync + atomic rename strategy,
  *       so {@code commit.bin} is either old or new, never partially updated.
+ *   <li>Log truncation rewrites through {@code log.bin.tmp}, fsyncs the tmp file,
+ *       atomically renames it, and fsyncs the storage directory when supported.
  *   <li>Log appends are fsynced after each write. A crash during a partial append leaves a
  *       truncated tail, which {@link #loadLogEntries()} silently drops.
  * </ul>
@@ -110,6 +113,7 @@ public final class FileRaftPersistence implements RaftPersistence {
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to rename state file", e);
         }
+        fsyncParentDirectory(stateFile);
     }
 
     @Override
@@ -150,6 +154,7 @@ public final class FileRaftPersistence implements RaftPersistence {
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to rename commit progress file", e);
         }
+        fsyncParentDirectory(commitFile);
     }
 
     @Override
@@ -218,6 +223,7 @@ public final class FileRaftPersistence implements RaftPersistence {
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to rename log file", e);
         }
+        fsyncParentDirectory(logFile);
     }
 
     @Override
@@ -277,6 +283,19 @@ public final class FileRaftPersistence implements RaftPersistence {
             ch.force(true);
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to fsync " + path, e);
+        }
+    }
+
+    private static void fsyncParentDirectory(Path path) {
+        Path parent = path.toAbsolutePath().getParent();
+        if (parent == null) {
+            return;
+        }
+        try (FileChannel ch = FileChannel.open(parent, StandardOpenOption.READ)) {
+            ch.force(true);
+        } catch (IOException | UnsupportedOperationException ignored) {
+            // Some platforms, including common Windows configurations, do not
+            // expose directory fsync through FileChannel.
         }
     }
 

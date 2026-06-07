@@ -186,11 +186,7 @@ public class RaftNode {
 
     /**
      * Records a vote in the current term.
-     * This method is intentionally simple for now.
-     * Later, the full vote-granting logic will also check:
-     * - candidate term
-     * - whether already voted
-     * - log freshness
+     * Full vote-granting validation is handled by {@link #handleRequestVote}.
      *
      * @param candidateId candidate voted for
      * @throws IllegalStateException if a different vote already exists in this term
@@ -272,10 +268,6 @@ public class RaftNode {
      * - if terms are equal, candidate log is more up-to-date if its lastLogIndex is >=
      */
     private boolean isCandidateLogUpToDate(RequestVoteRequestMessage request, RaftLogMetadata logMetadata) {
-        // PERSON B INTEGRATION:
-        // Here we are using the two methods that must come from Person B's log implementation:
-        // - lastLogTerm()
-        // - lastLogIndex()
         long localLastLogTerm = logMetadata.lastLogTerm();
         long localLastLogIndex = logMetadata.lastLogIndex();
 
