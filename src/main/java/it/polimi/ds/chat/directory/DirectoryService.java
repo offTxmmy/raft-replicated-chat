@@ -59,7 +59,7 @@ public class DirectoryService {
 
         DirectoryService service = new DirectoryService(voters);
 
-        // Lister on brokerPort (register + heartbeat
+        // Lister on brokerPort (register + heartbeat)
         new Thread(() -> service.startBrokersListener(brokerPort), "Dir-BrokerListener").start();
 
         // Listen on clientPort (GET_BROKER)
