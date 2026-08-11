@@ -1,8 +1,35 @@
-# Project Delivery Audit — Distributed Systems
+# Project Delivery Audit — storico, superato
 
 Data audit: 2026-07-11  
 Repository: `DS-Project2025-2026`  
 Ambiente verificato: Windows 11 amd64, Oracle JDK 23.0.2, Apache Maven 3.9.15
+
+> **DOCUMENTO STORICO.** Questo file conserva lo snapshot dell'audit del
+> 2026-07-11 e non rappresenta priorita', scope o stato correnti. L'audit fresco del
+> 2026-08-11 usa come unico tracker attivo
+> [`docs/PRE_GROUP_MANUAL_TESTING_TODO.md`](docs/PRE_GROUP_MANUAL_TESTING_TODO.md),
+> come baseline
+> [`docs/PROJECT_SPECIFICATION.md`](docs/PROJECT_SPECIFICATION.md) e come allegato
+> tecnico [`docs/CODE_ISSUES_BY_GROUP.md`](docs/CODE_ISSUES_BY_GROUP.md).
+>
+> Correzioni da applicare a tutto il testo storico sottostante:
+>
+> - la specifica ufficiale e i chiarimenti sono disponibili nel contesto di audit e
+>   hanno precedenza sulle note interne;
+> - `mvn test` esegue 186 test verdi, mentre 6 test JUnit 4 passano soltanto con
+>   esecuzione diretta e non sono scoperti da Maven;
+> - LAN broadcast e demo a due notebook **non** sono validate da test same-host;
+> - crash-restart, torn-write, security e hardening production non sono requisiti
+>   automatici e restano opzionali salvo claim esplicito;
+> - il vecchio P0 sul solo timing del vector clock non e' confermato; il finding
+>   causale concreto e' l'inversione FIFO durante retry/failover;
+> - il finding sulla failure di persistenza del voto non dimostra una response non
+>   durevole gia' esposta e non e' un P0 corrente;
+> - i P0 software confermati sono il gap no-op/sequenza e la race atomica
+>   role-term-append; il gate fisico a due notebook e' anch'esso P0 di consegna.
+>
+> Tabelle, checklist, claim “Complete” e remediation plan sotto questa nota sono
+> quindi materiale storico, non backlog concorrente.
 
 > **Verdetto: NOT READY – FUNDAMENTAL PROBLEMS**
 
