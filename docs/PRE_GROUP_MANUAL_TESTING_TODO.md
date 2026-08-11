@@ -1,241 +1,264 @@
-# Pre-group manual testing TODO
+# Pre-group Manual Testing and Presentation Checklist
 
-Documento operativo per arrivare al testing manuale del gruppo, senza usare le classi
-di test JUnit.
+Aggiornato al 2026-08-11 in base alla specifica ufficiale.
 
-Aggiornato al 2026-06-06.
-
----
-
-## 1. Documenti rimasti
-
-La cartella `docs` ora contiene solo i documenti utili alla fase finale:
-
-- `PROJECT_SPECIFICATION.md`
-  - Documento principale di architettura.
-  - Deve essere usato come base per spiegare requisiti, scelte, garanzie e limiti.
-  - Ora riflette lo stato reale: membership statica, transport Raft ibrido,
-    follower-forwarding, discovery ausiliaria e niente history offline.
-
-- `raft_lan_broadcast_migration_report.md`
-  - Non e' piu' un piano di migrazione.
-  - Ora e' il documento di giustificazione finale sulla scelta
-    broadcast/multicast vs unicast.
-  - Serve per rispondere direttamente alla mail del professore.
-
-- `PRE_GROUP_MANUAL_TESTING_TODO.md`
-  - Checklist operativa prima del testing manuale del gruppo.
-  - Va tenuto fino a quando tutti gli scenari manuali sono stati provati.
-
-Documenti storici come report iniziali, TODO personali e dynamic-membership report non
-sono piu' necessari nella documentazione finale. Le motivazioni rilevanti sono state
-integrate nei due documenti principali.
+Obiettivo: produrre evidenza che il progetto funzioni come sistema realmente
+distribuito. I test localhost sono preparatori; la demo valida richiede almeno due
+notebook degli studenti collegati alla stessa LAN wired o wireless.
 
 ---
 
-## 2. Cose da sistemare prima del testing manuale
+## 1. Gate prima del test manuale
 
-### P0 - Correttezza funzionale
+Non iniziare la prova finale finche' questi punti non sono chiusi:
 
-- Retry client con vector clock: sistemato per il retry dello stesso messaggio.
-  - Il broker usa una cache per `(username, clientTimestamp)`.
-  - Ogni retry riusa lo stesso comando, lo stesso vector clock e lo stesso
-    `localMsgId`.
-  - Resta da ragionare separatamente sulla concorrenza tra messaggi diversi
-    provenienti dallo stesso broker.
+- [ ] sequenza applicativa corretta in presenza delle entry Raft no-op e al restart;
+- [ ] host/porte della Directory configurabili nei broker, senza `localhost`
+  hard-coded per il deployment distribuito;
+- [ ] writer unico o lock condiviso per tutte le scritture sullo stesso
+  `ObjectOutputStream` client;
+- [ ] stato causale aggiornato prima della delivery osservabile dai client;
+- [ ] test automatico end-to-end del percorso client/broker/hold-back queue;
+- [ ] decisione documentata sul log Raft persistente che contiene payload chat;
+- [ ] `mvn test` verde.
 
-- Chiarire deduplicazione effettiva.
-  - Oggi Raft deduplica usando `(username, MSG timestamp)`.
-  - Non scrivere `(clientId, clientSeq)` come meccanismo implementato finche' non
-    esiste davvero nel codice.
-  - Se si vuole la versione piu' pulita, aggiungere un vero sequence number client.
+Stato automatico rilevato il 2026-08-11:
 
-- Discovery LAN dei broker: non usarla come parte della demo principale.
-  - Il cluster dei broker e' statico.
-  - Il `votersCSV` viene configurato nella `DirectoryService`.
-  - Non dire che `LanDiscoveryService` o `PeerRegistry` risolvono gli endpoint Raft
-    o cambiano il quorum.
+```text
+Tests run: 186, Failures: 0, Errors: 0, Skipped: 0
+BUILD SUCCESS
+```
 
-### P1 - Demo manuale
-
-- Preparare terminali separati per Directory, tre broker e almeno due client.
-- Tenere visibili i log di leader election, proposta, commit, delivery e reconnect.
-- Decidere prima se pulire lo stato Raft o testare esplicitamente il restart con log
-  persistito.
-- Fare almeno un giro completo senza crash prima di provare il failover.
-
-### P2 - Documentazione/slides
-
-- Inserire nelle slide la scelta di membership statica.
-- Inserire nelle slide la tabella broadcast/unicast:
-  - `RequestVote` via UDP broadcast;
-  - heartbeat vuoti via UDP broadcast;
-  - entry reali via TCP unicast;
-  - client traffic via TCP.
-- Inserire una sezione "limiti noti":
-  - no dynamic membership;
-  - no history/offline replay;
-  - no Byzantine behavior;
-  - no network partitions;
-  - Raft log come storage tecnico, non cronologia chat.
+Questo risultato non chiude i gate: la suite corrente non riproduce la demo completa
+su due notebook e non intercetta il gap causato dal no-op nel livello applicativo.
 
 ---
 
-## 3. Runbook manuale
+## 2. Topologia minima conforme
 
-Build:
+Usare IP LAN reali e stabili per tutta la prova. Esempio da sostituire con gli IP
+effettivi:
+
+| Notebook | IP di esempio | Processi |
+| --- | --- | --- |
+| A | `192.168.1.10` | DirectoryService, broker 0, broker 1, client A |
+| B | `192.168.1.11` | broker 2, client B |
+
+Una distribuzione 2+1 dei tre broker e' sufficiente a mostrare processi su due host.
+Per una demo piu' chiara, se e' disponibile un terzo notebook, eseguire un broker per
+host. In ogni caso almeno un canale broker-broker e almeno un canale client-broker
+devono attraversare davvero la LAN.
+
+Voter set di esempio:
+
+```text
+0@192.168.1.10:7000:50000,1@192.168.1.10:7001:50001,2@192.168.1.11:7002:50002
+```
+
+Attenzione: nell'implementazione corrente la Directory usa le porte fisse `60000`
+per broker/cluster e `60001` per client. Se broker 1 espone la chat su `50001`, non
+c'e' conflitto con la Directory. Verificare comunque tutte le porte prima della demo.
+
+---
+
+## 3. Preparazione della LAN
+
+- [ ] Disabilitare VPN e interfacce virtuali non necessarie, oppure verificare quale
+  interfaccia viene usata dal broadcast.
+- [ ] Verificare che i notebook siano sulla stessa subnet e che l'access point non
+  abiliti client isolation.
+- [ ] Fare ping tra gli IP LAN, se ICMP e' consentito.
+- [ ] Aprire nel firewall Java e le porte TCP/UDP necessarie solo sulla rete privata
+  della demo.
+- [ ] Verificare TCP tra host sulle porte Raft `7000-7002`, chat `50000-50002` e
+  Directory `60000-60001`.
+- [ ] Verificare UDP sulla porta broadcast comune `7100`.
+- [ ] Usare lo stesso `clusterId`, la stessa porta broadcast e lo stesso voter set per
+  tutti i broker.
+- [ ] Sincronizzare lo stesso commit/build su tutti i notebook.
+- [ ] Decidere se la prova parte con directory `raft-data` vuote oppure testa recovery
+  da stato noto. Non mescolare i due casi.
+
+---
+
+## 4. Build e avvio
+
+Build su ogni notebook:
 
 ```powershell
 mvn -q -DskipTests package
 ```
 
-Directory:
+Il jar non espone attualmente un `Main-Class`; usare `target/classes`.
+
+### 4.1 Smoke test locale, non valido come demo finale
+
+Il seguente schema resta utile per diagnosticare il software su un solo host:
 
 ```powershell
 java -cp target/classes it.polimi.ds.chat.directory.DirectoryService "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002"
-```
-
-Broker 0:
-
-```powershell
 java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 0 7000 50000 7100 demo-cluster 1400
-```
-
-Broker 1:
-
-```powershell
 java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 1 7001 50001 7100 demo-cluster 1400
-```
-
-Broker 2:
-
-```powershell
 java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 2 7002 50002 7100 demo-cluster 1400
-```
-
-Client:
-
-```powershell
 java -cp target/classes it.polimi.ds.chat.client.ClientMain 127.0.0.1 60001
 ```
 
-Note:
+Non presentarlo come soddisfacimento della regola dei due notebook.
 
-- Il jar prodotto non espone un `Main-Class`, quindi il runbook usa
-  `java -cp target/classes`.
-- Per evitare stato vecchio durante una demo pulita, valutare la cancellazione della
-  directory di persistenza Raft prima dell'avvio. Non farlo durante i test di restart.
+### 4.2 Avvio distribuito target
 
----
+Questi comandi sono il runbook obiettivo dopo aver reso configurabile la Directory
+nei broker. La sintassi esatta dei nuovi argomenti deve essere aggiornata qui insieme
+al relativo fix; non inventare parametri non ancora supportati dal codice.
 
-## 4. Scenari di testing manuale
+Notebook A, Directory:
 
-### Scenario A - Avvio base
+```powershell
+java -cp target/classes it.polimi.ds.chat.directory.DirectoryService "0@192.168.1.10:7000:50000,1@192.168.1.10:7001:50001,2@192.168.1.11:7002:50002"
+```
 
-- Avviare DirectoryService con il `votersCSV` statico.
-- Avviare broker 0, 1 e 2 con stesso `raftBroadcastPort` e stesso `clusterId`.
-- Verificare dai log che ogni broker recuperi dalla Directory lo stesso voter set.
-- Verificare dai log che venga eletto un solo leader.
-- Verificare che i follower conoscano il leader dopo heartbeat.
+Notebook A, broker 0 e 1; notebook B, broker 2:
 
-Esito atteso:
+```text
+BrokerMain raft <nodeId> <rpcPort> <clientPort> 7100 demo-cluster 1400 <directoryHost> <directoryBrokerPort>
+```
 
-- un solo broker risulta leader;
-- gli altri restano follower;
-- nessuna election continua in loop.
+La riga precedente e' intenzionalmente un contratto target: oggi `BrokerMain` non
+accetta ancora gli ultimi due argomenti. Dopo il fix, sostituirla con i tre comandi
+reali e verificati.
 
-### Scenario B - Chat multi-client su broker diversi
+Client su entrambi i notebook:
 
-- Avviare almeno due client.
-- Farli collegare possibilmente a broker diversi.
-- Inviare messaggi alternati dai client.
+```powershell
+java -cp target/classes it.polimi.ds.chat.client.ClientMain 192.168.1.10 60001
+```
 
-Esito atteso:
-
-- tutti i client connessi ricevono i messaggi nello stesso ordine;
-- non compaiono gap permanenti nella hold-back queue;
-- non compaiono duplicati nella delivery.
-
-### Scenario C - Client collegato a follower
-
-- Identificare un follower.
-- Collegare un client a quel broker.
-- Inviare un messaggio.
-
-Esito atteso:
-
-- il follower inoltra la proposta al leader;
-- il leader committa;
-- tutti i broker applicano la stessa entry;
-- il client riceve ACK solo dopo commit.
-
-### Scenario D - Crash leader
-
-- Con cluster attivo e client connessi, terminare il processo del leader.
-- Attendere una nuova election.
-- Inviare nuovi messaggi.
-
-Esito atteso:
-
-- viene eletto un nuovo leader;
-- il cluster continua a committare con 2 broker su 3;
-- i client collegati al broker morto rilevano il failure e si riconnettono.
-
-### Scenario E - Restart del broker fermato
-
-- Riavviare il vecchio leader con stesso `nodeId`, stesse porte e stesso storage dir.
-- Inviare nuovi messaggi dopo il restart.
-
-Esito atteso:
-
-- il broker rientra come follower;
-- recupera il log via `AppendEntries`;
-- non diventa leader con stato vecchio;
-- applica le entry nello stesso ordine degli altri.
-
-### Scenario F - Retry client
-
-- Inviare un messaggio durante una finestra instabile, per esempio subito dopo il kill
-  del leader.
-- Verificare che il client ritenti finche' non riceve ACK.
-
-Esito atteso:
-
-- il messaggio viene committato una sola volta;
-- non ci sono duplicati nella delivery;
-- non si crea un gap causale permanente.
+`ClientMain` supporta gia' host e porta della Directory da riga di comando.
 
 ---
 
-## 5. Cose da non fare prima della demo
+## 5. Scenari obbligatori
 
-- Non implementare dynamic membership adesso.
-- Non passare a full UDP per `AppendEntries` con entry reali.
-- Non aggiungere refactor grandi non necessari.
-- Non presentare DirectoryService come parte del consenso.
-- Non presentare PeerRegistry/discovery come sorgente del quorum.
-- Non presentare la LAN discovery come meccanismo di discovery dei broker Raft.
+Per ogni scenario salvare log con timestamp e annotare PASS/FAIL. Confrontare la
+sequenza dei soli messaggi chat globali, escludendo JOIN/QUIT locali.
+
+### Scenario A - Avvio distribuito e uso effettivo della LAN
+
+1. Avviare Directory e tre broker secondo la topologia.
+2. Verificare un solo leader e due follower stabili.
+3. Acquisire log che mostrino `RequestVote`/heartbeat sul transport UDP broadcast.
+4. Confermare che almeno un follower sia sull'altro notebook.
+
+PASS se il cluster si forma tramite IP LAN, il broadcast attraversa la LAN e non ci
+sono election continue.
+
+### Scenario B - Client su broker diversi, stesso ordine
+
+1. Avviare almeno due client sui due notebook.
+2. Assicurarsi che siano connessi a broker diversi; se necessario bilanciare il
+   numero di client o documentare la selezione Directory.
+3. Inviare messaggi alternati e raffiche concorrenti.
+4. Registrare per ogni client la lista `(seq, sender, text)`.
+
+PASS se tutti i destinatari connessi condividono lo stesso ordine relativo, senza
+duplicati e senza gap permanenti. Il mittente puo' non ricevere l'echo del proprio
+messaggio.
+
+### Scenario C - Catena causale cross-broker
+
+1. Client A invia `m1` tramite broker 0.
+2. Dopo aver ricevuto `m1`, client B collegato a broker 2 invia immediatamente `m2`.
+3. Un terzo destinatario, oppure i log di delivery dei due broker, osserva entrambe.
+
+PASS se nessun destinatario osserva `m2` prima di `m1` e i metadata mostrano la
+dipendenza causale.
+
+### Scenario D - Proposta attraverso un follower
+
+1. Collegare un client a un follower.
+2. Inviare un messaggio.
+
+PASS se il follower inoltra al leader, il comando viene committato e l'ACK arriva
+solo dopo commit.
+
+### Scenario E - Crash del leader senza partition
+
+1. Terminare il processo leader, lasciando connessi gli altri due broker.
+2. Attendere la nuova elezione.
+3. Inviare nuovi messaggi.
+
+PASS se viene eletto un solo nuovo leader, i due voter rimasti formano la maggioranza
+e i messaggi successivi sono consegnati nello stesso ordine. Verificare esplicitamente
+che la no-op del nuovo term non blocchi la sequenza chat.
+
+### Scenario F - Restart e catch-up
+
+1. Riavviare il broker fermato con stesso id, endpoint e storage directory.
+2. Inviare nuovi messaggi.
+
+PASS se rientra senza violare l'ordine, recupera il log e la delivery applicativa non
+attende indici gia' applicati o entry no-op.
+
+### Scenario G - Client failure e connected-only delivery
+
+1. Disconnettere completamente un client.
+2. Inviare `offline-1` e `offline-2` mentre e' assente.
+3. Riconnetterlo e inviare `online-1`.
+
+PASS se il client non riceve `offline-1`/`offline-2` come history e riceve solo il
+traffico successivo alla nuova connessione.
+
+### Scenario H - Failure transitorio di un link, senza partition
+
+Introdurre una perdita o interruzione breve che non separi stabilmente il cluster in
+due componenti. Ripristinare la connettivita' e osservare retry/catch-up.
+
+PASS se, dopo il ripristino, il cluster converge e continua senza ordini divergenti.
+Non usare questo scenario per dichiarare partition tolerance.
+
+### Scenario I - Directory e reconnect
+
+1. Far fallire il broker di un client.
+2. Attendere che la Directory lo rimuova.
+3. Verificare riconnessione a un altro broker e retry delle richieste pendenti.
+4. Ripetere facendo fallire il primo tentativo di reconnect.
+
+PASS se il client continua a ritentare con backoff e non resta permanentemente senza
+heartbeat manager. Questo richiede il fix indicato in `CODE_ISSUES_BY_GROUP.md`.
 
 ---
 
-## 6. Frasi pronte per l'orale
+## 6. Evidenze da conservare
 
-Membership:
+- [ ] commit hash e output completo di `mvn test`;
+- [ ] tabella notebook/IP/processi/porte;
+- [ ] log dell'elezione e del cambio leader;
+- [ ] log o packet capture minima che provi UDP broadcast tra notebook;
+- [ ] sequenze di delivery confrontabili per almeno due client su broker diversi;
+- [ ] risultato della catena causale;
+- [ ] risultato della disconnessione senza history;
+- [ ] risultato di crash, reconnect e restart;
+- [ ] elenco dei limiti osservati.
 
-> La membership votante e' statica per preservare la safety del quorum Raft. La
-> Directory distribuisce ai broker il voter set configurato all'avvio tramite
-> `votersCSV`, ma non partecipa al consenso. La LAN discovery non cambia chi vota.
-> Dynamic membership richiederebbe config entries replicate, learner e promozione
-> controllata.
+---
 
-Broadcast:
+## 7. Slide richieste
 
-> Usiamo UDP broadcast dove il messaggio e' piccolo e destinato a tutti: `RequestVote`
-> e heartbeat vuoti. Manteniamo TCP per `AppendEntries` con payload per evitare
-> frammentazione UDP, ACK/NACK applicativi e retry selettivo manuale.
+Preparare poche slide, preferibilmente 6-8:
 
-Storage dei messaggi:
+1. requisiti ufficiali e assunzioni;
+2. software architecture;
+3. run-time architecture sui notebook della demo;
+4. Raft, total order e causal-order argument;
+5. tabella broadcast/unicast e motivazioni;
+6. failure handling e connected-only delivery;
+7. evidenze dei test;
+8. limiti e interpretazione concordata dello storage Raft.
 
-> I client non ricevono history e i broker non offrono storage applicativo dei
-> messaggi offline. Il log Raft persistito e' storage tecnico necessario alla safety
-> del consenso; non viene usato come cronologia per riconnettere client disconnessi.
+Nelle slide non confondere:
+
+- log order con prova completa della delivery end-to-end;
+- discovery LAN con membership Raft;
+- log Raft tecnico con una feature di history;
+- link failure transitorio con network partition;
+- smoke test localhost con demo distribuita su almeno due notebook.

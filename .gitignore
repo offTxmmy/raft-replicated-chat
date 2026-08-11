@@ -34,3 +34,7 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+# Local Codex configuration
+/.agents/
+/AGENTS.md

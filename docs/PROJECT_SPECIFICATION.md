@@ -1,327 +1,281 @@
-# Replicated Chat Infrastructure - Final Design Notes
+# Replicated Chat Infrastructure - Specification and Compliance Baseline
 
-Updated on 2026-06-03.
+Updated on 2026-08-11 from the official file
+`projects_2025-2026_v1.pdf` for the Distributed Systems course (A.Y. 2025-2026).
 
-This document is the main reference for the project presentation. It describes the
-requirements, the implemented architecture, the guarantees we claim, the guarantees
-we deliberately do not claim, and the remaining checks before the group manual
-testing session.
+This is the authoritative project document. It separates three things that must not
+be confused during development or presentation:
 
----
+- requirements stated by the professors;
+- design choices made by the group;
+- properties that are actually implemented and validated.
 
-## 1. Course specification
-
-The project asks for a replicated chat infrastructure:
-
-- brokers are connected on the same LAN;
-- clients are on the Internet and connect to one broker at a time;
-- a client can send messages through any broker;
-- clients connected to any broker must receive messages in the same order;
-- delivery must also respect causal relationships;
-- brokers do not provide message history for disconnected clients;
-- clients, brokers and network links may fail;
-- no Byzantine behavior and no network partitions are assumed;
-- LAN broadcast/multicast is available among brokers and should be exploited where it
-  is useful.
-
-The implementation is a real Java distributed application.
+`Implemented` means that the corresponding code path exists. `Validated` means that
+there is evidence from an appropriate test. A property required by the assignment is
+not considered satisfied merely because the architecture intends to provide it.
 
 ---
 
-## 2. Main design choices
+## 1. Official requirements
 
-### 2.1 Raft for total order
+### 1.1 Course rules applicable to this project
 
-The production ordering layer is based on Raft. Every chat message that must be
-globally delivered is proposed as a Raft log command. A command is delivered only
-after it is committed and applied in log-index order.
+| ID | Official rule | Consequence for this project |
+| --- | --- | --- |
+| R1 | The project is optional and may increase the final score if correctly developed. | Administrative rule; no software requirement. |
+| R2 | Groups must contain two or three students. | The submitted group must have 2-3 members. |
+| R3 | The project is valid only for A.Y. 2025-2026 and must be presented before its last official exam session. | The group must schedule the presentation within that deadline. |
+| R4 | The demonstration must use the students' own notebooks, at least two, connected to a wired or wireless LAN, and show a truly distributed scenario. | A localhost-only demonstration is not sufficient. At least two physical notebooks must run communicating processes. |
+| R5 | A few slides must describe the software architecture and the run-time architecture. | Slides and a deployment diagram are required presentation material. |
+| R6 | A Java project may use only sockets - TCP or UDP, unicast or multicast - or RMI as networking technologies. | This implementation uses Java TCP/UDP sockets and object serialization over them; no other networking middleware may be introduced. |
+| R7 | Thesis projects follow a separate path through Prof. Cugola. | Not applicable to this course project. |
 
-This gives the property required by the specification: all brokers apply the same
-committed log prefix, therefore all connected clients observe the same message order
-for the messages delivered by their broker.
+### 1.2 Replicated Chat Infrastructure requirements
 
-The old centralized sequencer is not the production path.
+| ID | Requirement or assumption | Required interpretation |
+| --- | --- | --- |
+| P1 | The brokers are connected to the same LAN and link-layer broadcast is available and must be exploited. | Broker-to-broker design and the demo must actually use LAN broadcast where appropriate. Merely running all brokers on loopback is insufficient. |
+| P2 | Clients may run on the Internet, not necessarily on the brokers' LAN. Each client connects to one broker and can communicate with clients connected to any broker. | Client-broker communication must be routable point-to-point traffic; clients must not rely on LAN broadcast. |
+| P3 | Every client must receive messages in the same order. | All simultaneously connected recipients must observe the same relative order for the chat messages delivered during their connected intervals. |
+| P4 | Delivery must respect causal relationships. | If message `b` is causally dependent on message `a`, no client may observe `b` before `a`. Total order alone is not a proof of causal order unless the chosen total order is shown to extend happens-before. |
+| P5 | Brokers do not store messages; clients receive messages only while connected. | There must be no offline inbox, history query or replay after reconnect. The current persistent Raft log contains chat payloads, so the group must explicitly resolve or confirm this interpretation before claiming full compliance; see section 7. |
+| P6 | The solution may be a real distributed application or an OmNet++ simulation. | The selected solution is a real Java distributed application. |
+| A1 | No Byzantine behavior. | Components may crash or lose communication, but do not send malicious or arbitrary protocol data. |
+| A2 | Clients, brokers and network links may fail, but network partitions do not occur. | Failure and recovery paths must be demonstrated without claiming partition tolerance. Tests that intentionally split the cluster into disconnected components are outside the assumed model. |
 
-### 2.2 Static voting membership
-
-The Raft voting set is configured statically at broker startup through
-`RaftConfig.getVoters()`. Quorum is computed only from this static set.
-The static topology is provided to the `DirectoryService` at startup as a
-`votersCSV`; each broker fetches the same voter map from the Directory through a
-one-shot `GetClusterRequestMessage`.
-
-We chose static membership because it gives a stable majority definition. If brokers
-could join the voting set dynamically without replicated configuration entries, two
-brokers could compute different quorums and Raft safety would no longer be
-defensible. Correct dynamic membership requires the Raft reconfiguration protocol
-using configuration entries, learners and controlled promotion to voter. That is a
-valid future extension, but it is not required by the assignment and would increase
-the safety risk before the demo.
-
-Crash and restart of configured voters is in scope. Adding a new voting broker while
-the system is running is out of scope.
-
-### 2.3 LAN broadcast where it is useful
-
-Broker-to-broker traffic uses a hybrid transport:
-
-- `RequestVote` requests use UDP LAN broadcast;
-- empty `AppendEntries` heartbeats use UDP LAN broadcast;
-- `AppendEntries` carrying log entries use TCP unicast;
-- follower-to-leader proposal forwarding uses TCP;
-- client-to-broker communication uses TCP.
-
-This is the tradeoff we will justify at the oral exam. Broadcast is useful for
-small messages addressed to all brokers, especially elections and heartbeat rounds.
-TCP remains better for log-entry replication because it avoids UDP fragmentation,
-manual ACK/NACK handling, selective retransmission and payload-size problems.
-
-### 2.4 Broker discovery is not part of membership
-
-`LanDiscoveryService` and `PeerRegistry` are not the source of Raft membership or
-quorum and are not part of the reliable demo path for broker cluster setup.
-
-The current reliable demo path is based on the static voter endpoints configured
-in the Directory at startup. LAN is still used where it is useful, especially for
-Raft broadcast control traffic, but not to dynamically discover or change the
-broker voting set.
-
-### 2.5 No application-level message storage
-
-The assignment says that brokers do not store messages for clients. Our
-interpretation is:
-
-- disconnected clients do not receive history;
-- there is no offline replay feature;
-- client sessions are volatile;
-- the Raft log is technical consensus storage, not application history.
-
-Raft persistence is still necessary for safety: a broker must persist term, vote and
-log state so that crash-recovery does not break election or replication rules.
+The phrase "messages sent by others" permits the implementation to suppress the
+echo to the originating client. This does not change the order observed by the other
+connected clients.
 
 ---
 
-## 3. Architecture
+## 2. Selected architecture
+
+The implementation uses the following processes:
+
+- `DirectoryService`: a TCP directory that distributes the static voter topology to
+  brokers at startup and selects a live broker for clients;
+- `Broker`: accepts client TCP connections, proposes chat commands to Raft and
+  delivers committed messages to its local connected clients;
+- `RaftOrderingService`: replicates a log over the broker cluster and applies
+  committed entries in log-index order;
+- `ClientMain`: discovers a broker through the directory, maintains a TCP session,
+  retries unacknowledged commands and attempts reconnection after failure.
 
 ```text
-Client TCP
-    |
-    v
-+-------------------------+
-| Broker                  |
-|                         |
-| Client handlers         |
-| Broker core             |
-| OrderingService         |
-| RaftOrderingService     |
-| Raft core               |
-| Hybrid Raft transport   |
-+-------------------------+
-    |             |
-    | TCP         | UDP LAN broadcast
-    | entries     | votes / heartbeats
-    v             v
- other brokers on the same LAN
+Internet / routable client side
+
+ Client A ---- TCP ----> Broker 0 -----+
+                                      |
+ Client B ---- TCP ----> Broker 1 -----+---- broker LAN
+                                      |     UDP broadcast: votes, heartbeats
+ Client C ---- TCP ----> Broker 2 -----+     TCP unicast: log payloads, proposals
+                         |
+                         +---- TCP ---- DirectoryService
 ```
 
-### Broker components
-
-- `Broker` manages connected clients and calls the ordering layer.
-- `RaftOrderingService` implements the `OrderingService` interface.
-- `RaftNode` stores local Raft role, term, vote and leader information.
-- `RaftElectionManager` handles election timeouts, votes and leader transitions.
-- `RaftReplicationManager` handles `AppendEntries`, conflict handling and follower
-  catch-up.
-- `RaftLog` stores ordered log entries.
-- `RaftCommitManager` advances commit index and applies committed entries in order.
-- `FileRaftPersistence` persists the Raft state needed for crash-recovery.
-- `RaftRpcServer` and `RaftRpcClient` handle TCP Raft traffic and proposal forwarding.
-- `RaftUdpBroadcastTransport` and `RaftHybridTransport` implement the LAN broadcast
-  part of the Raft transport.
-- `LanDiscoveryService` and `PeerRegistry` are discovery helpers, not consensus
-  membership.
+The directory is not part of Raft consensus. Raft membership and quorum come only
+from the identical static voter map loaded into every `RaftConfig`.
 
 ---
 
-## 4. Message flow
+## 3. Communication design and Java networking constraint
 
-### 4.1 Client joins
+| Traffic | Current transport | Why it matches the design |
+| --- | --- | --- |
+| Client to broker, including JOIN, chat, ACK, heartbeat and QUIT | TCP unicast socket | Clients need not be on the broker LAN. |
+| Broker/directory registration, heartbeat and lookup | TCP unicast socket | Point-to-point control traffic. |
+| Raft `RequestVote` request | UDP LAN broadcast | Small request for all configured voters; directly exploits the LAN broadcast assumption. |
+| Raft `RequestVote` response | UDP unicast to the candidate | One response has one destination. |
+| Empty Raft `AppendEntries` heartbeat | UDP LAN broadcast | Small periodic request for all followers. |
+| Response to an empty heartbeat | UDP unicast to the leader | One response has one destination. |
+| Raft `AppendEntries` containing log entries | TCP unicast per follower | Reliable ordered stream and follower-specific catch-up. |
+| Follower proposal forwarding | TCP unicast to the known leader | The proposal has one destination and waits for a commit result. |
+| Auxiliary LAN discovery | UDP broadcast | Discovery helper only; it never changes voter membership or quorum. |
 
-1. The client chooses a broker, usually through the directory service.
-2. The client opens a TCP connection to that broker.
-3. The broker keeps the client in its local connected-client set.
-4. The client receives only messages delivered while it remains connected.
-
-Join and leave notifications are local system messages in the current application
-layer. They must not be presented as globally ordered Raft chat commands unless we
-explicitly change the implementation.
-
-### 4.2 Chat message on the leader
-
-1. A client sends a `ChatReqMessage` to its connected broker.
-2. If that broker is the Raft leader, it proposes the command directly.
-3. The leader appends the command to its log.
-4. The leader replicates it to followers with `AppendEntries` over TCP.
-5. After a majority acknowledges, the command is committed.
-6. Every broker applies committed entries in log order.
-7. Each broker delivers the resulting `ChatDeliverMessage` to its locally connected
-   clients.
-
-### 4.3 Chat message on a follower
-
-If the connected broker is a follower, the current implementation forwards the
-proposal to the known leader over TCP. Client redirect is not the primary mechanism
-implemented today.
-
-If there is no known leader during an election, the proposal is rejected with a retry
-semantics. The client/broker flow must retry after the cluster elects a leader.
-
-### 4.4 Causal order
-
-The system combines:
-
-- Raft total order for all committed chat commands;
-- vector-clock metadata attached by the broker/application layer;
-- a hold-back delivery rule that avoids delivering a message before its causal
-  predecessors.
-
-Retry of the same client message reuses the same broker-side command identity and
-causal metadata through a broker-side cache keyed by `(username, clientTimestamp)`.
-The remaining hardening topic is concurrency between different client messages
-originating from the same broker.
-
-### 4.5 Deduplication
-
-The effective retry key currently used by the Raft ordering path is based on the
-username and the client message timestamp. This must be documented honestly.
-
-A stronger future design would use an explicit `(clientId, clientSeq)` pair. That is
-cleaner because it does not rely on timestamps and is easier to reason about during
-retries, crashes and reconnects.
+All networking in `src/main/java` is based on `Socket`, `ServerSocket`,
+`DatagramSocket` and `DatagramPacket`. This is compliant with rule R6.
 
 ---
 
-## 5. Guarantees we claim
+## 4. Intended chat message flow
 
-Under the assumptions of no Byzantine behavior and no partitions:
+1. A client asks the directory for a broker and opens a TCP session to it.
+2. The client sends a message identified by `(clientId, clientSeq)`.
+3. The connected broker creates or reuses a `ChatReqMessage`. A retry of the same
+   client message reuses its command identity and causal metadata.
+4. A follower forwards the proposal to the known leader; a leader appends it
+   directly.
+5. The leader replicates the `ChatCommand`. After a majority acknowledges it, Raft
+   commits the entry.
+6. Every broker applies committed log entries in the same log-index order.
+7. The broker's hold-back queue checks sequence and causal readiness, then delivers
+   the chat message to its currently connected local clients except its originator.
+8. The originating client receives an ACK only after the proposal is reported as
+   committed. A timeout triggers retry with the same `(clientId, clientSeq)`.
 
-- at most one Raft leader can commit entries for a term;
-- a committed log entry is preserved by future leaders;
-- all brokers apply committed entries in the same log order;
-- clients connected to brokers receive committed chat messages in that same order;
-- causal delivery is preserved when causal metadata has no gaps;
-- a configured broker can crash and restart without intentionally losing Raft safety
-  state.
-
----
-
-## 6. Guarantees we do not claim
-
-- No offline message history for disconnected clients.
-- No Byzantine fault tolerance.
-- No operation under network partitions.
-- No dynamic voting membership during execution.
-- No application-level exactly-once guarantee based on a true `clientSeq` yet.
-- No guarantee that auxiliary LAN discovery alone can configure a full Raft cluster.
-- No full-UDP reliable log replication.
-
-These are limitations, not contradictions with the assignment. They are design choices
-that must be justified clearly.
+JOIN and QUIT notifications are local system messages. They are not replicated chat
+commands and must not be used as evidence for the global order guarantee.
 
 ---
 
-## 7. Testing status
+## 5. Ordering and causal-delivery argument
 
-Automated tests have passed previously with:
+### Total order
+
+Raft provides one committed log order under its usual majority and stable-membership
+conditions. Mapping each committed chat command to its log position is a reasonable
+basis for a global chat order.
+
+The application currently uses the raw Raft log index as `ChatDeliverMessage.seq`,
+but it suppresses no-op entries when applying the log. `HoldBackQueue` nevertheless
+expects a gap-free sequence of chat deliveries. Because a leader appends a no-op when
+elected, the first chat command can have index 2 while the queue waits for index 1;
+the same problem can recur after later leader changes or restart. Therefore the
+end-to-end total-order requirement is **not yet validated and is currently blocked by
+this P0 defect**, even though the Raft layer's log-order tests pass.
+
+An acceptable fix must either:
+
+- advance the application sequence across every committed non-chat entry and restore
+  that progress on restart; or
+- assign a separate, contiguous chat-delivery sequence independent of raw Raft log
+  indexes.
+
+The fix needs an integration test that starts real `Broker` instances, includes a
+leader no-op, sends chat traffic and verifies delivery to clients on different
+brokers.
+
+### Causal order
+
+The implementation attaches broker vector clocks and uses a hold-back queue. However,
+the current causal check ignores the sender broker's component and the broker updates
+its outgoing causal clock after client I/O. A client can respond immediately after
+receiving a message while the broker's outgoing clock has not yet incorporated that
+delivery. The group must fix or formally rule out this race and test a causal chain
+across different brokers before claiming P4.
+
+The final evidence must show that the chosen committed total order extends the
+happens-before relation, not only that every broker has the same log.
+
+---
+
+## 6. Failure model and claimed scope
+
+Within the official no-partition, non-Byzantine assumptions, the intended scope is:
+
+- a three-voter cluster continues after one broker crashes because two voters still
+  form a majority;
+- a configured broker may restart with the same id, endpoints and Raft state;
+- TCP/UDP messages may be lost or connections may fail transiently; Raft retries and
+  later heartbeat/election rounds are expected to recover while the network remains
+  connected;
+- a client detects a failed broker, asks the directory for another live broker and
+  retries uncommitted messages;
+- a disconnected client does not receive messages sent while it is disconnected.
+
+The implementation does not claim:
+
+- Byzantine fault tolerance;
+- availability during a network partition;
+- dynamic Raft membership;
+- offline history or replay;
+- tolerance of a directory failure for new connections or reconnects;
+- more than one simultaneous broker failure in a three-voter cluster.
+
+The client reconnect path, directory liveness window and link-failure recovery still
+need the manual tests listed in `PRE_GROUP_MANUAL_TESTING_TODO.md`.
+
+---
+
+## 7. Meaning of "brokers do not store messages"
+
+The application exposes no history API, offline inbox or reconnect replay. In that
+application-level sense, clients receive only live traffic while connected.
+
+Nevertheless, `FileRaftPersistence` writes Raft log entries containing the chat text
+to disk. That is technical consensus state, but it is still literal storage of
+messages. The previous documentation called this unconditionally compliant; the
+official text does not explicitly grant that exception.
+
+Before the presentation the group must choose and document one defensible resolution:
+
+1. obtain confirmation that the requirement forbids user-visible history but permits
+   bounded internal consensus storage, then implement/describe compaction and never
+   replay it to clients; or
+2. change the design so persistent recovery state does not retain chat payloads,
+   while giving a correct failure model and ordering argument.
+
+Until that decision is made, do not claim that persistent message-bearing Raft logs
+are certainly allowed by P5.
+
+---
+
+## 8. Compliance status on 2026-08-11
+
+| Requirement | Current status | Evidence or missing work |
+| --- | --- | --- |
+| R2 group size | Group responsibility | Confirm 2-3 names in submission/slides. |
+| R3 academic-year deadline | Group responsibility | Schedule before the last official session of A.Y. 2025-2026. |
+| R4 at least two notebooks on a LAN | **Not yet validated** | Current runbook is localhost-only and broker directory host is hard-coded to `localhost`. Make it configurable and execute the two-notebook runbook. |
+| R5 architecture slides | **To prepare** | Include both software and run-time/deployment architecture. |
+| R6 only sockets/RMI in Java | **Implemented; code-inspected** | TCP/UDP Java sockets only. |
+| P1 LAN brokers and broadcast | **Implemented; real-LAN validation missing** | Hybrid UDP broadcast exists; test packet exchange on the actual demo LAN. |
+| P2 clients through any broker | **Implemented; distributed validation missing** | Directory selection and follower forwarding exist. Validate clients on different brokers/notebooks. |
+| P3 same delivery order | **Blocked by P0 sequence-gap defect** | Fix no-op/restart sequence handling and add end-to-end broker/client test. |
+| P4 causal delivery | **Not yet proven** | Fix/justify causal-clock timing and sender-component rule; run causal-chain test. |
+| P5 no storage; connected-only delivery | **Partial / interpretation open** | No history or replay exists, but persistent Raft log stores chat payloads. |
+| P6 real distributed application | **Implemented** | Java multi-process application. |
+| A1 no Byzantine behavior | Assumption | State explicitly in slides. |
+| A2 failures but no partitions | **Partially tested** | Raft automated tests cover several crash/restart paths; physical link/client/broker scenarios remain manual. |
+
+---
+
+## 9. Verification evidence
+
+On 2026-08-11:
 
 ```powershell
 mvn test
 ```
 
-Observed result:
+completed successfully with:
 
 ```text
-Tests run: 170, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 186, Failures: 0, Errors: 0, Skipped: 0
+BUILD SUCCESS
 ```
 
-Packaging without tests has also passed with:
-
-```powershell
-mvn -q -DskipTests package
-```
-
-The generated jar does not currently expose a `Main-Class`, so the practical runbook
-uses:
-
-```powershell
-java -cp target/classes ...
-```
-
-The next required step is manual group testing with real processes, clients and
-broker failures. The checklist is in `PRE_GROUP_MANUAL_TESTING_TODO.md`.
+This is unit/integration evidence for the tested components, not evidence for rule R4
+or for the complete end-to-end P3/P4 guarantees. In particular, the suite does not
+currently connect full client sessions to multiple physical broker processes after a
+leader no-op.
 
 ---
 
-## 8. Remaining work before the presentation
+## 10. Presentation checklist and safe claims
 
-### Must fix or explicitly validate
+The slide deck must contain, at minimum:
 
-- Manual validation of concurrent messages from the same broker with vector-clock
-  metadata.
-- Manual 3-broker demo with clients attached to different brokers.
-- Manual test of follower proposal forwarding.
-- Manual leader crash and new election.
-- Manual restart of the crashed broker with persisted Raft state.
+1. the official requirements and assumptions;
+2. the software architecture and responsibility of each component;
+3. the run-time deployment over at least two notebooks and one LAN;
+4. the hybrid UDP-broadcast/TCP-unicast transport table;
+5. the total-order and causal-order argument;
+6. failure scenarios demonstrated and their observed results;
+7. the connected-only delivery semantics and the agreed interpretation of Raft
+   persistence;
+8. limitations: no partitions, no Byzantine behavior, static membership and
+   directory dependency.
 
-### Should document in the slides
+Safe statements after the remaining P0 work and manual validation:
 
-- Static membership is a safety choice.
-- LAN broadcast is used for votes and heartbeats, not for large log payloads.
-- TCP is used for client traffic and payload-bearing Raft replication.
-- Directory service is a client/broker helper, not part of consensus.
-- Raft log persistence is technical storage, not offline chat history.
+- "All chat commands are committed in one Raft order and every connected broker
+  delivers the same chat sequence."
+- "The demonstrated causal chains are ordered consistently with happens-before."
+- "UDP link-layer broadcast is used for vote requests and empty heartbeats; TCP
+  unicast is used for follower-specific log replication and client traffic."
+- "Disconnected clients receive no history or replay."
 
----
-
-## 9. Oral defense answers
-
-### Why Raft?
-
-Raft gives a replicated log. The committed log order is the global delivery order, so
-the same committed prefix is applied by all brokers.
-
-### Why static membership?
-
-Because quorum safety depends on all nodes using the same voting set. Dynamic
-membership is possible in Raft, but only with replicated configuration changes and
-careful promotion of new voters. The assignment does not require that, so the safer
-choice is a static voting set with crash-recovery.
-
-### Why broadcast and TCP together?
-
-Broadcast is efficient and natural for small messages sent to all brokers, such as
-votes and heartbeats. TCP is more appropriate for log entries because payloads can be
-larger and need reliable ordered delivery.
-
-### Why is the Raft log not a violation of "brokers do not store messages"?
-
-The Raft log is internal consensus state required for safety. It is not exposed as
-chat history, and disconnected clients do not receive old messages after reconnecting.
-
-### What happens when a client is connected to a follower?
-
-The follower forwards the proposal to the current leader. If no leader is known during
-an election, the proposal is retried after a leader is elected.
-
----
-
-## 10. Glossary
-
-- Broker: server participating in the replicated chat service.
-- Client: external user process connected to one broker.
-- Voter: broker whose vote counts toward Raft quorum.
-- Term: Raft logical epoch.
-- Quorum: majority of the static voter set.
-- Commit: point where a log entry is durably accepted by a majority and can be
-  applied.
-- Delivery: forwarding an applied chat command to currently connected clients.
+Do not claim full compliance while any corresponding row in section 8 is marked
+blocked, partial or not validated.

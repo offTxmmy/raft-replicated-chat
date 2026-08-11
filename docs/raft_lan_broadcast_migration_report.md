@@ -1,185 +1,183 @@
-# Raft LAN Broadcast Transport - Final Report
+# Raft LAN Broadcast Transport - Design and Compliance Report
 
-Aggiornato al 2026-06-03.
+Aggiornato al 2026-08-11 dopo il confronto con la specifica ufficiale.
 
-Questo documento sostituisce il vecchio piano di migrazione. Non va letto come una
-lista di TODO: descrive la scelta finale di trasporto broker-broker e la
-giustificazione da portare all'orale.
-
----
-
-## 1. Requisito da soddisfare
-
-La specifica dice che i broker sono sulla stessa LAN e che il broadcast di livello
-link e' disponibile. Quindi non basta dire "Raft funziona su TCP": dobbiamo spiegare
-dove sfruttiamo broadcast/multicast e dove scegliamo invece unicast per ottenere
-garanzie migliori.
-
-La risposta del professore richiede due giustificazioni:
-
-- membership statica o dinamica, in funzione delle garanzie;
-- scelta dei singoli messaggi, broadcast/multicast o unicast, in funzione di garanzie
-  e traffico su LAN.
+Questo non e' un piano di migrazione. Descrive il trasporto implementato, la sua
+motivazione e le prove ancora necessarie per dimostrare che il progetto sfrutta
+realmente il broadcast di livello link tra broker sulla stessa LAN.
 
 ---
 
-## 2. Scelta finale
+## 1. Requisito ufficiale
 
-La scelta implementativa e' un trasporto Raft ibrido.
+La specifica del progetto Replicated Chat Infrastructure stabilisce che:
 
-| Messaggio | Trasporto | Motivazione |
-| --- | --- | --- |
-| `RequestVote` request | UDP LAN broadcast | Messaggio piccolo, destinato naturalmente a tutti i voter. Riduce traffico ripetitivo rispetto a N connessioni separate. |
-| `RequestVote` response | Unicast verso il candidato | La risposta ha un destinatario specifico e contiene il voto di un singolo broker. |
-| `AppendEntries` vuoto, cioe' heartbeat | UDP LAN broadcast | Messaggio piccolo, periodico, destinato a tutti i follower. E' il caso piu' adatto al broadcast. |
-| `AppendEntries` con log entries | TCP unicast | Payload potenzialmente grande, serve affidabilita', ordine, retry e backtracking per follower. |
-| Proposal forwarding follower -> leader | TCP unicast | La proposta deve arrivare a un leader specifico. |
-| Client <-> broker | TCP | I client non sono sulla LAN dei broker, quindi il broadcast link-layer non e' applicabile. |
+- i broker sono collegati alla stessa LAN;
+- il broadcast di livello link e' disponibile tra i broker;
+- il progetto deve assumere e sfruttare questa disponibilita';
+- i client possono essere su Internet e quindi non devono dipendere dal broadcast
+  della LAN dei broker.
 
-Questa scelta sfrutta davvero la LAN broadcast dove porta vantaggio senza spostare su
-UDP la parte piu' rischiosa: la replica affidabile delle entry di log.
+La regola generale del corso aggiunge che un progetto Java puo' usare soltanto socket
+TCP/UDP, unicast/multicast, oppure RMI. L'implementazione corrente usa esclusivamente
+socket Java TCP/UDP.
 
----
-
-## 3. Componenti coinvolti
-
-- `RaftUdpBroadcastTransport`
-  - gestisce i datagram UDP broadcast per messaggi Raft piccoli;
-  - filtra messaggi del cluster sbagliato, messaggi locali e sender non votanti;
-  - evita di trasformare discovery o broadcast in membership dinamica.
-
-- `RaftHybridTransport`
-  - decide quale canale usare;
-  - usa broadcast per vote request e heartbeat vuoti;
-  - delega al TCP path per append con payload.
-
-- `RaftRpcClient` / `RaftRpcServer`
-  - restano necessari per TCP;
-  - gestiscono entry replication con payload e proposal forwarding.
-
-- `RaftConfig`
-  - contiene il set statico dei voter;
-  - contiene i parametri di broadcast Raft, per esempio porta comune, cluster id e
-    limite payload.
-
-- `LanDiscoveryService` / `PeerRegistry`
-  - sono separati dal trasporto Raft;
-  - non sono sorgente del quorum;
-  - sono ausiliari e non vanno presentati come requisito di safety.
+Una demo solo su `127.0.0.1` non dimostra questo requisito: la prova finale deve
+coinvolgere almeno due notebook fisici sulla stessa LAN.
 
 ---
 
-## 4. Perche' non full broadcast?
+## 2. Scelta implementata
 
-Portare anche `AppendEntries` con log entries su UDP broadcast richiederebbe una
-reliability layer applicativa:
+Il trasporto Raft e' ibrido:
 
-- limite massimo del datagram;
-- frammentazione e riassemblaggio;
-- ACK/NACK per frammenti o entry;
-- retry selettivo;
-- deduplica;
+| Messaggio | Trasporto corrente | Destinatario | Motivazione |
+| --- | --- | --- | --- |
+| `RequestVote` request | UDP broadcast | Tutti i voter della LAN | Messaggio piccolo e naturalmente one-to-many. |
+| `RequestVote` response | UDP unicast | Candidato | Risposta peer-specifica. |
+| `AppendEntries` senza entry | UDP broadcast | Tutti i follower | Heartbeat piccolo, periodico e comune. |
+| Response a heartbeat vuoto | UDP unicast | Leader | Stato di un singolo follower. |
+| `AppendEntries` con entry | TCP unicast | Singolo follower | Payload affidabile e ordinato, catch-up e retry specifici per follower. |
+| Response a append con payload | TCP sulla stessa RPC | Leader | Risultato specifico del follower. |
+| Proposal forwarding | TCP unicast | Leader noto | Richiesta punto-punto che attende l'esito del commit. |
+| Client-broker | TCP unicast | Broker scelto | Il client puo' trovarsi fuori dalla LAN. |
+| Broker/directory e client/directory | TCP unicast | Directory | Registrazione, heartbeat e lookup punto-punto. |
+| Discovery ausiliaria | UDP broadcast | Peer sulla LAN | Non modifica membership o quorum. |
+
+Componenti principali:
+
+- `RaftHybridTransport` sceglie UDP broadcast per vote request e heartbeat vuoti e
+  TCP per append con payload;
+- `RaftUdpBroadcastTransport` enumera le interfacce di rete attive, ignora loopback e
+  invia all'indirizzo broadcast di ogni interfaccia idonea;
+- `RaftRpcClient` e `RaftRpcServer` gestiscono le RPC TCP;
+- `RaftConfig` contiene voter set statico, porta broadcast comune, `clusterId` e
+  limite del payload UDP;
+- `RaftUdpEnvelope` include cluster, sender, target, tipo, term, message id e sequence
+  per filtrare traffico estraneo e duplicato.
+
+---
+
+## 3. Perche' non usare broadcast per tutto
+
+`AppendEntries` con payload non e' un unico messaggio identico per tutti i follower.
+Ogni follower ha il proprio `nextIndex`, puo' richiedere backtracking diverso e puo'
+essere in una fase differente di catch-up. Un broadcast indiscriminato sarebbe poco
+adatto anche prima di considerare l'affidabilita'.
+
+Una replica completa via datagram richiederebbe inoltre:
+
+- frammentazione e riassemblaggio oltre il limite del datagram;
+- ACK/NACK, timeout e ritrasmissioni selettive;
+- deduplica e ordinamento dei frammenti;
 - backpressure;
-- gestione di follower lenti o appena riavviati.
+- gestione separata dei follower lenti o appena riavviati.
 
-Raft tollera perdita di messaggi, ma la replica efficiente del log dipende da retry,
-conflict hints, `nextIndex`, `matchIndex` e catch-up. TCP e' piu' adatto per questa
-parte perche' fornisce stream affidabile e ordinato. In una demo universitaria, full
-UDP per il payload aumenterebbe molto il rischio di bug senza migliorare le garanzie
-richieste.
-
----
-
-## 5. Membership e broadcast non sono la stessa cosa
-
-Il broadcast non cambia chi vota.
-
-La membership votante resta statica e viene letta da `RaftConfig.getVoters()`. Un
-broker ricevuto via discovery LAN o visto su una porta broadcast non entra nel quorum
-automaticamente. Se non e' nel voter set configurato, i suoi messaggi non devono
-contare per Raft.
-
-Questa distinzione e' fondamentale per l'orale:
-
-> Usiamo broadcast come mezzo di comunicazione LAN, non come meccanismo di
-> reconfiguration. Il quorum deve restare identico su tutti i broker.
+TCP fornisce uno stream affidabile e ordinato per la parte follower-specifica. UDP
+broadcast resta vantaggioso per i piccoli messaggi comuni a tutti i voter. Questa
+scelta sfrutta la caratteristica LAN richiesta senza introdurre una nuova reliability
+layer per i log payload.
 
 ---
 
-## 6. Nota sulla discovery LAN
+## 4. Semantica in caso di perdita
 
-La discovery LAN non viene usata per costruire il cluster dei broker. La membership
-votante e' statica: il `votersCSV` viene passato alla `DirectoryService` all'avvio e
-i broker recuperano da li' la stessa topologia tramite `GetClusterRequestMessage`.
+UDP broadcast non garantisce consegna. La correttezza non deve dipendere da un singolo
+datagram:
 
-Quindi non bisogna presentare `LanDiscoveryService` o `PeerRegistry` come sorgente
-degli endpoint Raft, della membership o del quorum. La LAN resta sfruttata per il
-trasporto broadcast dei messaggi Raft piccoli.
+- una vote request persa puo' essere seguita da retry o da una nuova election;
+- un heartbeat perso puo' essere seguito dal prossimo heartbeat;
+- le response sono correlate e i duplicati recenti sono filtrati;
+- la replica effettiva delle entry e il catch-up restano sul canale TCP unicast.
 
-Il broadcast Raft invece deve usare una porta comune di cluster, per esempio il
-parametro `raftBroadcastPort`.
-
----
-
-## 7. Runbook minimo per demo locale
-
-Build:
-
-```powershell
-mvn -q -DskipTests package
-```
-
-Directory:
-
-```powershell
-java -cp target/classes it.polimi.ds.chat.directory.DirectoryService "0@127.0.0.1:7000:50000,1@127.0.0.1:7001:50001,2@127.0.0.1:7002:50002"
-```
-
-Broker 0:
-
-```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 0 7000 50000 7100 demo-cluster 1400
-```
-
-Broker 1:
-
-```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 1 7001 50001 7100 demo-cluster 1400
-```
-
-Broker 2:
-
-```powershell
-java -cp target/classes it.polimi.ds.chat.broker.core.BrokerMain raft 2 7002 50002 7100 demo-cluster 1400
-```
-
-I valori importanti da tenere allineati tra broker sono:
-
-- stesso `votersCSV` configurato nella `DirectoryService`;
-- stesso `raftBroadcastPort`, qui `7100`;
-- stesso `clusterId`, qui `demo-cluster`;
-- porte client e Raft TCP diverse per ogni processo.
+L'assunzione ufficiale permette link failure ma esclude network partition. Quindi la
+garanzia dichiarabile e' convergenza dopo perdite/interruzioni transitorie quando la
+rete resta o torna connessa; non e' disponibilita' durante una partition.
 
 ---
 
-## 8. Cosa verificare manualmente
+## 5. Membership e broadcast sono concetti separati
 
-- Un solo leader viene eletto.
-- I follower ricevono heartbeat e non partono in election continua.
-- Un client collegato a un follower riesce a inviare tramite forwarding al leader.
-- Messaggi inviati da client su broker diversi vengono consegnati nello stesso ordine.
-- Dopo crash del leader, i due broker rimasti eleggono un nuovo leader.
-- Dopo restart, il vecchio leader rientra come follower e recupera il log.
+La membership votante resta statica e identica in tutti i broker:
+
+- `RaftConfig.getVoters()` e' la sola sorgente del quorum;
+- il quorum e' `floor(N/2) + 1` sul voter set statico;
+- ricevere un datagram da un broker non lo rende voter;
+- `LanDiscoveryService` e `PeerRegistry` non possono aggiungere o rimuovere voti;
+- il `clusterId` evita che cluster diversi sulla stessa LAN elaborino reciprocamente
+  i propri datagram.
+
+Il broadcast e' un mezzo di comunicazione one-to-many, non un protocollo di dynamic
+membership. Il progetto non richiede membership dinamica e l'implementazione non la
+offre.
 
 ---
 
-## 9. Frase pronta per l'orale
+## 6. Configurazione della LAN reale
 
-> Abbiamo scelto membership statica per mantenere stabile il calcolo del quorum Raft.
-> Il `votersCSV` viene configurato nella Directory all'avvio e non viene scoperto
-> dinamicamente via LAN.
-> Usiamo UDP broadcast sulla LAN per i messaggi piccoli e destinati a tutti, cioe'
-> `RequestVote` e heartbeat vuoti. Usiamo TCP unicast per le entry di log perche'
-> richiedono affidabilita', ordine, retry e catch-up. In questo modo sfruttiamo la
-> proprieta' della LAN indicata dalla specifica senza introdurre una reliability layer
-> UDP complessa e rischiosa.
+Tutti i broker devono usare:
+
+- lo stesso voter set con IP LAN reali;
+- la stessa `raftBroadcastPort`, ad esempio `7100`;
+- lo stesso `clusterId`, ad esempio `demo-cluster`;
+- porte TCP Raft e chat raggiungibili dagli altri host;
+- interfacce di rete per cui Java possa ricavare un indirizzo broadcast.
+
+Prima della demo:
+
+1. disabilitare VPN/interfacce virtuali che possano ricevere il broadcast per errore;
+2. verificare che l'access point non abiliti client isolation;
+3. autorizzare Java e la porta UDP comune nel firewall della rete privata;
+4. verificare che piu' processi sullo stesso host possano condividere la porta UDP
+   secondo il comportamento del sistema operativo scelto;
+5. osservare nei log o con una packet capture che il datagram inviato da un notebook
+   viene ricevuto dall'altro.
+
+Il blocker attuale del deployment e' esterno al transport Raft: `BrokerMain` e
+`Broker` contattano la Directory su `localhost`. Prima della prova su due notebook
+host e porte Directory devono diventare configurabili. Il runbook target e' in
+`PRE_GROUP_MANUAL_TESTING_TODO.md`.
+
+---
+
+## 7. Evidenza automatica e limite dell'evidenza
+
+Il 2026-08-11 `mvn test` ha completato:
+
+```text
+Tests run: 186, Failures: 0, Errors: 0, Skipped: 0
+```
+
+La suite include test del transport ibrido e integrazioni Raft in-process. Non prova
+che il broadcast attraversi la LAN fisica usata alla presentazione e non sostituisce
+la demo obbligatoria su almeno due notebook.
+
+Test manuali necessari:
+
+- election con vote request ricevuta via broadcast sull'altro notebook;
+- heartbeat broadcast stabile senza election spurie;
+- append con payload osservato come TCP unicast;
+- perdita di uno o piu' heartbeat e successivo recupero;
+- crash leader, nuova election e catch-up del broker riavviato;
+- nessun uso del broadcast da parte dei client.
+
+---
+
+## 8. Traccia per la presentazione
+
+Una formulazione precisa e difendibile e':
+
+> I broker sono sulla stessa LAN. Usiamo UDP link-layer broadcast per i messaggi
+> piccoli e identici destinati a tutti i voter: RequestVote e AppendEntries vuoti di
+> heartbeat. Le response sono UDP unicast. Le entry di log sono replicate via TCP
+> unicast perche' il catch-up e' specifico per follower e richiede un canale
+> affidabile e ordinato. I client usano TCP e non dipendono dalla LAN dei broker.
+> La membership Raft resta statica: broadcast non significa reconfiguration.
+
+Accompagnare questa spiegazione con:
+
+- diagramma di deployment sui notebook reali;
+- tabella dei messaggi della sezione 2;
+- log o packet capture della prova LAN;
+- dichiarazione esplicita: link failure transitori in scope, network partition fuori
+  dall'assunzione del progetto.
