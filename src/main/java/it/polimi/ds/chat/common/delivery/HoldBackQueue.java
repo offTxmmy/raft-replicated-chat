@@ -10,13 +10,17 @@ import java.util.*;
  *
  * Ensures both:
  * <ul>
- *   <li><b>Total Order:</b> Messages are delivered in strict sequence number order (assigned by Raft log index)</li>
- *   <li><b>Causal Order:</b> Messages respect causal dependencies tracked via vector clocks</li>
+ * <li><b>Total Order:</b> Messages are delivered in strict application sequence
+ * number order</li> *
+ * <li><b>Causal Order:</b> Messages respect causal dependencies tracked via
+ * vector clocks</li>
  * </ul>
  * A message can be delivered only when:
  * <ul>
- *   <li>Its sequence number equals the next expected sequence number (total order)</li>
- *   <li>All its causal dependencies have been delivered (causal order via vector clocks)</li>
+ * <li>Its sequence number equals the next expected sequence number (total
+ * order)</li>
+ * <li>All its causal dependencies have been delivered (causal order via vector
+ * clocks)</li>
  * </ul>
  */
 public class HoldBackQueue {
@@ -31,7 +35,8 @@ public class HoldBackQueue {
     private final VectorClock deliveredClock;
 
     /**
-     * Constructs a HoldBackQueue with the default initial expected sequence number (1).
+     * Constructs a HoldBackQueue with the default initial expected sequence number
+     * (1).
      */
     public HoldBackQueue() {
         this(1); // Default: expect sequence to start at 1
@@ -116,11 +121,13 @@ public class HoldBackQueue {
     /**
      * Check if a message's causal dependencies are satisfied.
      *
-     * <p>A message M from sender S can be delivered when, for every broker
+     * <p>
+     * A message M from sender S can be delivered when, for every broker
      * K != S referenced in M's vector clock,
      * {@code messageClock[K] <= deliveredClock[K]}.
      *
-     * <p>The sender's own component is intentionally not checked: Raft total
+     * <p>
+     * The sender's own component is intentionally not checked: Raft total
      * order is authoritative for ordering events from the same broker.
      * Propose-time vector-clock increments can disagree with the committed
      * Raft log order (two concurrent proposals from the same broker may be
@@ -207,7 +214,8 @@ public class HoldBackQueue {
     }
 
     /**
-     * Returns a string representation of the HoldBackQueue, including expected sequence,
+     * Returns a string representation of the HoldBackQueue, including expected
+     * sequence,
      * number of pending messages, and the delivered vector clock.
      *
      * @return string representation of the HoldBackQueue

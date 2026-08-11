@@ -7,15 +7,20 @@ import java.io.Serializable;
 /**
  * Application command stored in the Raft log for chat delivery.
  *
- * This is the payload that the Raft layer replicates. A committed
- * {@link ChatCommand} maps into a {@link it.polimi.ds.chat.protocol.chat.ChatDeliverMessage}
- * using:
- * - log index as the global sequence number
- * - brokerId/username/text/vectorClock as the message content
+ * <p>
+ * This is the payload replicated by Raft. Once committed and applied,
+ * a {@link ChatCommand} is mapped into a
+ * {@link it.polimi.ds.chat.protocol.chat.ChatDeliverMessage}.
  *
- * localMsgId is preserved for tracing. Client-originated commands also carry
- * the stable client identity so the leader can de-duplicate retries by
- * (clientId, clientSeq).
+ * <p>
+ * The Raft log index is intentionally kept separate from the
+ * client-visible chat sequence number. Internal Raft entries may occupy
+ * log indexes without representing chat messages.
+ *
+ * <p>
+ * {@code localMsgId} is preserved for tracing. Client-originated
+ * commands also carry the stable client identity so the leader can
+ * de-duplicate retries by {@code (clientId, clientSeq)}.
  */
 public class ChatCommand implements Serializable {
     private static final long serialVersionUID = 1L;
@@ -34,17 +39,17 @@ public class ChatCommand implements Serializable {
     }
 
     public ChatCommand(String localMsgId, int brokerId, String username, String text,
-                       VectorClock vectorClock, long clientSeq) {
+            VectorClock vectorClock, long clientSeq) {
         this(localMsgId, brokerId, username, username, clientSeq, text, vectorClock, true);
     }
 
     public ChatCommand(String localMsgId, int brokerId, String username, String text,
-                       VectorClock vectorClock, String clientId, long clientSeq) {
+            VectorClock vectorClock, String clientId, long clientSeq) {
         this(localMsgId, brokerId, username, clientId, clientSeq, text, vectorClock, true);
     }
 
     private ChatCommand(String localMsgId, int brokerId, String username, String clientId,
-                        long clientSeq, String text, VectorClock vectorClock, boolean hasClientIdentity) {
+            long clientSeq, String text, VectorClock vectorClock, boolean hasClientIdentity) {
         this.localMsgId = localMsgId;
         this.brokerId = brokerId;
         this.username = username;

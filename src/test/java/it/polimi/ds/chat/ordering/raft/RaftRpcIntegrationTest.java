@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -96,6 +97,42 @@ class RaftRpcIntegrationTest {
             client.stop();
         } finally {
             server.stop();
+        }
+    }
+
+    @Test
+    void requestVoteBroadcastFansOutToEveryTcpPeer() throws Exception {
+        RaftRpcServer firstServer = new RaftRpcServer(0,
+                req -> new RequestVoteResponseMessage(req.getTerm(), true, 1),
+                req -> { throw new AssertionError("append handler should not be invoked"); });
+        RaftRpcServer secondServer = new RaftRpcServer(0,
+                req -> new RequestVoteResponseMessage(req.getTerm(), true, 2),
+                req -> { throw new AssertionError("append handler should not be invoked"); });
+        firstServer.start();
+        secondServer.start();
+
+        RaftRpcClient client = new RaftRpcClient(0, Map.of(
+                1, new RaftPeerEndpoint(1, "127.0.0.1", firstServer.getBoundPort(), 50001),
+                2, new RaftPeerEndpoint(2, "127.0.0.1", secondServer.getBoundPort(), 50002)));
+        Set<Integer> voters = java.util.concurrent.ConcurrentHashMap.newKeySet();
+        CountDownLatch latch = new CountDownLatch(2);
+        client.attachHandlers(response -> {
+            voters.add(response.getVoterId());
+            latch.countDown();
+        }, (peer, response) -> { });
+        client.start();
+
+        try {
+            client.broadcastRequestVote(
+                    new RequestVoteRequestMessage(3L, 0, 0L, 0L),
+                    Set.of(1, 2));
+
+            assertTrue(latch.await(3, TimeUnit.SECONDS), "not every TCP peer replied");
+            assertEquals(Set.of(1, 2), voters);
+        } finally {
+            client.stop();
+            firstServer.stop();
+            secondServer.stop();
         }
     }
 

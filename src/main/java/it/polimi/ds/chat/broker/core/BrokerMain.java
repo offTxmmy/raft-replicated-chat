@@ -3,6 +3,7 @@ package it.polimi.ds.chat.broker.core;
 import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
+import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 import it.polimi.ds.chat.protocol.directory.GetClusterRequestMessage;
 import it.polimi.ds.chat.protocol.directory.GetClusterResponseMessage;
 
@@ -20,12 +21,15 @@ import java.util.Map;
  * <pre>
  *   java BrokerMain raft &lt;nodeId&gt; &lt;rpcPort&gt;
  *       [clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]
+ *   java BrokerMain raft-local &lt;nodeId&gt; &lt;rpcPort&gt; [clientPort]
  * </pre>
  *
  * The voter set (static cluster topology) is fetched from the DirectoryService
- * at startup via a GetClusterRequestMessage. Raft always uses the LAN-aware
- * hybrid transport: {@code RequestVote} and empty heartbeat traffic over UDP
- * LAN broadcast, log entries over TCP.
+ * at startup via a GetClusterRequestMessage. The default {@code raft} command
+ * uses the LAN-aware hybrid transport: {@code RequestVote} and empty heartbeat
+ * traffic over UDP LAN broadcast, log entries over TCP. The explicit
+ * {@code raft-local} command is a development facility that sends every Raft
+ * RPC via TCP unicast so multiple brokers can run on one host.
  */
 public class BrokerMain {
 
@@ -36,29 +40,35 @@ public class BrokerMain {
     public static void main(String[] args) {
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: RAFT BROKER---");
 
-        if (args.length > 0 && "raft".equalsIgnoreCase(args[0])) {
-            startRaftMode(args);
+        RaftTransportMode transportMode = args.length == 0
+                ? null
+                : transportModeForCommand(args[0]);
+        if (transportMode != null) {
+            startRaftMode(args, transportMode);
             return;
         }
 
         printUsageAndExit();
     }
 
-    private static void startRaftMode(String[] args) {
+    private static void startRaftMode(String[] args, RaftTransportMode transportMode) {
         if (args.length < 3) {
+            printUsageAndExit();
+        }
+        if (transportMode == RaftTransportMode.LOCAL_TCP && args.length > 4) {
             printUsageAndExit();
         }
 
         int nodeId = Integer.parseInt(args[1]);
         int rpcPort = Integer.parseInt(args[2]);
         int clientPort = (args.length >= 4) ? Integer.parseInt(args[3]) : 50000 + nodeId;
-        int raftBroadcastPort = (args.length >= 5)
+        int raftBroadcastPort = (transportMode == RaftTransportMode.HYBRID && args.length >= 5)
                 ? Integer.parseInt(args[4])
                 : RaftConfig.DEFAULT_RAFT_BROADCAST_PORT;
-        String clusterId = (args.length >= 6)
+        String clusterId = (transportMode == RaftTransportMode.HYBRID && args.length >= 6)
                 ? args[5]
                 : RaftConfig.DEFAULT_CLUSTER_ID;
-        int udpMaxPayloadBytes = (args.length >= 7)
+        int udpMaxPayloadBytes = (transportMode == RaftTransportMode.HYBRID && args.length >= 7)
                 ? Integer.parseInt(args[6])
                 : RaftConfig.DEFAULT_UDP_MAX_PAYLOAD_BYTES;
 
@@ -75,7 +85,7 @@ public class BrokerMain {
                 400,
                 40,
                 rpcPort,
-                RaftConfig.DEFAULT_TRANSPORT_MODE,
+                transportMode,
                 raftBroadcastPort,
                 udpMaxPayloadBytes,
                 clusterId,
@@ -95,10 +105,12 @@ public class BrokerMain {
         System.out.println("Starting RAFT broker, nodeId=" + nodeId
                 + ", rpcPort=" + rpcPort
                 + ", clientPort=" + clientPort
-                + ", transportMode=" + RaftConfig.DEFAULT_TRANSPORT_MODE
-                + ", raftBroadcastPort=" + raftBroadcastPort
-                + ", clusterId=" + clusterId
-                + ", udpMaxPayloadBytes=" + udpMaxPayloadBytes
+                + ", transportMode=" + transportMode
+                + (transportMode == RaftTransportMode.HYBRID
+                    ? ", raftBroadcastPort=" + raftBroadcastPort
+                        + ", clusterId=" + clusterId
+                        + ", udpMaxPayloadBytes=" + udpMaxPayloadBytes
+                    : "")
                 + ", voters=" + voters.keySet()
                 + ", storageDir=" + storageDir.toAbsolutePath());
 
@@ -109,6 +121,16 @@ public class BrokerMain {
             System.err.println("Broker failed: " + e.getMessage());
             e.printStackTrace();
         }
+    }
+
+    static RaftTransportMode transportModeForCommand(String command) {
+        if ("raft".equalsIgnoreCase(command)) {
+            return RaftConfig.DEFAULT_TRANSPORT_MODE;
+        }
+        if ("raft-local".equalsIgnoreCase(command)) {
+            return RaftTransportMode.LOCAL_TCP;
+        }
+        return null;
     }
 
     /**
@@ -154,8 +176,10 @@ public class BrokerMain {
     private static void printUsageAndExit() {
         System.err.println("Usage: raft <nodeId> <rpcPort> "
                 + "[clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]");
+        System.err.println("   or: raft-local <nodeId> <rpcPort> [clientPort]");
         System.err.println("  Cluster voters are fetched from the DirectoryService at startup.");
-        System.err.println("  transport: HYBRID only; RequestVote and empty heartbeats use UDP LAN broadcast.");
+        System.err.println("  raft: HYBRID (default); RequestVote and empty heartbeats use UDP LAN broadcast.");
+        System.err.println("  raft-local: local development only; all Raft RPCs use TCP unicast.");
         System.exit(2);
     }
 }

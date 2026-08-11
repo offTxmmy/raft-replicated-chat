@@ -4,8 +4,13 @@ import it.polimi.ds.chat.common.clock.VectorClock;
 import it.polimi.ds.chat.protocol.broker.BrokerMessage;
 
 /**
- * Message emitted after Raft commits a chat message and assigns its global
- * sequence number.
+ * Application-level chat message emitted after the corresponding Raft
+ * command has been committed and applied.
+ *
+ * <p>
+ * The sequence number represents the dense client-visible order of chat
+ * messages. It is derived deterministically from Raft application order and
+ * is intentionally independent from the Raft log index.
  */
 public class ChatDeliverMessage extends BrokerMessage {
     private final long seq;
@@ -19,7 +24,8 @@ public class ChatDeliverMessage extends BrokerMessage {
         this(seq, brokerId, username, null, text, vectorClock);
     }
 
-    public ChatDeliverMessage(long seq, int brokerId, String username, String clientId, String text, VectorClock vectorClock) {
+    public ChatDeliverMessage(long seq, int brokerId, String username, String clientId, String text,
+            VectorClock vectorClock) {
         this.seq = seq;
         this.brokerId = brokerId;
         this.username = username;

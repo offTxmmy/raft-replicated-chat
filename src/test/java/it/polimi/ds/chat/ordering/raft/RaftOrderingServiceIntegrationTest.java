@@ -30,9 +30,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 /**
  * End-to-end integration test for {@link RaftOrderingService}.
  *
- * <p>Three orchestrator instances are started on loopback, each with its own
- * RPC port and storage directory and an identical static voter map. The test
- * verifies that:
+ * <p>Three orchestrator instances are started in LOCAL_TCP mode on loopback,
+ * each with its own RPC port and storage directory and an identical static
+ * voter map. A separate test keeps exercising HYBRID. The tests verify that:
  * <ul>
  *   <li>a single leader is elected within a reasonable time window,
  *   <li>a proposal sent to the leader is committed and delivered to every node
@@ -63,7 +63,7 @@ class RaftOrderingServiceIntegrationTest {
     }
 
     @Test
-    void threeNodesElectALeaderAndReplicateOneMessage(@TempDir Path baseDir) throws Exception {
+    void threeLocalTcpNodesElectALeaderAndReplicateOneMessage(@TempDir Path baseDir) throws Exception {
         int[] ports = pickFreePorts(3);
 
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
@@ -581,9 +581,9 @@ class RaftOrderingServiceIntegrationTest {
                 rpcPort,
                 voters,
                 storageDir,
-                RaftConfig.DEFAULT_TRANSPORT_MODE,
-                defaultBroadcastPort(),
-                defaultClusterId()
+                RaftTransportMode.LOCAL_TCP,
+                RaftConfig.DEFAULT_RAFT_BROADCAST_PORT,
+                RaftConfig.DEFAULT_CLUSTER_ID
         );
     }
 

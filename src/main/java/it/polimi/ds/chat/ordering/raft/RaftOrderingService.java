@@ -2,6 +2,7 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
+import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalRequestMessage;
@@ -224,9 +225,11 @@ public final class RaftOrderingService implements OrderingService {
                 + ", voters=" + raftConfig.getVoters().keySet()
                 + ", rpcPort=" + raftConfig.getRpcPort()
                 + ", transportMode=" + raftConfig.getTransportMode()
-                + ", raftBroadcastPort=" + raftConfig.getRaftBroadcastPort()
-                + ", clusterId=" + raftConfig.getClusterId()
-                + ", udpMaxPayloadBytes=" + raftConfig.getUdpMaxPayloadBytes()
+                + (raftConfig.getTransportMode() == RaftTransportMode.HYBRID
+                    ? ", raftBroadcastPort=" + raftConfig.getRaftBroadcastPort()
+                        + ", clusterId=" + raftConfig.getClusterId()
+                        + ", udpMaxPayloadBytes=" + raftConfig.getUdpMaxPayloadBytes()
+                    : "")
                 + ", restoredTerm=" + persisted.currentTerm()
                 + ", restoredVote=" + persisted.votedFor()
                 + ", restoredLogLastIndex=" + raftLog.lastLogIndex()
@@ -379,7 +382,11 @@ public final class RaftOrderingService implements OrderingService {
         return localNodeId;
     }
 
-    private RaftTransport createRaftTransport(RaftRpcClient tcpClient) {
+    RaftTransport createRaftTransport(RaftRpcClient tcpClient) {
+        if (raftConfig.getTransportMode() == RaftTransportMode.LOCAL_TCP) {
+            return tcpClient;
+        }
+
         RaftUdpBroadcastTransport udpTransport =
                 new RaftUdpBroadcastTransport(localNodeId, raftConfig);
         return new RaftHybridTransport(tcpClient, udpTransport);

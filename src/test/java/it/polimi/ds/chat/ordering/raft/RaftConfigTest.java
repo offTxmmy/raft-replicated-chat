@@ -151,6 +151,23 @@ class RaftConfigTest {
     }
 
     @Test
+    void fullRaftConfigBuildsWithLocalTcpTransport(@TempDir Path dir) {
+        RaftConfig cfg = new RaftConfig(
+                150,
+                300,
+                30,
+                7000,
+                RaftTransportMode.LOCAL_TCP,
+                RaftConfig.DEFAULT_RAFT_BROADCAST_PORT,
+                RaftConfig.DEFAULT_UDP_MAX_PAYLOAD_BYTES,
+                RaftConfig.DEFAULT_CLUSTER_ID,
+                dir,
+                threeVoters());
+
+        assertEquals(RaftTransportMode.LOCAL_TCP, cfg.getTransportMode());
+    }
+
+    @Test
     void brokerConfigRejectsMissingRaftConfig() {
         assertThrows(NullPointerException.class, () -> new BrokerConfig(
                 0,
