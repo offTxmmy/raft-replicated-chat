@@ -35,6 +35,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         ));
     }
@@ -54,6 +55,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         ));
     }
@@ -74,6 +76,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -130,6 +133,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 new RecordingSender(),
+                null,
                 null
         );
 
@@ -391,6 +395,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -420,6 +425,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
 
@@ -494,6 +500,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -527,6 +534,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -559,6 +567,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -594,6 +603,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -630,6 +640,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -664,6 +675,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -681,12 +693,16 @@ class RaftReplicationManagerTest {
     }
 
     @Test
-    // Steps down and stops sending when a higher-term response is received.
-    void higherTermAppendEntriesResponseShouldStepDownLeader() {
+    // Delegates higher-term AppendEntries responses to the election layer.
+    void higherTermAppendEntriesResponseShouldNotifyHigherTermObserver() {
         RecordingSender sender = new RecordingSender();
+        RecordingHigherTermObserver higherTermObserver =
+                new RecordingHigherTermObserver();
+
         RaftNode node = leaderNode(1);
         RaftLog log = new RaftLog();
-        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+        RaftCommitManager commitManager =
+                new RaftCommitManager(log, entry -> {});
 
         RaftReplicationManager manager = new RaftReplicationManager(
                 1,
@@ -695,18 +711,67 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
-                null
+                null,
+                higherTermObserver
         );
+
         manager.start();
-        manager.onLeaderElected(1, 1L);
+        manager.onLeaderElected(1, node.getCurrentTerm());
 
-        manager.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(5L, false, 2, 0L, -1L, 0L));
+        manager.handleAppendEntriesResponse(
+                2,
+                new AppendEntriesResponseMessage(
+                        5L,
+                        false,
+                        2,
+                        0L,
+                        -1L,
+                        0L
+                )
+        );
 
-        assertEquals(RaftRole.FOLLOWER, node.getRole());
-        assertEquals(5L, node.getCurrentTerm());
+        assertEquals(1, higherTermObserver.calls);
+        assertEquals(5L, higherTermObserver.lastTerm);
+    }
 
-        manager.onHeartbeatRoundDue(5L);
-        assertEquals(0, sender.totalRequests());
+    @Test
+// Higher-term information must not be discarded only because the node is no longer leader.
+    void higherTermAppendEntriesResponseShouldBeObservedEvenWhenNodeIsNotLeader() {
+        RecordingHigherTermObserver higherTermObserver =
+                new RecordingHigherTermObserver();
+
+        RaftNode node = followerNodeWithTerm(1, 1L);
+        RaftLog log = new RaftLog();
+        RaftCommitManager commitManager =
+                new RaftCommitManager(log, entry -> {});
+
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                new RecordingSender(),
+                null,
+                higherTermObserver
+        );
+
+        manager.start();
+
+        manager.handleAppendEntriesResponse(
+                2,
+                new AppendEntriesResponseMessage(
+                        5L,
+                        false,
+                        2,
+                        0L,
+                        -1L,
+                        0L
+                )
+        );
+
+        assertEquals(1, higherTermObserver.calls);
+        assertEquals(5L, higherTermObserver.lastTerm);
     }
 
     @Test
@@ -724,6 +789,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -756,6 +822,7 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         manager.start();
@@ -785,7 +852,8 @@ class RaftReplicationManagerTest {
                 log,
                 commitManager,
                 new RecordingSender(),
-                observer
+                observer,
+                null
         );
         manager.start();
         return manager;
@@ -946,6 +1014,19 @@ class RaftReplicationManagerTest {
             calls++;
             lastTerm = term;
             lastLeaderId = leaderId;
+        }
+    }
+
+    private static class RecordingHigherTermObserver
+            implements RaftHigherTermObserver {
+
+        int calls;
+        long lastTerm;
+
+        @Override
+        public void onHigherTermObserved(long term) {
+            calls++;
+            lastTerm = term;
         }
     }
 }

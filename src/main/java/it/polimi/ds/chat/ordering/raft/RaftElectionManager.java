@@ -385,6 +385,53 @@ public class RaftElectionManager {
     }
 
     /**
+     * Handles evidence of a Raft term higher than the local current term.
+     *
+     * <p>Observing a higher term forces the local node to become follower,
+     * clears any election tracking, stops leader heartbeat scheduling,
+     * restarts the follower election timeout, and reports the step-down.
+     *
+     * <p>This method is independent of the node's current role: higher-term
+     * information must be incorporated even if the node is no longer the
+     * candidate or leader that originally sent the RPC.
+     *
+     * @param observedTerm higher Raft term observed in an incoming message
+     */
+    void onHigherTermObserved(long observedTerm) {
+        boolean notifySteppedDown;
+
+        synchronized (this) {
+            if (!running) {
+                return;
+            }
+
+            notifySteppedDown = applyHigherTermIfNeeded(observedTerm);
+        }
+
+        if (notifySteppedDown) {
+            electionListener.onSteppedDown(
+                    observedTerm,
+                    RaftNode.NO_LEADER
+            );
+        }
+    }
+
+    private boolean applyHigherTermIfNeeded(long observedTerm) {
+        long localCurrentTerm = raftNode.getCurrentTerm();
+
+        if (observedTerm <= localCurrentTerm) {
+            return false;
+        }
+
+        raftNode.stepDownIfHigherTerm(observedTerm);
+        clearElectionTracking();
+        stopHeartbeatSchedule();
+        resetElectionTimeout();
+
+        return true;
+    }
+
+    /**
      * Handles vote responses for the currently active election.
      * <p>
      * Rules:
@@ -408,27 +455,33 @@ public class RaftElectionManager {
                 return;
             }
 
-            if (raftNode.getRole() != RaftRole.CANDIDATE) {
-                return;
-            }
-
             long localCurrentTerm = raftNode.getCurrentTerm();
 
             if (response.getTerm() > localCurrentTerm) {
-                raftNode.stepDownIfHigherTerm(response.getTerm());
-                clearElectionTracking();
-                stopHeartbeatSchedule();
-                resetElectionTimeout();
-                steppedDownTerm = response.getTerm();
-            } else if (response.getTerm() < localCurrentTerm) {
-                return;
-            } else if (currentElectionTerm == null) {
-                return;
-            } else if (response.getTerm() != currentElectionTerm) {
-                return;
-            } else if (!response.isVoteGranted()) {
-                return;
+                if (applyHigherTermIfNeeded(response.getTerm())) {
+                    steppedDownTerm = response.getTerm();
+                }
             } else {
+                if (raftNode.getRole() != RaftRole.CANDIDATE) {
+                    return;
+                }
+
+                if (response.getTerm() < localCurrentTerm) {
+                    return;
+                }
+
+                if (currentElectionTerm == null) {
+                    return;
+                }
+
+                if (response.getTerm() != currentElectionTerm) {
+                    return;
+                }
+
+                if (!response.isVoteGranted()) {
+                    return;
+                }
+
                 boolean newVote = grantedVoters.add(response.getVoterId());
                 if (!newVote) {
                     return;
@@ -441,10 +494,17 @@ public class RaftElectionManager {
         }
 
         if (steppedDownTerm != null) {
-            electionListener.onSteppedDown(steppedDownTerm, RaftNode.NO_LEADER);
+            electionListener.onSteppedDown(
+                    steppedDownTerm,
+                    RaftNode.NO_LEADER
+            );
         }
+
         if (leaderElectedTerm != null) {
-            electionListener.onLeaderElected(localNodeId, leaderElectedTerm);
+            electionListener.onLeaderElected(
+                    localNodeId,
+                    leaderElectedTerm
+            );
         }
     }
 

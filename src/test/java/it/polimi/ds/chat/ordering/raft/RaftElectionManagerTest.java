@@ -460,6 +460,129 @@ class RaftElectionManagerTest {
     }
 
     /**
+     * Verifies that a generic higher-term observation forces a leader to become
+     * follower, stops heartbeat scheduling, and arms a new follower timeout.
+     */
+    @Test
+    void higherTermObservationShouldPerformCompleteLeaderStepDownLifecycle() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+
+        RaftElectionManager manager =
+                newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire(); // candidate term 1
+
+        manager.onRequestVoteResponse(
+                new RequestVoteResponseMessage(1L, true, 1)
+        ); // leader term 1
+
+        assertEquals(RaftRole.LEADER, managerNode(manager).getRole());
+
+        FakeScheduledTask heartbeatTask = fakeClock.lastFixedRateTask;
+        int timeoutsBeforeStepDown = fakeClock.oneShotScheduleCount;
+
+        manager.onHigherTermObserved(5L);
+
+        assertEquals(RaftRole.FOLLOWER, managerNode(manager).getRole());
+        assertEquals(5L, managerNode(manager).getCurrentTerm());
+        assertEquals(RaftNode.NO_LEADER, managerNode(manager).getLeaderId());
+
+        assertNull(manager.getCurrentElectionTerm());
+        assertTrue(manager.getGrantedVotersSnapshot().isEmpty());
+
+        assertTrue(heartbeatTask.cancelled);
+        assertEquals(
+                timeoutsBeforeStepDown + 1,
+                fakeClock.oneShotScheduleCount
+        );
+        assertFalse(fakeClock.lastOneShotTask.cancelled);
+
+        assertEquals(1, listener.steppedDownCount);
+        assertEquals(5L, listener.lastSteppedDownTerm);
+        assertEquals(RaftNode.NO_LEADER, listener.lastKnownLeaderId);
+    }
+
+    /**
+     * Verifies that a higher-term RequestVote response is incorporated even when
+     * the node is no longer candidate and has already become leader.
+     */
+    @Test
+    void higherTermVoteResponseShouldStepDownNodeEvenAfterItBecameLeader() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+
+        RaftElectionManager manager =
+                newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire(); // candidate term 1
+
+        manager.onRequestVoteResponse(
+                new RequestVoteResponseMessage(1L, true, 1)
+        );
+
+        assertEquals(RaftRole.LEADER, managerNode(manager).getRole());
+
+        FakeScheduledTask heartbeatTask = fakeClock.lastFixedRateTask;
+        int timeoutsBeforeHigherTerm = fakeClock.oneShotScheduleCount;
+
+        // Late response to an earlier RequestVote, but carrying evidence of term 5.
+        manager.onRequestVoteResponse(
+                new RequestVoteResponseMessage(5L, false, 3)
+        );
+
+        assertEquals(RaftRole.FOLLOWER, managerNode(manager).getRole());
+        assertEquals(5L, managerNode(manager).getCurrentTerm());
+        assertEquals(RaftNode.NO_LEADER, managerNode(manager).getLeaderId());
+
+        assertTrue(heartbeatTask.cancelled);
+        assertEquals(
+                timeoutsBeforeHigherTerm + 1,
+                fakeClock.oneShotScheduleCount
+        );
+
+        assertEquals(1, listener.steppedDownCount);
+        assertEquals(5L, listener.lastSteppedDownTerm);
+    }
+
+    /**
+     * Verifies that a higher-term observation hook ignores terms that are not
+     * actually newer than the local current term.
+     */
+    @Test
+    void higherTermObservationShouldIgnoreSameOrOlderTerms() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+
+        RaftElectionManager manager =
+                newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire(); // candidate term 1
+
+        int timeoutCountBefore = fakeClock.oneShotScheduleCount;
+
+        manager.onHigherTermObserved(1L);
+        manager.onHigherTermObserved(0L);
+
+        assertEquals(RaftRole.CANDIDATE, managerNode(manager).getRole());
+        assertEquals(1L, managerNode(manager).getCurrentTerm());
+
+        assertEquals(
+                Long.valueOf(1L),
+                manager.getCurrentElectionTerm()
+        );
+
+        assertEquals(timeoutCountBefore, fakeClock.oneShotScheduleCount);
+        assertEquals(0, listener.steppedDownCount);
+    }
+
+    /**
      * Verifies that vote responses are ignored if the local node is no longer a candidate.
      */
     @Test

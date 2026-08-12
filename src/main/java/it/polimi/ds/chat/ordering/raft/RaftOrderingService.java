@@ -133,9 +133,12 @@ public final class RaftOrderingService implements OrderingService {
         // 6. Voter id set, derived from the static voter map.
         Set<Integer> allVoterIds = new HashSet<>(raftConfig.getVoters().keySet());
 
-        // 7. Leader-activity observer: forwards to the election manager.
+        // 7. Election observers: forward replication events to the election manager.
         RaftLeaderActivityObserver leaderActivityObserver =
                 (term, leaderId) -> electionManager.onValidLeaderActivityObserved(term, leaderId);
+
+        RaftHigherTermObserver higherTermObserver =
+                term -> electionManager.onHigherTermObserved(term);
 
         // 8. Replication manager — also acts as the election listener.
         replicationManager = new RaftReplicationManager(
@@ -145,7 +148,8 @@ public final class RaftOrderingService implements OrderingService {
                 raftLog,
                 commitManager,
                 raftTransport,
-                leaderActivityObserver
+                leaderActivityObserver,
+                higherTermObserver
         );
 
         RaftElectionListener electionListener = new RaftElectionListener() {

@@ -40,6 +40,7 @@ class RaftCoreTest {
                 log,
                 commitManager,
                 sender,
+                null,
                 null
         );
         replicationManager.start();
@@ -108,7 +109,8 @@ class RaftCoreTest {
                 log,
                 commitManager,
                 new RecordingAppendEntriesSender(),
-                electionManager::onValidLeaderActivityObserved
+                electionManager::onValidLeaderActivityObserved,
+                null
         );
         replicationManager.start();
 
@@ -128,6 +130,126 @@ class RaftCoreTest {
         assertEquals(1L, node.getCurrentTerm());
         assertEquals(2, node.getLeaderId());
         assertEquals(scheduledBefore + 1, fakeClock.oneShotScheduleCount);
+    }
+
+    /**
+     * Verifies that a higher-term AppendEntries response is propagated from the
+     * replication layer to the election layer and performs a complete leader
+     * step-down lifecycle.
+     */
+    @Test
+    void higherTermAppendEntriesResponseShouldTriggerCompleteElectionStepDown() {
+        FakeClock fakeClock = new FakeClock();
+        RaftNode node = new RaftNode(1);
+        RaftLog log = new RaftLog();
+
+        RaftCommitManager commitManager =
+                new RaftCommitManager(log, entry -> {});
+
+        RecordingAppendEntriesSender sender =
+                new RecordingAppendEntriesSender();
+
+        RaftReplicationManager[] replicationRef =
+                new RaftReplicationManager[1];
+
+        RaftElectionManager electionManager =
+                new RaftElectionManager(
+                        1,
+                        Set.of(1, 2, 3),
+                        100L,
+                        200L,
+                        50L,
+                        node,
+                        log.snapshotMetadata(),
+                        new RecordingVoteRequestSender(),
+                        fakeClock,
+                        new RaftElectionListener() {
+                            @Override
+                            public void onLeaderElected(int leaderId, long term) {
+                                replicationRef[0].onLeaderElected(
+                                        leaderId,
+                                        term
+                                );
+                            }
+
+                            @Override
+                            public void onSteppedDown(
+                                    long newTerm,
+                                    int knownLeaderId
+                            ) {
+                                replicationRef[0].onSteppedDown(
+                                        newTerm,
+                                        knownLeaderId
+                                );
+                            }
+
+                            @Override
+                            public void onHeartbeatRoundDue(long term) {
+                                replicationRef[0].onHeartbeatRoundDue(term);
+                            }
+                        }
+                );
+
+        RaftReplicationManager replicationManager =
+                new RaftReplicationManager(
+                        1,
+                        Set.of(1, 2, 3),
+                        node,
+                        log,
+                        commitManager,
+                        sender,
+                        electionManager::onValidLeaderActivityObserved,
+                        electionManager::onHigherTermObserved
+                );
+
+        replicationRef[0] = replicationManager;
+
+        replicationManager.start();
+        electionManager.start();
+
+        fakeClock.lastOneShotTask.fire(); // candidate term 1
+
+        electionManager.onRequestVoteResponse(
+                new RequestVoteResponseMessage(
+                        1L,
+                        true,
+                        2
+                )
+        ); // leader term 1
+
+        assertEquals(RaftRole.LEADER, node.getRole());
+
+        FakeScheduledTask heartbeatTask =
+                fakeClock.lastFixedRateTask;
+
+        int timeoutCountBeforeStepDown =
+                fakeClock.oneShotScheduleCount;
+
+        replicationManager.handleAppendEntriesResponse(
+                2,
+                new AppendEntriesResponseMessage(
+                        5L,
+                        false,
+                        2,
+                        0L,
+                        -1L,
+                        0L
+                )
+        );
+
+        assertEquals(RaftRole.FOLLOWER, node.getRole());
+        assertEquals(5L, node.getCurrentTerm());
+        assertEquals(RaftNode.NO_LEADER, node.getLeaderId());
+
+        assertTrue(heartbeatTask.cancelled);
+
+        assertEquals(
+                timeoutCountBeforeStepDown + 1,
+                fakeClock.oneShotScheduleCount
+        );
+
+        assertNotNull(fakeClock.lastOneShotTask);
+        assertFalse(fakeClock.lastOneShotTask.cancelled);
     }
 
     private ChatCommand command(String localMsgId) {

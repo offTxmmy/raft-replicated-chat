@@ -110,6 +110,7 @@ class Section2FixesTest {
                 log,
                 commitManager,
                 new RecordingSender(),
+                null,
                 null
         );
         manager.start();
@@ -231,7 +232,8 @@ class Section2FixesTest {
                 log,
                 commitManager,
                 new RecordingSender(),
-                observer
+                observer,
+                null
         );
         manager.start();
         return manager;

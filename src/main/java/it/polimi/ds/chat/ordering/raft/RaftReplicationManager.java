@@ -29,6 +29,7 @@ public class RaftReplicationManager implements RaftElectionListener {
     private final RaftCommitManager commitManager;
     private final RaftAppendEntriesSender appendEntriesSender;
     private final RaftLeaderActivityObserver leaderActivityObserver;
+    private final RaftHigherTermObserver higherTermObserver;
 
     private final Map<Integer, RaftPeerReplicationState> replicationState = new LinkedHashMap<>();
 
@@ -41,7 +42,8 @@ public class RaftReplicationManager implements RaftElectionListener {
             RaftLog log,
             RaftCommitManager commitManager,
             RaftAppendEntriesSender appendEntriesSender,
-            RaftLeaderActivityObserver leaderActivityObserver
+            RaftLeaderActivityObserver leaderActivityObserver,
+            RaftHigherTermObserver higherTermObserver
     ) {
         this.localNodeId = localNodeId;
         this.allVotingNodeIds = immutableVotingSet(allVotingNodeIds);
@@ -53,6 +55,7 @@ public class RaftReplicationManager implements RaftElectionListener {
         this.commitManager = Objects.requireNonNull(commitManager, "commitManager");
         this.appendEntriesSender = Objects.requireNonNull(appendEntriesSender, "appendEntriesSender");
         this.leaderActivityObserver = leaderActivityObserver;
+        this.higherTermObserver = higherTermObserver;
     }
 
     public synchronized void start() {
@@ -164,57 +167,72 @@ public class RaftReplicationManager implements RaftElectionListener {
         return response;
     }
 
-    public synchronized void handleAppendEntriesResponse(int followerId, AppendEntriesResponseMessage response) {
+    public void handleAppendEntriesResponse(
+            int followerId,
+            AppendEntriesResponseMessage response
+    ) {
         Objects.requireNonNull(response, "response");
 
-        if (!running || raftNode.getRole() != RaftRole.LEADER) {
-            return;
-        }
+        Long higherTermObserved = null;
 
-        long localTerm = raftNode.getCurrentTerm();
-        if (response.getTerm() > localTerm) {
-            raftNode.stepDownIfHigherTerm(response.getTerm());
-            replicationState.clear();
-            return;
-        }
-
-        if (response.getTerm() < localTerm) {
-            return;
-        }
-
-        RaftPeerReplicationState state = replicationState.get(followerId);
-        if (state == null) {
-            return;
-        }
-
-        if (!response.isSuccess()) {
-            long nextIndex = state.getNextIndex();
-            long conflictTerm = response.getConflictTerm();
-            long conflictIndex = response.getConflictIndex();
-
-            if (conflictTerm > 0L) {
-                long lastIndexOfTerm = log.lastIndexOfTerm(conflictTerm);
-                if (lastIndexOfTerm > 0L) {
-                    nextIndex = lastIndexOfTerm + 1L;
-                } else if (conflictIndex > 0L) {
-                    nextIndex = conflictIndex;
-                } else {
-                    nextIndex = Math.max(1L, nextIndex - 1L);
-                }
-            } else if (conflictIndex > 0L) {
-                nextIndex = conflictIndex;
-            } else {
-                nextIndex = Math.max(1L, nextIndex - 1L);
+        synchronized (this) {
+            if (!running) {
+                return;
             }
 
-            state.setNextIndex(nextIndex);
-            return;
+            long localTerm = raftNode.getCurrentTerm();
+
+            if (response.getTerm() > localTerm) {
+                replicationState.clear();
+                higherTermObserved = response.getTerm();
+            } else {
+                if (raftNode.getRole() != RaftRole.LEADER) {
+                    return;
+                }
+
+                if (response.getTerm() < localTerm) {
+                    return;
+                }
+
+                RaftPeerReplicationState state = replicationState.get(followerId);
+                if (state == null) {
+                    return;
+                }
+
+                if (!response.isSuccess()) {
+                    long nextIndex = state.getNextIndex();
+                    long conflictTerm = response.getConflictTerm();
+                    long conflictIndex = response.getConflictIndex();
+
+                    if (conflictTerm > 0L) {
+                        long lastIndexOfTerm = log.lastIndexOfTerm(conflictTerm);
+                        if (lastIndexOfTerm > 0L) {
+                            nextIndex = lastIndexOfTerm + 1L;
+                        } else if (conflictIndex > 0L) {
+                            nextIndex = conflictIndex;
+                        } else {
+                            nextIndex = Math.max(1L, nextIndex - 1L);
+                        }
+                    } else if (conflictIndex > 0L) {
+                        nextIndex = conflictIndex;
+                    } else {
+                        nextIndex = Math.max(1L, nextIndex - 1L);
+                    }
+
+                    state.setNextIndex(nextIndex);
+                    return;
+                }
+
+                state.updateMatchIndex(response.getMatchIndex());
+                state.setNextIndex(response.getMatchIndex() + 1L);
+
+                advanceCommitFromMatches();
+            }
         }
 
-        state.updateMatchIndex(response.getMatchIndex());
-        state.setNextIndex(response.getMatchIndex() + 1L);
-
-        advanceCommitFromMatches();
+        if (higherTermObserved != null && higherTermObserver != null) {
+            higherTermObserver.onHigherTermObserved(higherTermObserved);
+        }
     }
 
     @Override
