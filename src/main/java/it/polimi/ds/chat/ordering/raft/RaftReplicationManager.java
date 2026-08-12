@@ -84,10 +84,17 @@ public class RaftReplicationManager implements RaftElectionListener {
      * @return appended log entry, or null if not leader
      */
     public synchronized RaftLogEntry appendCommandAsLeader(ChatCommand command) {
-        if (raftNode.getRole() != RaftRole.LEADER) {
-            return null;
+        RaftLogEntry entry;
+
+        synchronized (raftNode) {
+            if (raftNode.getRole() != RaftRole.LEADER) {
+                return null;
+            }
+
+            long leaderTerm = raftNode.getCurrentTerm();
+            entry = log.append(leaderTerm, command);
         }
-        RaftLogEntry entry = log.append(raftNode.getCurrentTerm(), command);
+
         advanceCommitFromMatches();
         return entry;
     }
@@ -233,20 +240,31 @@ public class RaftReplicationManager implements RaftElectionListener {
 
     @Override
     public synchronized void onHeartbeatRoundDue(long term) {
-        if (!running || raftNode.getRole() != RaftRole.LEADER) {
-            return;
+        List<AppendEntriesSendPlan> sendPlans;
+        int followerCount;
+
+        synchronized (raftNode) {
+            if (!running || raftNode.getRole() != RaftRole.LEADER) {
+                return;
+            }
+
+            if (term != raftNode.getCurrentTerm()) {
+                return;
+            }
+
+            sendPlans = new ArrayList<>();
+            for (Map.Entry<Integer, RaftPeerReplicationState> entry : replicationState.entrySet()) {
+                sendPlans.add(buildAppendEntriesSendPlan(
+                        entry.getKey(),
+                        entry.getValue(),
+                        term
+                ));
+            }
+
+            followerCount = replicationState.size();
         }
 
-        if (term != raftNode.getCurrentTerm()) {
-            return;
-        }
-
-        List<AppendEntriesSendPlan> sendPlans = new ArrayList<>();
-        for (Map.Entry<Integer, RaftPeerReplicationState> entry : replicationState.entrySet()) {
-            sendPlans.add(buildAppendEntriesSendPlan(entry.getKey(), entry.getValue()));
-        }
-
-        sendAppendEntries(sendPlans, replicationState.size());
+        sendAppendEntries(sendPlans, followerCount);
     }
 
     private void sendAppendEntries(List<AppendEntriesSendPlan> sendPlans, int followerCount) {
@@ -282,14 +300,18 @@ public class RaftReplicationManager implements RaftElectionListener {
         }
     }
 
-    private AppendEntriesSendPlan buildAppendEntriesSendPlan(int peerId, RaftPeerReplicationState state) {
+    private AppendEntriesSendPlan buildAppendEntriesSendPlan(
+            int peerId,
+            RaftPeerReplicationState state,
+            long leaderTerm
+    ) {
         long nextIndex = state.getNextIndex();
         long prevLogIndex = nextIndex - 1L;
         long prevLogTerm = log.getTermAt(prevLogIndex);
         List<RaftLogEntry> entries = log.getEntriesFrom(nextIndex);
 
         return new AppendEntriesSendPlan(peerId, new AppendEntriesRequestMessage(
-                raftNode.getCurrentTerm(),
+                leaderTerm,
                 localNodeId,
                 prevLogIndex,
                 prevLogTerm,

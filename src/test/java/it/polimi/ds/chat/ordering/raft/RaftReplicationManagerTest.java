@@ -12,6 +12,9 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -110,6 +113,74 @@ class RaftReplicationManagerTest {
         assertEquals(1L, entry.getIndex());
         assertEquals(node.getCurrentTerm(), entry.getTerm());
         assertEquals(1L, log.lastLogIndex());
+    }
+
+    @Test
+    // Serializes leader-only append with term/role transitions on the RaftNode.
+    void appendCommandAsLeaderShouldSerializeAppendAgainstStepDown() throws Exception {
+        RaftNode node = leaderNode(1);
+        long leaderTerm = node.getCurrentTerm();
+
+        BlockingAppendRaftLog log = new BlockingAppendRaftLog();
+        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                new RecordingSender(),
+                null
+        );
+
+        manager.start();
+        manager.onLeaderElected(1, leaderTerm);
+
+        AtomicReference<RaftLogEntry> appendedEntry = new AtomicReference<>();
+
+        Thread appendThread = new Thread(
+                () -> appendedEntry.set(manager.appendCommandAsLeader(command("x"))),
+                "test-append"
+        );
+
+        appendThread.start();
+
+        assertTrue(
+                log.awaitAppendEntered(),
+                "Append did not reach the controlled blocking point"
+        );
+
+        CountDownLatch stepDownCompleted = new CountDownLatch(1);
+
+        Thread stepDownThread = new Thread(() -> {
+            try {
+                node.stepDownIfHigherTerm(leaderTerm + 1L);
+            } finally {
+                stepDownCompleted.countDown();
+            }
+        }, "test-step-down");
+
+        stepDownThread.start();
+
+        boolean stepDownCompletedBeforeAppend =
+                waitUntilBlockedOrCompleted(stepDownThread, stepDownCompleted);
+
+        log.releaseAppend();
+
+        joinOrFail(appendThread);
+        joinOrFail(stepDownThread);
+
+        assertFalse(
+                stepDownCompletedBeforeAppend,
+                "Step-down must not complete while a leader-only log append is in progress"
+        );
+
+        RaftLogEntry entry = appendedEntry.get();
+        assertNotNull(entry);
+        assertEquals(leaderTerm, entry.getTerm());
+
+        assertEquals(RaftRole.FOLLOWER, node.getRole());
+        assertEquals(leaderTerm + 1L, node.getCurrentTerm());
     }
 
     @Test
@@ -328,6 +399,83 @@ class RaftReplicationManagerTest {
         manager.onHeartbeatRoundDue(node.getCurrentTerm() - 1L);
 
         assertEquals(0, sender.totalRequests());
+    }
+
+    @Test
+    // Prevents a heartbeat validated in one term from being rebuilt using a newer term after step-down.
+    void heartbeatRoundShouldSerializeRequestBuildAgainstStepDown() throws Exception {
+        RecordingSender sender = new RecordingSender();
+        RaftNode node = leaderNode(1);
+        long leaderTerm = node.getCurrentTerm();
+
+        BlockingSendPlanRaftLog log = new BlockingSendPlanRaftLog();
+        log.append(leaderTerm, command("a"));
+
+        RaftCommitManager commitManager = new RaftCommitManager(log, entry -> {});
+
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                sender,
+                null
+        );
+
+        manager.start();
+        manager.onLeaderElected(1, leaderTerm);
+
+        Thread heartbeatThread = new Thread(
+                () -> manager.onHeartbeatRoundDue(leaderTerm),
+                "test-heartbeat"
+        );
+
+        heartbeatThread.start();
+
+        assertTrue(
+                log.awaitSendPlanBuildEntered(),
+                "Heartbeat did not reach the controlled send-plan blocking point"
+        );
+
+        CountDownLatch stepDownCompleted = new CountDownLatch(1);
+
+        Thread stepDownThread = new Thread(() -> {
+            try {
+                node.stepDownIfHigherTerm(leaderTerm + 1L);
+            } finally {
+                stepDownCompleted.countDown();
+            }
+        }, "test-step-down");
+
+        stepDownThread.start();
+
+        boolean stepDownCompletedBeforePlanBuild =
+                waitUntilBlockedOrCompleted(stepDownThread, stepDownCompleted);
+
+        log.releaseSendPlanBuild();
+
+        joinOrFail(heartbeatThread);
+        joinOrFail(stepDownThread);
+
+        assertFalse(
+                stepDownCompletedBeforePlanBuild,
+                "Step-down must not complete while AppendEntries requests are being built"
+        );
+
+        assertEquals(RaftRole.FOLLOWER, node.getRole());
+        assertEquals(leaderTerm + 1L, node.getCurrentTerm());
+
+        assertEquals(2, sender.totalRequests());
+
+        AppendEntriesRequestMessage requestTo2 = sender.lastRequest(2);
+        AppendEntriesRequestMessage requestTo3 = sender.lastRequest(3);
+
+        assertNotNull(requestTo2);
+        assertNotNull(requestTo3);
+
+        assertEquals(leaderTerm, requestTo2.getTerm());
+        assertEquals(leaderTerm, requestTo3.getTerm());
     }
 
     @Test
@@ -665,6 +813,87 @@ class RaftReplicationManagerTest {
 
     private ChatCommand command(String localMsgId) {
         return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    }
+
+    private static boolean waitUntilBlockedOrCompleted(
+            Thread thread,
+            CountDownLatch completed
+    ) {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+
+        while (completed.getCount() > 0L
+                && thread.getState() != Thread.State.BLOCKED) {
+
+            if (System.nanoTime() >= deadline) {
+                fail("Thread did not become blocked or complete within the timeout");
+            }
+
+            Thread.onSpinWait();
+        }
+
+        return completed.getCount() == 0L;
+    }
+
+    private static void joinOrFail(Thread thread) throws InterruptedException {
+        thread.join(TimeUnit.SECONDS.toMillis(2));
+
+        assertFalse(
+                thread.isAlive(),
+                "Thread did not terminate: " + thread.getName()
+        );
+    }
+
+    private static class BlockingAppendRaftLog extends RaftLog {
+
+        private final CountDownLatch appendEntered = new CountDownLatch(1);
+        private final CountDownLatch appendRelease = new CountDownLatch(1);
+
+        @Override
+        public synchronized RaftLogEntry append(long term, ChatCommand command) {
+            appendEntered.countDown();
+            awaitRelease(appendRelease);
+            return super.append(term, command);
+        }
+
+        boolean awaitAppendEntered() throws InterruptedException {
+            return appendEntered.await(2, TimeUnit.SECONDS);
+        }
+
+        void releaseAppend() {
+            appendRelease.countDown();
+        }
+    }
+
+    private static class BlockingSendPlanRaftLog extends RaftLog {
+
+        private final CountDownLatch sendPlanBuildEntered = new CountDownLatch(1);
+        private final CountDownLatch sendPlanBuildRelease = new CountDownLatch(1);
+
+        @Override
+        public synchronized List<RaftLogEntry> getEntriesFrom(long startIndex) {
+            sendPlanBuildEntered.countDown();
+            awaitRelease(sendPlanBuildRelease);
+            return super.getEntriesFrom(startIndex);
+        }
+
+        boolean awaitSendPlanBuildEntered() throws InterruptedException {
+            return sendPlanBuildEntered.await(2, TimeUnit.SECONDS);
+        }
+
+        void releaseSendPlanBuild() {
+            sendPlanBuildRelease.countDown();
+        }
+    }
+
+    private static void awaitRelease(CountDownLatch latch) {
+        try {
+            if (!latch.await(2, TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Timed out waiting for test release");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted while waiting for test release", e);
+        }
     }
 
     private static class RecordingSender implements RaftAppendEntriesSender {
