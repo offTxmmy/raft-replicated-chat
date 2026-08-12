@@ -96,30 +96,58 @@ public final class RaftOrderingService implements OrderingService {
         List<RaftLogEntry> persistedEntries = persistence.loadLogEntries();
         raftLog.loadFromPersistence(persistedEntries);
 
+        RaftPersistence.CommitProgress persistedProgress = persistence.loadCommitProgress();
+        long restoredCommitIndex = Math.min(
+                persistedProgress.commitIndex(),
+                raftLog.lastLogIndex()
+        );
+        long restoredLastApplied = Math.min(
+                persistedProgress.lastApplied(),
+                restoredCommitIndex
+        );
+
+        // Only entries that were already applied before the restart are known to have
+        // passed through the application-level deduplication boundary.
         for (RaftLogEntry entry : persistedEntries) {
+            if (entry.getIndex() > restoredLastApplied) {
+                break;
+            }
+
             ChatCommand cmd = entry.getCommand();
             if (cmd != null) {
                 committedProposalKeys.add(proposalKey(cmd));
             }
         }
 
-        RaftPersistence.CommitProgress persistedProgress = persistence.loadCommitProgress();
-        long restoredCommitIndex = Math.min(persistedProgress.commitIndex(), raftLog.lastLogIndex());
-        long restoredLastApplied = Math.min(persistedProgress.lastApplied(), restoredCommitIndex);
-
         // 3. State machine: deliver committed entries as ChatDeliverMessage.
         RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
-        commitManager = new RaftCommitManager(raftLog, entry -> {
-            applyHook.accept(entry);
-            completePendingCommit(entry);
-        }, restoredCommitIndex, restoredLastApplied, (commitIndex, lastApplied) ->
-                persistence.persistCommitProgress(commitIndex, lastApplied));
+
+        commitManager = new RaftCommitManager(
+                raftLog,
+                entry -> applyCommittedEntryOnce(entry, applyHook),
+                restoredCommitIndex,
+                restoredLastApplied,
+                (commitIndex, lastApplied) ->
+                        persistence.persistCommitProgress(commitIndex, lastApplied)
+        );
 
         raftLog.setCommitIndexSupplier(commitManager::getCommitIndex);
+
         raftLog.setTruncationHook(entry -> {
             ChatCommand cmd = entry.getCommand();
-            if (cmd != null) {
-                committedProposalKeys.remove(proposalKey(cmd));
+            if (cmd == null) {
+                return;
+            }
+
+            String key = proposalKey(cmd);
+            CompletableFuture<Boolean> pending;
+
+            synchronized (idempotencyLock) {
+                pending = pendingCommits.remove(key);
+            }
+
+            if (pending != null) {
+                pending.complete(false);
             }
         });
 
@@ -165,6 +193,7 @@ public final class RaftOrderingService implements OrderingService {
             @Override
             public void onSteppedDown(long newTerm, int knownLeaderId) {
                 replicationManager.onSteppedDown(newTerm, knownLeaderId);
+                failAllPendingCommits();
             }
 
             @Override
@@ -313,11 +342,22 @@ public final class RaftOrderingService implements OrderingService {
                 );
             }
 
+            if (raftLogContainsProposalKey(proposalKey)) {
+                synchronized (idempotencyLock) {
+                    pendingCommits.remove(proposalKey, committed);
+                }
+
+                committed.complete(false);
+                return false;
+            }
+
             RaftLogEntry appended = replicationManager.appendCommandAsLeader(command);
             if (appended == null) {
                 synchronized (idempotencyLock) {
                     pendingCommits.remove(proposalKey, committed);
                 }
+
+                committed.complete(false);
                 return false;
             }
         }
@@ -414,16 +454,25 @@ public final class RaftOrderingService implements OrderingService {
         }
     }
 
-    private void completePendingCommit(RaftLogEntry entry) {
+    private void applyCommittedEntryOnce(
+            RaftLogEntry entry,
+            RaftStateMachineAdapter applyHook
+    ) {
         if (entry == null || entry.getCommand() == null) {
             return;
         }
 
-        String proposalKey = proposalKey(entry.getCommand());
+        String key = proposalKey(entry.getCommand());
         CompletableFuture<Boolean> pending;
+        boolean firstApplication;
+
         synchronized (idempotencyLock) {
-            committedProposalKeys.add(proposalKey);
-            pending = pendingCommits.remove(proposalKey);
+            firstApplication = committedProposalKeys.add(key);
+            pending = pendingCommits.remove(key);
+        }
+
+        if (firstApplication) {
+            applyHook.accept(entry);
         }
 
         if (pending != null) {
@@ -433,6 +482,31 @@ public final class RaftOrderingService implements OrderingService {
 
     long getLastLogIndexForTesting() {
         return raftLog == null ? 0L : raftLog.lastLogIndex();
+    }
+
+    private boolean raftLogContainsProposalKey(String key) {
+        for (RaftLogEntry entry : raftLog.getEntriesFrom(1L)) {
+            ChatCommand command = entry.getCommand();
+
+            if (command != null && proposalKey(command).equals(key)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void failAllPendingCommits() {
+        List<CompletableFuture<Boolean>> pending;
+
+        synchronized (idempotencyLock) {
+            pending = List.copyOf(pendingCommits.values());
+            pendingCommits.clear();
+        }
+
+        for (CompletableFuture<Boolean> future : pending) {
+            future.complete(false);
+        }
     }
 
     private static String proposalKey(ChatReqMessage request) {
