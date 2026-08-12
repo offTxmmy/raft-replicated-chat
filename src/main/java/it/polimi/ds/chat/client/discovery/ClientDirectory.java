@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
+import java.util.Collections;
+import java.util.Set;
 
 /**
  * Handles communication with the Directory Service to discover the best broker for the client.
@@ -35,6 +37,12 @@ public class ClientDirectory {
      * @throws ClassNotFoundException if the response class is not found
      */
     public BrokerInfo getBestBroker() throws IOException, ClassNotFoundException {
+        return getBestBroker(Collections.emptySet());
+    }
+
+    /** Requests the least-loaded broker outside the caller's temporary exclusions. */
+    public BrokerInfo getBestBroker(Set<Integer> excludedBrokerIds)
+            throws IOException, ClassNotFoundException {
         //System.out.println("[DEBUG] DirectoryClient.getBestBroker() - inizio");
         //System.out.println("[DEBUG] Mi collego alla directory " + directoryHost + ":" + directoryPort);
 
@@ -47,7 +55,7 @@ public class ClientDirectory {
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());
             //System.out.println("[DEBUG] ObjectInputStream verso directory creato");
 
-            GetBrokerRequestMessage req = new GetBrokerRequestMessage();
+            GetBrokerRequestMessage req = new GetBrokerRequestMessage(excludedBrokerIds);
             //System.out.println("[DEBUG] Invio GetBrokerRequestMessage alla directory...");
             out.writeObject(req);
             out.flush();

@@ -13,6 +13,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -250,6 +254,131 @@ class RaftCoreTest {
 
         assertNotNull(fakeClock.lastOneShotTask);
         assertFalse(fakeClock.lastOneShotTask.cancelled);
+    }
+
+    /**
+     * Exercises the complete incoming-request path that previously bypassed the
+     * election lifecycle by updating RaftNode directly in the replication layer.
+     */
+    @Test
+    void higherTermAppendEntriesRequestShouldCompleteLeaderStepDownAndStillApply() {
+        FakeClock fakeClock = new FakeClock();
+        RaftNode node = new RaftNode(1);
+        RaftLog log = new RaftLog();
+        List<Long> appliedIndexes = new ArrayList<>();
+        RaftCommitManager commitManager =
+                new RaftCommitManager(log, entry -> appliedIndexes.add(entry.getIndex()));
+        RecordingAppendEntriesSender sender = new RecordingAppendEntriesSender();
+
+        ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits =
+                new ConcurrentHashMap<>();
+        CompletableFuture<Boolean> pending = new CompletableFuture<>();
+        pendingCommits.put("client:pending:1", pending);
+
+        AtomicInteger steppedDownCallbacks = new AtomicInteger();
+        AtomicInteger leaderObservedCallbacks = new AtomicInteger();
+        AtomicBoolean stepDownCallbackHeldReplicationLock = new AtomicBoolean();
+        RaftReplicationManager[] replicationRef = new RaftReplicationManager[1];
+
+        RaftElectionManager electionManager = new RaftElectionManager(
+                1,
+                Set.of(1, 2, 3),
+                100L,
+                200L,
+                50L,
+                node,
+                log.snapshotMetadata(),
+                new RecordingVoteRequestSender(),
+                fakeClock,
+                new RaftElectionListener() {
+                    @Override
+                    public void onLeaderElected(int leaderId, long term) {
+                        replicationRef[0].onLeaderElected(leaderId, term);
+                    }
+
+                    @Override
+                    public void onSteppedDown(long newTerm, int knownLeaderId) {
+                        stepDownCallbackHeldReplicationLock.set(
+                                Thread.holdsLock(replicationRef[0])
+                        );
+                        steppedDownCallbacks.incrementAndGet();
+                        replicationRef[0].onSteppedDown(newTerm, knownLeaderId);
+
+                        List<CompletableFuture<Boolean>> futures =
+                                List.copyOf(pendingCommits.values());
+                        pendingCommits.clear();
+                        futures.forEach(future -> future.complete(false));
+                    }
+
+                    @Override
+                    public void onLeaderObserved(int leaderId, long term) {
+                        leaderObservedCallbacks.incrementAndGet();
+                    }
+
+                    @Override
+                    public void onHeartbeatRoundDue(long term) {
+                        replicationRef[0].onHeartbeatRoundDue(term);
+                    }
+                }
+        );
+
+        RaftReplicationManager replicationManager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                sender,
+                electionManager::onValidLeaderActivityObserved,
+                electionManager::onHigherTermObserved
+        );
+        replicationRef[0] = replicationManager;
+
+        replicationManager.start();
+        electionManager.start();
+        fakeClock.lastOneShotTask.fire();
+        electionManager.onRequestVoteResponse(
+                new RequestVoteResponseMessage(1L, true, 2)
+        );
+
+        assertEquals(RaftRole.LEADER, node.getRole());
+        FakeScheduledTask oldHeartbeatTask = fakeClock.lastFixedRateTask;
+        int timeoutSchedulesBeforeRequest = fakeClock.oneShotScheduleCount;
+
+        AppendEntriesResponseMessage response = replicationManager.handleAppendEntries(
+                new AppendEntriesRequestMessage(
+                        5L,
+                        2,
+                        0L,
+                        0L,
+                        List.of(new RaftLogEntry(1L, 5L, command("new-leader"))),
+                        1L
+                )
+        );
+
+        assertTrue(response.isSuccess());
+        assertEquals(5L, response.getTerm());
+        assertEquals(1L, response.getMatchIndex());
+        assertEquals(RaftRole.FOLLOWER, node.getRole());
+        assertEquals(5L, node.getCurrentTerm());
+        assertEquals(2, node.getLeaderId());
+
+        assertTrue(oldHeartbeatTask.cancelled);
+        assertEquals(timeoutSchedulesBeforeRequest + 2, fakeClock.oneShotScheduleCount);
+        assertNotNull(fakeClock.lastOneShotTask);
+        assertFalse(fakeClock.lastOneShotTask.cancelled);
+
+        assertTrue(pending.isDone());
+        assertFalse(pending.getNow(true));
+        assertTrue(pendingCommits.isEmpty());
+        assertEquals(1, steppedDownCallbacks.get());
+        assertEquals(1, leaderObservedCallbacks.get());
+        assertFalse(stepDownCallbackHeldReplicationLock.get());
+
+        assertEquals(1L, log.lastLogIndex());
+        assertEquals(5L, log.lastLogTerm());
+        assertEquals(1L, commitManager.getCommitIndex());
+        assertEquals(List.of(1L), appliedIndexes);
     }
 
     private ChatCommand command(String localMsgId) {

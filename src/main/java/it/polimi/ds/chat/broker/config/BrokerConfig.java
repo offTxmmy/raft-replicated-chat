@@ -9,12 +9,17 @@ import java.util.Objects;
  */
 public class BrokerConfig {
 
+    public static final String DEFAULT_DIRECTORY_HOST = "localhost";
+    public static final int DEFAULT_DIRECTORY_PORT = 60000;
+
     private final int brokerId;
     private final String brokerHost;
     private final int brokerPort;
     private final int clientPort;
     private final int udpPort;
     private final RaftConfig raftConfig;
+    private final String directoryHost;
+    private final int directoryPort;
 
     public BrokerConfig(int brokerId,
                         String brokerHost,
@@ -22,12 +27,33 @@ public class BrokerConfig {
                         int clientPort,
                         int udpPort,
                         RaftConfig raftConfig) {
+        this(
+                brokerId,
+                brokerHost,
+                brokerPort,
+                clientPort,
+                udpPort,
+                raftConfig,
+                DEFAULT_DIRECTORY_HOST,
+                DEFAULT_DIRECTORY_PORT);
+    }
+
+    public BrokerConfig(int brokerId,
+                        String brokerHost,
+                        int brokerPort,
+                        int clientPort,
+                        int udpPort,
+                        RaftConfig raftConfig,
+                        String directoryHost,
+                        int directoryPort) {
         this.brokerId = brokerId;
         this.brokerHost = Objects.requireNonNull(brokerHost, "brokerHost");
         this.brokerPort = validatePort(brokerPort, "brokerPort");
         this.clientPort = validatePort(clientPort, "clientPort");
         this.udpPort = validatePort(udpPort, "udpPort");
         this.raftConfig = Objects.requireNonNull(raftConfig, "raftConfig");
+        this.directoryHost = requireNonBlank(directoryHost, "directoryHost");
+        this.directoryPort = validatePort(directoryPort, "directoryPort");
     }
 
     public int getBrokerId() {
@@ -52,6 +78,22 @@ public class BrokerConfig {
 
     public RaftConfig getRaftConfig() {
         return raftConfig;
+    }
+
+    public String getDirectoryHost() {
+        return directoryHost;
+    }
+
+    public int getDirectoryPort() {
+        return directoryPort;
+    }
+
+    private static String requireNonBlank(String value, String fieldName) {
+        Objects.requireNonNull(value, fieldName);
+        if (value.isBlank()) {
+            throw new IllegalArgumentException(fieldName + " must not be blank");
+        }
+        return value;
     }
 
     private static int validatePort(int port, String fieldName) {

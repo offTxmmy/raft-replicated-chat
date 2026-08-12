@@ -1,7 +1,8 @@
 # Repository compliance baseline
 
-Aggiornata con audit fresco del **2026-08-11**, commit
-`c77dbb981a3db837c50ef17bf9bd279278c04998`.
+Aggiornata con verifica del **2026-08-12**, current `HEAD`
+`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832` e working tree candidato non
+committato.
 
 Questo documento non sostituisce la consegna ufficiale. La gerarchia usata e':
 
@@ -86,14 +87,18 @@ socket-level con cui si sfrutta il broadcast disponibile, non accesso raw Ethern
 
 ### 3.1 Startup
 
-1. Directory avvia i listener broker `60000` e client `60001` con voter CSV statico.
-2. Ogni `BrokerMain` legge i voter da `localhost:60000`, costruisce Raft e apre RPC/UDP.
-3. Il broker si registra nella Directory e successivamente apre il listener client.
-4. Il client consulta la Directory, apre TCP al broker e invia JOIN.
+1. Directory riceve il voter CSV statico e apre transazionalmente i listener broker e
+   client, di default `60000` e `60001` ma entrambi configurabili da CLI.
+2. Ogni `BrokerMain` usa la stessa coppia `directoryHost/directoryPort` per leggere i
+   voter, registrarsi, inviare heartbeat e re-registrarsi. `raft-local` usa TCP
+   same-host; `raft` mantiene HYBRID come modalita' ufficiale.
+3. Il broker avvia Raft e fa bind del listener client prima di pubblicare l'endpoint.
+   La porta client deriva dal voter endpoint salvo override CLI esplicito.
+4. Il client consulta il listener client della Directory, apre TCP al broker e invia
+   JOIN. La sessione diventa destinataria solo dopo un fence Raft applicato localmente.
 
-Limiti correnti: l'endpoint Directory dei broker e' hard-coded; il broker e'
-pubblicizzato prima della client readiness. La topologia single-Directory su due host
-richiede `CODE-10`; il lifecycle richiede `CODE-13`.
+Il voter set copiato in `RaftConfig` resta statico e indipendente dal registro live
+della Directory; readiness/re-registration non cambiano quorum o membership.
 
 ### 3.2 Chat con broker leader
 
@@ -112,8 +117,8 @@ richiede `CODE-10`; il lifecycle richiede `CODE-13`.
 
 Il broker inoltra la proposal via TCP al leader noto e attende la risposta. Il client
 rimane connesso al proprio broker. Se il forward fallisce, non viene inviato ACK e il
-client ritenta; oggi questo percorso non preserva necessariamente FIFO fra due
-`clientSeq` (`CODE-05`) e dedup/future non sono leader-change-safe (`CODE-04`).
+client ritenta. Il client production mantiene una sola head FIFO in-flight fino
+all'ACK di commit; dedup e pending future sono leader-change-safe.
 
 ### 3.4 Election e failover
 
@@ -122,28 +127,27 @@ RequestVote. Il voto usa freshness term/index e la maggioranza del voter set sta
 Il nuovo leader inizializza `nextIndex/matchIndex`, appende una no-op del proprio term
 e avvia heartbeat/replication.
 
-Il no-op e' una tecnica Raft corretta, ma la sua integrazione applicativa e' P0
-(`CODE-01`). In parallelo, role/term/append non sono una transizione atomica e possono
-violare State Machine Safety (`CODE-02`). Alcune higher-term response non completano
-correttamente lo step-down (`CODE-03`).
+Il no-op e' una tecnica Raft corretta e non consuma sequence applicativa. Append/send
+sono serializzati rispetto allo step-down; election possiede il lifecycle higher-term
+completo, inclusi timer, heartbeat, replication cleanup e pending future.
 
 ### 3.5 JOIN, disconnect e no-history
 
-Non esistono API di history o inbox offline. Tuttavia un client entra nei destinatari
-senza join watermark; un follower in ritardo puo' applicare e inoltrare dopo il JOIN
-un messaggio committato prima della connessione (`CODE-07`). Le notifiche JOIN/LEAVE
-sono inoltre `MSG` locali non consensuali e rendono divergente lo stream visibile
-(`CODE-08`, P2): vanno separate dai messaggi soggetti al requisito oppure replicate.
+Non esistono API di history o inbox offline. Un client non entra nei destinatari
+all'accept: il broker ordina un fence JOIN interno via Raft e lo attiva, accodando
+prima WELCOME, nel callback di apply locale. Le entry precedenti non vedono la nuova
+sessione e quelle successive si'. JOIN/LEAVE non producono `MSG` globali.
 
 ### 3.6 Failure client/broker
 
 - Il quorum Raft consente nominalmente progresso con maggioranza viva.
-- Il client rileva il broker tramite heartbeat, ma il reconnect e' one-shot e puo'
-  riscegliere l'endpoint stale (`CODE-09`).
-- Piu' thread client scrivono sullo stesso ObjectOutputStream (`CODE-06`).
-- Un client lento puo' bloccare delivery/apply sincroni (`CODE-12`).
-- Lifecycle parziale e bookkeeping vector-clock restano rischi P2
-  (`CODE-16`, `CODE-17`).
+- Il client rileva il broker tramite heartbeat/receiver e usa reconnect eventuale con
+  backoff, cancellazione, quarantena endpoint e connection generation.
+- JOIN/QUIT/chat/retry/heartbeat condividono un solo writer serializzato per generation.
+- Il fan-out usa code bounded per sessione; uno slow consumer viene isolato senza
+  bloccare apply o gli altri client.
+- Startup/stop hanno rollback/teardown bounded e il vector clock viene unito per ogni
+  messaggio effettivamente rilasciato, prima della visibilita'.
 - Restart della stessa identita' e power-loss recovery non sono claim minimi correnti;
   i finding relativi sono `OPT-01..04`.
 
@@ -151,15 +155,11 @@ sono inoltre `MSG` locali non consensuali e rendono divergente lo stream visibil
 
 ### 4.1 Total order
 
-In condizioni Raft valide, un log committed unico e l'application crescente per
-indice forniscono un ordine totale dei comandi. La delivery client-visible, pero',
-aggiunge una seconda sequenza: le no-op occupano indici ma non producono delivery.
-Pertanto l'implementazione corrente non realizza la chat end-to-end, anche se i test
-del log passano.
-
-Soluzioni corrette non devono rimuovere il no-op solo per ottenere indici densi. Serve
-una sequenza applicativa deterministica distinta oppure un meccanismo che avanzi il
-livello applicativo attraverso entry interne.
+In condizioni Raft valide, un log committed unico e l'application in ordine forniscono
+un total order dei comandi. L'implementazione mantiene una sequence applicativa densa
+e deterministica distinta dall'indice Raft: no-op e JOIN fence occupano il log senza
+creare buchi client-visible. L'E2E verifica consegna cross-broker e continuita' dopo
+rielezione.
 
 ### 4.2 Causal order
 
@@ -169,11 +169,12 @@ Nel path stabile, una risposta inviata dopo la ricezione di `a` viene proposta q
 Il vecchio sospetto “vector clock aggiornato dopo I/O” non e' quindi, da solo, una
 prova di violazione P0.
 
-Il controesempio confermato e' il failure path: il retry di `m1` puo' arrivare dopo
-`m2` dello stesso client. Poiche' program order implica `m1 -> m2`, CODE-05 viola P4.
-La vector clock broker-wide e la regola che ignora il componente sender non riparano
-questa inversione. I metadati vettoriali restano utili, ma vanno validati soltanto
-dopo aver garantito FIFO e total delivery.
+Il controesempio storico era il failure path in cui il retry di `m1` poteva arrivare
+dopo `m2` dello stesso client. La FIFO single-in-flight ora impedisce che `m2` venga
+trasmesso prima dell'ACK committed di `m1`; dedup rende sicuro il retry della head.
+Il total order Raft conserva poi questa relazione. I metadati vettoriali vengono
+aggiornati sul prefisso realmente ready prima della visibilita'. Resta utile eseguire
+lo scenario dimostrativo `TEST-07/MAN-04` con catena causale e invii concorrenti.
 
 ## 5. Raft: proprieta' confermate e finding
 
@@ -188,14 +189,16 @@ dopo aver garantito FIFO e total delivery.
 - no-op di nuovo term e follower proposal forwarding;
 - filtro UDP per cluster/voter/target/duplicate envelope id.
 
-### Non conformi o non provate
+### Correzioni di safety/liveness verificate
 
-- `CODE-02`: leadership epoch non atomica, possibile State Machine Safety violation;
-- `CODE-03`: higher-term response/lifecycle;
-- `CODE-04`: dedup e pending future su leader change;
-- `CODE-14`: response obsolete possono far regredire `nextIndex`;
-- `CODE-15`: election timeout senza generation;
-- nessuna prova process-level di leader crash con client attivi.
+- append e send non sopravvivono a una leadership/term transition;
+- higher-term request/response completa un solo lifecycle di step-down;
+- dedup e pending future sono ripulite su truncation, append failure e leader loss;
+- `matchIndex/nextIndex` non regrediscono sotto progresso gia' confermato;
+- callback di election timeout obsolete sono invalidate da una generation;
+- il test applicativo con socket reali ferma il leader con maggioranza viva e
+  verifica rielezione e chat successiva. Il processo OS e la LAN fisica restano prove
+  manuali separate.
 
 ## 6. Storage e scope di recovery
 
@@ -206,8 +209,9 @@ promossi e verificati. Un nodo crashato non deve essere riavviato con la stessa
 identita' nella stessa esecuzione se si fa affidamento su questo scope.
 
 Separatamente, P5 resta aperto: il docente deve confermare se il log tecnico interno
-persistente e non esposto ai client sia ammesso. In ogni interpretazione, CODE-07 e la
-prova connected-only sono obbligatori.
+persistente e non esposto ai client sia ammesso. La parte connected-only e' chiusa dal
+JOIN fence e dai test no-history; l'interpretazione dello storage tecnico resta
+`CODE-11 BLOCKED_BY_DECISION`.
 
 ## 7. Matrice di conformita' corrente
 
@@ -217,42 +221,34 @@ prova connected-only sono obbligatori.
 | R2 socket/RMI | Implementato | TCP/UDP socket Java. |
 | R4 due notebook e slide | **Non validato** | `LAN-01..03`; nessun test multi-host. |
 | P1 LAN broadcast | Implementato in codice, non validato fisicamente | Transport ibrido coerente; serve capture/log inter-host. |
-| P2 cross-broker client | Parziale | Forwarding esiste; nessun true E2E e Directory broker hard-coded. |
-| P3 stesso ordine | **Non conforme** | `CODE-01`, `CODE-02`; CODE-08 rende inoltre ambiguo lo stream se le notifiche locali vengono incluse nel claim. |
-| P4 causalita' | **Non conforme sotto failure** | `CODE-05`; nessun causal E2E. |
-| P5 no storage/connected-only | **Parziale / decisione aperta** | `CODE-07`, `CODE-11`; nessuna history API. |
-| F1 failure client/broker/link | Parziale | Core nominale; `CODE-03/04/06/09`, test process-level mancanti. |
+| P2 cross-broker client | Implementato e testato same-host | E2E socket reale con client su follower differenti e forwarding al leader. |
+| P3 stesso ordine | Implementato e testato same-host | Sequence densa, Raft total order, stream solo chat; E2E prima/dopo rielezione. |
+| P4 causalita' | Implementato e testato same-host | FIFO single-in-flight estende program order; l'E2E socket prova `m1 -> ricezione -> m2`, due osservatori e invii concorrenti nello stesso total order. `MAN-04` resta la ripetizione multi-process/LAN. |
+| P5 no storage/connected-only | Connected-only verificato; decisione storage aperta | JOIN fence e nessun replay; `CODE-11` sul log tecnico e' bloccato dal docente. |
+| F1 failure client/broker/link | Implementato nello scope crash-stop scelto | Leader failure E2E e multi-process locale, retry/dedup, reconnect generation-safe e Directory restart; follower/link e LAN fisica restano manuali. |
 | F2 no partition/Byzantine | Correttamente fuori scope | Non va presentato come feature mancante. |
 
-Verdetto: **NOT READY**. I blocker immediati sono CODE-01, CODE-02 e LAN-01; il
-tracker contiene gli ulteriori P1 necessari prima di una claim di conformita'.
+Verdetto: **NOT READY per la consegna finale, code-ready per review**. Non restano
+P0/P1 software implementabili noti; mancano la decisione `CODE-11`, la prova fisica
+`LAN-01/LAN-02` e gli ultimi scenari/runbook manuali del tracker.
 
 ## 8. Evidenza test verificata
 
 Ambiente: Windows 11, Oracle JDK 23.0.2, Maven 3.9.15.
 
 ```text
-mvn test
-Tests run: 186, Failures: 0, Errors: 0, Skipped: 0
+mvn clean test
+Tests run: 274, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
-Tre classi JUnit 4 non sono scoperte da Maven. Esecuzione diretta:
-
-```text
-JUnit version 4.13.1
-OK (6 tests)
-```
-
-I 186 test comprendono unit test Raft/protocollo, persistence su filesystem, RPC
-loopback e otto integration test di tre `RaftOrderingService` nella stessa JVM. Non
-comprendono Directory/ClientMain/Broker/HBQ nel medesimo scenario, failure process,
-no-history o LAN fisica.
-
-Lo smoke multi-process fresco ha attraversato broker, Raft, apply, HBQ e socket client
-diretti e ha riprodotto CODE-01 e osservato il comportamento locale di CODE-08. Il listener Directory-client non e' stato
-usato perche' la porta fissa 60001 era occupata nell'ambiente; questo limite e'
-riportato e non viene mascherato come true E2E.
+I sei casi legacy JUnit 4 sono migrati a Jupiter e inclusi nel conteggio Maven. La
+suite comprende unit/component, filesystem persistence, TCP/UDP Raft integration,
+client socket/reconnect, Directory lifecycle e un vero percorso applicativo con
+Directory, Broker, Raft, HBQ e socket client. E' passato anche uno smoke locale con
+Directory, tre broker e tre client in JVM separate, incluso leader kill, rielezione e
+reconnect. Entrambe le evidenze sono same-host/loopback: non dimostrano multi-host,
+firewall o broadcast fisico.
 
 ## 9. Assunzioni di deployment da dichiarare
 
@@ -265,23 +261,24 @@ riportato e non viene mascherato come true E2E.
 - la demo non dipende dalla discovery ausiliaria;
 - per lo smoke con piu' broker sullo stesso host, il binding UDP comune va provato sul
   sistema operativo scelto;
-- prima di CODE-10 non esiste un runbook corretto single-Directory multi-host senza
-  modifica del sorgente: non vanno documentati argomenti CLI inesistenti.
+- broker e client devono ricevere esplicitamente gli endpoint Directory corretti; i
+  default `localhost:60000/60001` sono soltanto backward compatibility.
 
 ## 10. Claim consentiti
 
-Gia' supportati dal codice/test nominale:
+Supportati dal codice e dai test same-host:
 
 - “La membership di voto e' statica e il quorum non cambia con la reachability.”
 - “RequestVote ed heartbeat vuoti possono usare UDP broadcast; le repliche con
   payload e le proposal peer-specific usano TCP.”
 - “Il core implementa term/vote, log matching, conflict repair e current-term commit.”
+- “Il client preserva FIFO attraverso retry/reconnect e ogni generation ha un solo writer.”
+- “Il JOIN crea un confine committed/applicato e non espone history precedente.”
+- “La chat attraversa broker differenti e prosegue dopo leader failure con maggioranza viva.”
 
-Non consentiti nello stato corrente:
+Non consentiti senza ulteriore evidenza/decisione:
 
-- “La chat consegna end-to-end nello stesso ordine.”
-- “La causalita' e' garantita durante failover/reconnect.”
-- “I client ricevono soltanto messaggi prodotti mentre erano connessi.”
+- “Il divieto di storage ammette certamente il payload nel log persistente Raft.”
 - “Crash-recovery del broker e' supportato correttamente.”
 - “La LAN broadcast e la demo a due notebook sono validate.”
-- “Tutti i test presenti sono eseguiti da Maven.”
+- “Network partition, Byzantine failure, dynamic membership o hardening production sono supportati.”

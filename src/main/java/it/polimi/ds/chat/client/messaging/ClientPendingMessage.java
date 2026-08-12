@@ -7,8 +7,9 @@ package it.polimi.ds.chat.client.messaging;
 public class ClientPendingMessage {
 
     private final long clientSeq;
-    private final String wireLine;   // stringa così come viene mandata su socket
+    private final String wireLine;   // Exact serialized command sent on the socket.
     private volatile long lastSendTime;
+    private volatile boolean sent;
 
     /**
      * Constructs a ClientPendingMessage with the given client sequence and wire line.
@@ -19,7 +20,8 @@ public class ClientPendingMessage {
     public ClientPendingMessage(long clientSeq, String wireLine) {
         this.clientSeq = clientSeq;
         this.wireLine = wireLine;
-        this.lastSendTime = System.currentTimeMillis();
+        this.lastSendTime = 0L;
+        this.sent = false;
     }
 
     /**
@@ -60,6 +62,15 @@ public class ClientPendingMessage {
      * Updates the last send time to the current system time.
      */
     public void updateLastSendTime() {
-        this.lastSendTime = System.currentTimeMillis();
+        markSent(System.currentTimeMillis());
+    }
+
+    public void markSent(long sendTime) {
+        this.lastSendTime = sendTime;
+        this.sent = true;
+    }
+
+    public boolean hasBeenSent() {
+        return sent;
     }
 }

@@ -33,23 +33,25 @@ public class ChatCommand implements Serializable {
     private final String text;
     private final VectorClock vectorClock;
     private final boolean hasClientIdentity;
+    private final boolean deliveryBarrier;
 
     public ChatCommand(String localMsgId, int brokerId, String username, String text, VectorClock vectorClock) {
-        this(localMsgId, brokerId, username, null, 0L, text, vectorClock, false);
+        this(localMsgId, brokerId, username, null, 0L, text, vectorClock, false, false);
     }
 
     public ChatCommand(String localMsgId, int brokerId, String username, String text,
             VectorClock vectorClock, long clientSeq) {
-        this(localMsgId, brokerId, username, username, clientSeq, text, vectorClock, true);
+        this(localMsgId, brokerId, username, username, clientSeq, text, vectorClock, true, false);
     }
 
     public ChatCommand(String localMsgId, int brokerId, String username, String text,
             VectorClock vectorClock, String clientId, long clientSeq) {
-        this(localMsgId, brokerId, username, clientId, clientSeq, text, vectorClock, true);
+        this(localMsgId, brokerId, username, clientId, clientSeq, text, vectorClock, true, false);
     }
 
     private ChatCommand(String localMsgId, int brokerId, String username, String clientId,
-            long clientSeq, String text, VectorClock vectorClock, boolean hasClientIdentity) {
+            long clientSeq, String text, VectorClock vectorClock,
+            boolean hasClientIdentity, boolean deliveryBarrier) {
         this.localMsgId = localMsgId;
         this.brokerId = brokerId;
         this.username = username;
@@ -58,6 +60,25 @@ public class ChatCommand implements Serializable {
         this.text = text;
         this.vectorClock = vectorClock;
         this.hasClientIdentity = hasClientIdentity;
+        this.deliveryBarrier = deliveryBarrier;
+    }
+
+    /**
+     * Creates an internal committed-order fence used to activate a newly joined
+     * client only after all preceding commands have been applied locally.
+     */
+    public static ChatCommand deliveryBarrier(String barrierId, int brokerId) {
+        return new ChatCommand(
+                barrierId,
+                brokerId,
+                "",
+                null,
+                0L,
+                "",
+                new VectorClock(),
+                false,
+                true
+        );
     }
 
     public String getLocalMsgId() {
@@ -98,5 +119,9 @@ public class ChatCommand implements Serializable {
 
     public boolean hasClientIdentity() {
         return hasClientIdentity;
+    }
+
+    public boolean isDeliveryBarrier() {
+        return deliveryBarrier;
     }
 }

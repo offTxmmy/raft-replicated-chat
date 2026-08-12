@@ -119,6 +119,27 @@ class RaftReplicationManagerTest {
     }
 
     @Test
+    void stoppedLeaderCannotAppendOrApplyACommand() {
+        RaftNode node = leaderNode(1);
+        RaftLog log = new RaftLog();
+        List<RaftLogEntry> applied = new ArrayList<>();
+        RaftCommitManager commitManager = new RaftCommitManager(log, applied::add);
+        RaftReplicationManager manager = newManager(
+                node,
+                log,
+                commitManager,
+                new RecordingObserver()
+        );
+
+        manager.stop();
+
+        assertNull(manager.appendCommandAsLeader(command("post-stop")));
+        assertEquals(0L, log.lastLogIndex());
+        assertEquals(0L, commitManager.getCommitIndex());
+        assertTrue(applied.isEmpty());
+    }
+
+    @Test
     // Serializes leader-only append with term/role transitions on the RaftNode.
     void appendCommandAsLeaderShouldSerializeAppendAgainstStepDown() throws Exception {
         RaftNode node = leaderNode(1);
@@ -214,7 +235,9 @@ class RaftReplicationManagerTest {
     // Steps down a leader when it receives a valid AppendEntries for its term.
     void handleAppendEntriesShouldStepDownWhenLeaderReceivesAppendEntries() {
         RaftNode node = leaderNode(1);
-        RaftReplicationManager manager = newManager(node, new RecordingObserver());
+        RaftLeaderActivityObserver electionOwner =
+                (term, leaderId) -> node.becomeFollower(term, leaderId);
+        RaftReplicationManager manager = newManager(node, electionOwner);
 
         AppendEntriesRequestMessage request = new AppendEntriesRequestMessage(
                 node.getCurrentTerm(),
@@ -230,6 +253,51 @@ class RaftReplicationManagerTest {
         assertTrue(response.isSuccess());
         assertEquals(RaftRole.FOLLOWER, node.getRole());
         assertEquals(2, node.getLeaderId());
+    }
+
+    @Test
+    void stoppedManagerShouldRejectAppendEntriesRequestWithoutMutation() {
+        RaftNode node = leaderNode(1);
+        RaftLog log = new RaftLog();
+        RaftCommitManager commitManager =
+                new RaftCommitManager(log, entry -> {});
+        RecordingObserver leaderObserver = new RecordingObserver();
+        RecordingHigherTermObserver higherTermObserver =
+                new RecordingHigherTermObserver();
+
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                new RecordingSender(),
+                leaderObserver,
+                higherTermObserver
+        );
+        manager.start();
+        manager.onLeaderElected(1, node.getCurrentTerm());
+        manager.stop();
+
+        AppendEntriesResponseMessage response = manager.handleAppendEntries(
+                new AppendEntriesRequestMessage(
+                        5L,
+                        2,
+                        0L,
+                        0L,
+                        List.of(new RaftLogEntry(1L, 5L, command("stopped"))),
+                        1L
+                )
+        );
+
+        assertFalse(response.isSuccess());
+        assertEquals(1L, response.getTerm());
+        assertEquals(RaftRole.LEADER, node.getRole());
+        assertEquals(1L, node.getCurrentTerm());
+        assertEquals(1, node.getLeaderId());
+        assertEquals(0L, log.lastLogIndex());
+        assertEquals(0, leaderObserver.calls);
+        assertEquals(0, higherTermObserver.calls);
     }
 
     @Test
@@ -693,6 +761,59 @@ class RaftReplicationManagerTest {
     }
 
     @Test
+    void obsoleteResponsesShouldNotRegressConfirmedReplicationProgress() {
+        RecordingSender sender = new RecordingSender();
+        RaftNode node = leaderNode(1);
+        RaftLog log = new RaftLog();
+        for (int index = 1; index <= 10; index++) {
+            log.append(1L, command("entry-" + index));
+        }
+
+        RaftCommitManager commitManager =
+                new RaftCommitManager(log, entry -> {});
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1,
+                Set.of(1, 2, 3),
+                node,
+                log,
+                commitManager,
+                sender,
+                null,
+                null
+        );
+        manager.start();
+        manager.onLeaderElected(1, 1L);
+
+        // A current response proves that the follower contains entries through 10.
+        manager.handleAppendEntriesResponse(
+                2,
+                new AppendEntriesResponseMessage(1L, true, 2, 10L, -1L, 0L)
+        );
+
+        // These two responses belong to older in-flight requests. Neither may
+        // undo already confirmed match/next progress.
+        manager.handleAppendEntriesResponse(
+                2,
+                new AppendEntriesResponseMessage(1L, true, 2, 5L, -1L, 0L)
+        );
+        manager.handleAppendEntriesResponse(
+                2,
+                new AppendEntriesResponseMessage(1L, false, 2, 0L, -1L, 2L)
+        );
+
+        manager.onHeartbeatRoundDue(1L);
+
+        AppendEntriesRequestMessage nextRequest = sender.lastRequest(2);
+        assertNotNull(nextRequest);
+        assertEquals(
+                10L,
+                nextRequest.getPrevLogIndex(),
+                "nextIndex must remain matchIndex + 1 after obsolete responses"
+        );
+        assertTrue(nextRequest.getEntries().isEmpty());
+    }
+
+    @Test
     // Delegates higher-term AppendEntries responses to the election layer.
     void higherTermAppendEntriesResponseShouldNotifyHigherTermObserver() {
         RecordingSender sender = new RecordingSender();
@@ -853,7 +974,7 @@ class RaftReplicationManagerTest {
                 commitManager,
                 new RecordingSender(),
                 observer,
-                null
+                node::stepDownIfHigherTerm
         );
         manager.start();
         return manager;

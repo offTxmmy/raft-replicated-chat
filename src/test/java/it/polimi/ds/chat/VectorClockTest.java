@@ -1,9 +1,11 @@
 package it.polimi.ds.chat;
 
 import it.polimi.ds.chat.common.clock.VectorClock;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 
-import static org.junit.Assert.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class VectorClockTest {
 
@@ -15,8 +17,10 @@ public class VectorClockTest {
         VectorClock later = new VectorClock(earlier);
         later.increment(1); // {1:2}
 
-        assertTrue("Clock with lower timestamp should happen before the higher one", earlier.happensBefore(later));
-        assertFalse("Clock with higher timestamp should not happen before the lower one", later.happensBefore(earlier));
+        assertTrue(earlier.happensBefore(later),
+                "Clock with lower timestamp should happen before the higher one");
+        assertFalse(later.happensBefore(earlier),
+                "Clock with higher timestamp should not happen before the lower one");
     }
 
     @Test
@@ -29,8 +33,8 @@ public class VectorClockTest {
         clockB.increment(2);
         clockB.increment(2); // {2:2}
 
-        assertFalse("Concurrent clocks should not be ordered", clockA.happensBefore(clockB));
-        assertFalse("Concurrent clocks should not be ordered", clockB.happensBefore(clockA));
+        assertFalse(clockA.happensBefore(clockB), "Concurrent clocks should not be ordered");
+        assertFalse(clockB.happensBefore(clockA), "Concurrent clocks should not be ordered");
     }
 
     @Test
@@ -41,8 +45,10 @@ public class VectorClockTest {
 
         VectorClock copy = new VectorClock(first);
 
-        assertFalse("Identical clocks do not have a happens-before relationship", first.happensBefore(copy));
-        assertFalse("Identical clocks do not have a happens-before relationship", copy.happensBefore(first));
+        assertFalse(first.happensBefore(copy),
+                "Identical clocks do not have a happens-before relationship");
+        assertFalse(copy.happensBefore(first),
+                "Identical clocks do not have a happens-before relationship");
     }
 
     @Test
@@ -58,8 +64,11 @@ public class VectorClockTest {
 
         local.update(incoming);
 
-        assertEquals("Local clock should keep its own timestamp for broker 1", 1, local.getTimeStamp(1));
-        assertEquals("Update should take the max timestamp for broker 2", 2, local.getTimeStamp(2));
-        assertEquals("Update should include new broker entries", 1, local.getTimeStamp(3));
+        assertEquals(1, local.getTimeStamp(1),
+                "Local clock should keep its own timestamp for broker 1");
+        assertEquals(2, local.getTimeStamp(2),
+                "Update should take the max timestamp for broker 2");
+        assertEquals(1, local.getTimeStamp(3),
+                "Update should include new broker entries");
     }
 }

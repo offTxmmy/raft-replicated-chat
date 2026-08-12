@@ -21,7 +21,9 @@ import java.util.Map;
  * <pre>
  *   java BrokerMain raft &lt;nodeId&gt; &lt;rpcPort&gt;
  *       [clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]
- *   java BrokerMain raft-local &lt;nodeId&gt; &lt;rpcPort&gt; [clientPort]
+ *       [directoryHost] [directoryPort]
+ *   java BrokerMain raft-local &lt;nodeId&gt; &lt;rpcPort&gt;
+ *       [clientPort] [directoryHost] [directoryPort]
  * </pre>
  *
  * The voter set (static cluster topology) is fetched from the DirectoryService
@@ -32,10 +34,6 @@ import java.util.Map;
  * RPC via TCP unicast so multiple brokers can run on one host.
  */
 public class BrokerMain {
-
-    // Directory Service location (mirrors the constants used inside Broker).
-    private static final String DIRECTORY_HOST = "localhost";
-    private static final int DIRECTORY_PORT = 60000;
 
     public static void main(String[] args) {
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: RAFT BROKER---");
@@ -55,13 +53,18 @@ public class BrokerMain {
         if (args.length < 3) {
             printUsageAndExit();
         }
-        if (transportMode == RaftTransportMode.LOCAL_TCP && args.length > 4) {
+        if (transportMode == RaftTransportMode.LOCAL_TCP && args.length > 6) {
+            printUsageAndExit();
+        }
+        if (transportMode == RaftTransportMode.HYBRID && args.length > 9) {
             printUsageAndExit();
         }
 
         int nodeId = Integer.parseInt(args[1]);
         int rpcPort = Integer.parseInt(args[2]);
-        int clientPort = (args.length >= 4) ? Integer.parseInt(args[3]) : 50000 + nodeId;
+        Integer clientPortOverride = (args.length >= 4)
+                ? Integer.parseInt(args[3])
+                : null;
         int raftBroadcastPort = (transportMode == RaftTransportMode.HYBRID && args.length >= 5)
                 ? Integer.parseInt(args[4])
                 : RaftConfig.DEFAULT_RAFT_BROADCAST_PORT;
@@ -71,12 +74,25 @@ public class BrokerMain {
         int udpMaxPayloadBytes = (transportMode == RaftTransportMode.HYBRID && args.length >= 7)
                 ? Integer.parseInt(args[6])
                 : RaftConfig.DEFAULT_UDP_MAX_PAYLOAD_BYTES;
+        DirectoryEndpoint directoryEndpoint = directoryEndpointForArgs(args, transportMode);
 
-        Map<Integer, RaftPeerEndpoint> voters = fetchVotersFromDirectory(nodeId);
+        Map<Integer, RaftPeerEndpoint> voters;
+        try {
+            voters = fetchVotersFromDirectory(
+                    nodeId,
+                    directoryEndpoint.host(),
+                    directoryEndpoint.port());
+        } catch (IOException e) {
+            System.err.println("Failed to fetch cluster voters from Directory Service: " + e.getMessage());
+            System.exit(2);
+            return;
+        }
         if (!voters.containsKey(nodeId)) {
             System.err.println("Local nodeId " + nodeId + " is not in the voter set " + voters.keySet());
             System.exit(2);
         }
+        validateRpcPort(nodeId, rpcPort, voters);
+        int clientPort = resolveClientPort(nodeId, clientPortOverride, voters);
 
         Path storageDir = Paths.get("raft-data", "n" + nodeId);
 
@@ -100,7 +116,9 @@ public class BrokerMain {
                 clientPort,
                 clientPort,
                 50002 + nodeId,
-                raftConfig);
+                raftConfig,
+                directoryEndpoint.host(),
+                directoryEndpoint.port());
 
         System.out.println("Starting RAFT broker, nodeId=" + nodeId
                 + ", rpcPort=" + rpcPort
@@ -111,6 +129,7 @@ public class BrokerMain {
                         + ", clusterId=" + clusterId
                         + ", udpMaxPayloadBytes=" + udpMaxPayloadBytes
                     : "")
+                + ", directory=" + directoryEndpoint.host() + ":" + directoryEndpoint.port()
                 + ", voters=" + voters.keySet()
                 + ", storageDir=" + storageDir.toAbsolutePath());
 
@@ -138,11 +157,14 @@ public class BrokerMain {
      * (voter set) for this broker. Fails fast on any error: without a voter
      * set the broker cannot construct its RaftConfig.
      */
-    private static Map<Integer, RaftPeerEndpoint> fetchVotersFromDirectory(int nodeId) {
+    static Map<Integer, RaftPeerEndpoint> fetchVotersFromDirectory(
+            int nodeId,
+            String directoryHost,
+            int directoryPort) throws IOException {
         System.out.println("Fetching cluster voters from Directory Service at "
-                + DIRECTORY_HOST + ":" + DIRECTORY_PORT + " for nodeId=" + nodeId + "...");
+                + directoryHost + ":" + directoryPort + " for nodeId=" + nodeId + "...");
 
-        try (Socket socket = new Socket(DIRECTORY_HOST, DIRECTORY_PORT);
+        try (Socket socket = new Socket(directoryHost, directoryPort);
              ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
 
             out.writeObject(new GetClusterRequestMessage(nodeId));
@@ -151,32 +173,91 @@ public class BrokerMain {
             try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
                 Object obj = in.readObject();
                 if (!(obj instanceof GetClusterResponseMessage resp)) {
-                    System.err.println("Unexpected response from Directory Service: " + obj);
-                    System.exit(2);
-                    return null; // unreachable
+                    throw new IOException("Unexpected response from Directory Service: " + obj);
                 }
 
                 if (!resp.isOk() || resp.getVoters() == null || resp.getVoters().isEmpty()) {
-                    System.err.println("Directory Service returned no cluster info for nodeId=" + nodeId
+                    throw new IOException("Directory Service returned no cluster info for nodeId=" + nodeId
                             + " (resp=" + resp + ")");
-                    System.exit(2);
-                    return null; // unreachable
                 }
 
                 System.out.println("Received voters from Directory Service: " + resp.getVoters().keySet());
                 return resp.getVoters();
             }
-        } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Failed to fetch cluster voters from Directory Service: " + e.getMessage());
-            System.exit(2);
-            return null; // unreachable
+        } catch (ClassNotFoundException e) {
+            throw new IOException("Invalid cluster response from Directory Service", e);
         }
+    }
+
+    static DirectoryEndpoint directoryEndpointForArgs(
+            String[] args,
+            RaftTransportMode transportMode) {
+        int hostIndex = transportMode == RaftTransportMode.HYBRID ? 7 : 4;
+        int portIndex = hostIndex + 1;
+
+        String host = args.length > hostIndex
+                ? args[hostIndex]
+                : BrokerConfig.DEFAULT_DIRECTORY_HOST;
+        int port = args.length > portIndex
+                ? Integer.parseInt(args[portIndex])
+                : BrokerConfig.DEFAULT_DIRECTORY_PORT;
+
+        if (host == null || host.isBlank()) {
+            throw new IllegalArgumentException("directoryHost must not be blank");
+        }
+        if (port < 1 || port > 65535) {
+            throw new IllegalArgumentException("directoryPort out of range: " + port);
+        }
+        return new DirectoryEndpoint(host, port);
+    }
+
+    static int resolveClientPort(
+            int nodeId,
+            Integer cliOverride,
+            Map<Integer, RaftPeerEndpoint> voters) {
+        if (cliOverride != null) {
+            if (cliOverride < 1 || cliOverride > 65535) {
+                throw new IllegalArgumentException(
+                        "clientPort out of range: " + cliOverride);
+            }
+            return cliOverride;
+        }
+
+        RaftPeerEndpoint localEndpoint = voters.get(nodeId);
+        if (localEndpoint == null) {
+            throw new IllegalArgumentException(
+                    "Local nodeId " + nodeId + " is not in the voter set");
+        }
+        return localEndpoint.clientPort();
+    }
+
+    static void validateRpcPort(
+            int nodeId,
+            int cliRpcPort,
+            Map<Integer, RaftPeerEndpoint> voters
+    ) {
+        RaftPeerEndpoint localEndpoint = voters.get(nodeId);
+        if (localEndpoint == null) {
+            throw new IllegalArgumentException(
+                    "Local nodeId " + nodeId + " is not in the voter set");
+        }
+        if (cliRpcPort != localEndpoint.rpcPort()) {
+            throw new IllegalArgumentException(
+                    "rpcPort " + cliRpcPort + " does not match voter endpoint "
+                            + localEndpoint.host() + ":" + localEndpoint.rpcPort()
+                            + " for nodeId " + nodeId);
+        }
+    }
+
+    record DirectoryEndpoint(String host, int port) {
     }
 
     private static void printUsageAndExit() {
         System.err.println("Usage: raft <nodeId> <rpcPort> "
-                + "[clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]");
-        System.err.println("   or: raft-local <nodeId> <rpcPort> [clientPort]");
+                + "[clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes] "
+                + "[directoryHost] [directoryPort]");
+        System.err.println("   or: raft-local <nodeId> <rpcPort> "
+                + "[clientPort] [directoryHost] [directoryPort]");
         System.err.println("  Cluster voters are fetched from the DirectoryService at startup.");
         System.err.println("  raft: HYBRID (default); RequestVote and empty heartbeats use UDP LAN broadcast.");
         System.err.println("  raft-local: local development only; all Raft RPCs use TCP unicast.");

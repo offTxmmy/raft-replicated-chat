@@ -146,7 +146,7 @@ public class LanDiscoveryService {
             TYPE_HELLO,
             this.currentBrokerId,
             brokerConfig.getBrokerHost(),
-            brokerConfig.getBrokerPort()
+            brokerConfig.getClientPort()
         );
         sendBroadcast(msg);
     }

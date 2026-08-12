@@ -1,7 +1,9 @@
 # Raft LAN broadcast: design e stato di validazione
 
-Aggiornato il **2026-08-11** sul commit
-`c77dbb981a3db837c50ef17bf9bd279278c04998`.
+Analisi originale: **2026-08-11**, commit
+`c77dbb981a3db837c50ef17bf9bd279278c04998`. Stato verificato il **2026-08-12** su
+`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832` con le modifiche non committate del
+tracker pre-consegna.
 
 Questo documento spiega la scelta del trasporto. Non e' un tracker: azioni e gate
 sono in [`PRE_GROUP_MANUAL_TESTING_TODO.md`](PRE_GROUP_MANUAL_TESTING_TODO.md).
@@ -77,14 +79,9 @@ UDP non garantisce consegna, ordine o unicita'. Il codice applica queste difese:
 Non va affermato che ogni datagram perso venga ritentato nella stessa election o che
 le response siano correlate a una specifica RPC. Oggi le response sono riconosciute
 per tipo, term, responder/target e stato corrente; non esiste una send generation.
-Response obsolete possono far regredire `nextIndex` (`CODE-14`), pur lasciando
-`matchIndex` monotono.
-
-Restano inoltre due finding Raft indipendenti dal mezzo:
-
-- `CODE-02`: role/term/append non sono atomici rispetto allo step-down;
-- `CODE-03`: alcune higher-term response sono filtrate prima di osservare il term o
-  non completano il lifecycle follower.
+Le response obsolete non possono piu' far regredire `matchIndex`; `nextIndex` resta
+sempre almeno `matchIndex + 1` (`CODE-14`). I finding Raft `CODE-02/03` sono gia'
+chiusi e i regression test higher-term/step-down restano nella suite ordinaria.
 
 ## 5. Membership statica
 
@@ -116,14 +113,15 @@ Poiche' Raft usa una porta broadcast comune separata e voter statici, questo dif
 Argomenti supportati da `BrokerMain`:
 
 ```text
-raft <nodeId> <rpcPort> [clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes]
+raft <nodeId> <rpcPort> [clientPort] [raftBroadcastPort] [clusterId]
+     [udpMaxPayloadBytes] [directoryHost] [directoryBrokerPort]
 ```
 
-Non esistono oggi argomenti per host/porta Directory. Bootstrap, registration e
-heartbeat del broker usano `localhost:60000`. Di conseguenza non esiste ancora un
-runbook corretto per un unico Directory Service su notebook A e un broker su notebook
-B; non vanno documentati flag inesistenti. `CODE-10` deve essere chiuso prima della
-prova fisica.
+Host e porta broker della Directory sono configurabili e la stessa configurazione e'
+usata per bootstrap, registration, heartbeat e re-registration. I default restano
+`localhost:60000`. La porta RPC CLI viene validata rispetto al voter locale e la
+porta client pubblicizzata coincide con quella realmente in ascolto. Questo chiude
+`CODE-10` in codice; indirizzi LAN e firewall restano da verificare fisicamente.
 
 Configurazione da mantenere identica fra voter:
 
@@ -150,25 +148,20 @@ broker sui notebook e riduce questa ambiguita'.
 
 ## 8. Evidenza automatica disponibile
 
-Il 2026-08-11:
+Il 2026-08-12:
 
 ```text
-mvn test
-Tests run: 186, Failures: 0, Errors: 0, Skipped: 0
+mvn clean test
+Tests run: 274, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 
-Sei test JUnit 4 compilati non sono inclusi da Maven; esecuzione diretta:
-
-```text
-JUnit version 4.13.1
-OK (6 tests)
-```
-
-La suite prova routing del transport, filtri envelope, round-trip loopback e un
-cluster Raft in-process. Lo smoke fresco ha eletto tre processi broker same-host, ma
-ha incontrato il blocker applicativo `seq=2/expected=1`. Nessuna di queste evidenze
-dimostra che il broadcast attraversi la LAN fisica della presentazione.
+I sei casi legacy JUnit 4 sono migrati a Jupiter e inclusi nel conteggio. La suite
+prova routing del transport, filtri envelope, round-trip loopback, cluster Raft e
+percorso applicativo completo. Uno smoke aggiuntivo con Directory, tre JVM broker e
+tre JVM client `LOCAL_TCP` ha verificato chat esattamente una volta, leader kill,
+rielezione e reconnect. Nessuna di queste evidenze dimostra che il broadcast HYBRID
+attraversi la LAN fisica della presentazione.
 
 ## 9. Gate LAN su due notebook
 

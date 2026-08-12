@@ -7,6 +7,8 @@ import it.polimi.ds.chat.ordering.raft.config.RaftTransportMode;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
+import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.AfterEach;
@@ -33,6 +35,9 @@ import java.util.function.BooleanSupplier;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * End-to-end integration test for {@link RaftOrderingService}.
@@ -118,6 +123,73 @@ class RaftOrderingServiceIntegrationTest {
             assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected username");
             assertEquals(leaderIdx, d.get(0).getBrokerId(), "node " + i + " unexpected brokerId");
         }
+    }
+
+    @Test
+    void deliveryBoundaryActivatesLocallyBeforeLaterChatAndDoesNotConsumeSequence(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort = pickFreePorts(1)[0];
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0,
+                new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000)
+        );
+
+        nodes = new RaftOrderingService[]{
+                buildService(0, rpcPort, voters, baseDir.resolve("n0"))
+        };
+        List<String> visibleEvents = new CopyOnWriteArrayList<>();
+        List<ChatDeliverMessage> deliveries = new CopyOnWriteArrayList<>();
+        nodes[0].onDeliver(message -> {
+            deliveries.add(message);
+            visibleEvents.add("MSG:" + message.getSeq() + ":" + message.getText());
+        });
+        nodes[0].start();
+
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS),
+                "single-node service did not become leader");
+        assertTrue(nodes[0].establishDeliveryBoundary(
+                "client-a",
+                () -> visibleEvents.add("JOIN")
+        ));
+        assertTrue(nodes[0].propose(new ChatReqMessage(
+                "after-join",
+                0,
+                "alice",
+                "new",
+                new VectorClock()
+        )));
+
+        assertTrue(waitFor(() -> deliveries.size() == 1, DELIVERY_DEADLINE_MS));
+        assertEquals(List.of("JOIN", "MSG:1:new"), visibleEvents,
+                "activation must be serialized before the next state-machine delivery");
+        assertEquals(1L, deliveries.get(0).getSeq(),
+                "the internal JOIN boundary must not consume chat sequence numbers");
+    }
+
+    @Test
+    void failedRpcBindRollsBackAndSameOrderingServiceCanStartAgain(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort;
+        try (ServerSocket occupied = new ServerSocket(0)) {
+            rpcPort = occupied.getLocalPort();
+            Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                    0,
+                    new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000)
+            );
+            nodes = new RaftOrderingService[]{
+                    buildService(0, rpcPort, voters, baseDir.resolve("n0"))
+            };
+
+            assertThrows(RuntimeException.class, nodes[0]::start,
+                    "an occupied RPC port must fail startup");
+            assertFalse(nodes[0].isLeader());
+        }
+
+        nodes[0].start();
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS),
+                "startup rollback must release all state needed for a retry");
     }
 
     @Test
@@ -611,6 +683,148 @@ class RaftOrderingServiceIntegrationTest {
                 pendingCommits.isEmpty(),
                 "leadership loss must clear all pending commit futures"
         );
+    }
+
+    @Test
+    void higherTermAppendEntriesRequestFailsActualPendingCommitsAndStillApplies(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort = pickFreePorts(1)[0];
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0,
+                new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000)
+        );
+        nodes = new RaftOrderingService[]{
+                buildService(0, rpcPort, voters, baseDir.resolve("n0"))
+        };
+        List<ChatDeliverMessage> deliveries = new CopyOnWriteArrayList<>();
+        nodes[0].onDeliver(deliveries::add);
+        nodes[0].start();
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS));
+        assertTrue(waitFor(
+                () -> commitManagerOf(nodes[0]).getCommitIndex() >= 1L,
+                LEADER_ELECTION_DEADLINE_MS
+        ), "the single-node leader no-op must be committed before extending its log");
+
+        ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits =
+                pendingCommitsOf(nodes[0]);
+        CompletableFuture<Boolean> pending = new CompletableFuture<>();
+        pendingCommits.put("client:pending-request:1", pending);
+
+        RaftNode node = raftNodeOf(nodes[0]);
+        RaftLog log = raftLogOf(nodes[0]);
+        long higherTerm = node.getCurrentTerm() + 1L;
+        long previousIndex = log.lastLogIndex();
+        long previousTerm = log.getTermAt(previousIndex);
+        ChatCommand command = new ChatCommand(
+                "incoming-after-step-down",
+                1,
+                "bob",
+                "accepted from new leader",
+                new VectorClock(),
+                "remote-client",
+                1L
+        );
+
+        AppendEntriesResponseMessage response =
+                replicationManagerOf(nodes[0]).handleAppendEntries(
+                        new AppendEntriesRequestMessage(
+                                higherTerm,
+                                1,
+                                previousIndex,
+                                previousTerm,
+                                List.of(new RaftLogEntry(
+                                        previousIndex + 1L,
+                                        higherTerm,
+                                        command
+                                )),
+                                previousIndex + 1L
+                        )
+                );
+
+        assertTrue(response.isSuccess(),
+                "step-down lifecycle must not prevent normal AppendEntries processing");
+        assertEquals(RaftRole.FOLLOWER, node.getRole());
+        assertEquals(higherTerm, node.getCurrentTerm());
+        assertEquals(1, node.getLeaderId());
+        assertTrue(pending.isDone());
+        assertFalse(pending.getNow(true));
+        assertTrue(pendingCommits.isEmpty(),
+                "the real OrderingService pending map must be cleared on step-down");
+        assertEquals(previousIndex + 1L, log.lastLogIndex());
+        assertEquals(1, deliveries.size());
+        assertEquals("accepted from new leader", deliveries.get(0).getText());
+    }
+
+    @Test
+    void staleElectionCallbackCannotMutateAReusedServiceGeneration(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort = pickFreePorts(1)[0];
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0,
+                new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000)
+        );
+        nodes = new RaftOrderingService[]{
+                buildService(0, rpcPort, voters, baseDir.resolve("n0"))
+        };
+        nodes[0].start();
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS));
+
+        RaftElectionListener staleListener = objectPrivateField(
+                electionManagerOf(nodes[0]),
+                "electionListener",
+                RaftElectionListener.class
+        );
+        RaftReplicationManager oldReplicationManager = replicationManagerOf(nodes[0]);
+        RaftHigherTermObserver staleHigherTermObserver = objectPrivateField(
+                oldReplicationManager,
+                "higherTermObserver",
+                RaftHigherTermObserver.class
+        );
+        RaftLeaderActivityObserver staleLeaderActivityObserver = objectPrivateField(
+                oldReplicationManager,
+                "leaderActivityObserver",
+                RaftLeaderActivityObserver.class
+        );
+
+        nodes[0].stop();
+        nodes[0].start();
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS));
+        assertNotSame(oldReplicationManager, replicationManagerOf(nodes[0]));
+
+        RaftLog currentLog = raftLogOf(nodes[0]);
+        assertTrue(waitFor(
+                () -> commitManagerOf(nodes[0]).getCommitIndex() == currentLog.lastLogIndex(),
+                LEADER_ELECTION_DEADLINE_MS
+        ));
+        long stableLastIndex = currentLog.lastLogIndex();
+
+        ConcurrentHashMap<String, CompletableFuture<Boolean>> currentPending =
+                pendingCommitsOf(nodes[0]);
+        CompletableFuture<Boolean> newRunPending = new CompletableFuture<>();
+        currentPending.put("client:new-run:1", newRunPending);
+        RaftNode currentNode = raftNodeOf(nodes[0]);
+        long currentTerm = currentNode.getCurrentTerm();
+
+        // Model callbacks that left the old ElectionManager monitor before stop()
+        // and only resumed after the same service object had been started again.
+        staleHigherTermObserver.onHigherTermObserved(currentTerm + 5L);
+        staleLeaderActivityObserver.onValidLeaderActivityObserved(currentTerm + 5L, 7);
+        staleListener.onLeaderElected(0, currentTerm);
+        staleListener.onSteppedDown(
+                currentTerm + 1L,
+                RaftNode.NO_LEADER
+        );
+
+        assertEquals(currentTerm, currentNode.getCurrentTerm(),
+                "an old replication observer must not update the new election manager");
+        assertEquals(RaftRole.LEADER, currentNode.getRole());
+        assertEquals(stableLastIndex, currentLog.lastLogIndex(),
+                "an old leader callback must not append into the new run");
+        assertFalse(newRunPending.isDone(),
+                "an old step-down callback must not fail a new run's pending future");
+        assertSame(newRunPending, currentPending.get("client:new-run:1"));
     }
 
     /**
@@ -1357,6 +1571,24 @@ class RaftOrderingServiceIntegrationTest {
         } catch (ReflectiveOperationException e) {
             throw new AssertionError(
                     "Unable to access RaftOrderingService." + fieldName,
+                    e
+            );
+        }
+    }
+
+    private static <T> T objectPrivateField(
+            Object owner,
+            String fieldName,
+            Class<T> fieldType
+    ) {
+        try {
+            java.lang.reflect.Field field = owner.getClass().getDeclaredField(fieldName);
+            field.setAccessible(true);
+            return fieldType.cast(field.get(owner));
+        } catch (ReflectiveOperationException e) {
+            throw new AssertionError(
+                    "Unable to access " + owner.getClass().getSimpleName()
+                            + "." + fieldName,
                     e
             );
         }

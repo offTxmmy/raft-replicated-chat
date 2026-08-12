@@ -1,37 +1,72 @@
-# Project Delivery Audit — storico, superato
+# Project Delivery Audit — stato pre-consegna
 
-Data audit: 2026-07-11  
-Repository: `DS-Project2025-2026`  
-Ambiente verificato: Windows 11 amd64, Oracle JDK 23.0.2, Apache Maven 3.9.15
+Aggiornamento canonico: **2026-08-12**
+Commit di partenza e current `HEAD`: `e639cf7c8e20b400555b5f4ec096cc9c5ccfb832`
+Branch: `master` (`origin/master`, ahead 0 / behind 0)
+Ambiente: Windows 11 amd64, Oracle JDK 23.0.2, Apache Maven 3.9.15
 
-> **DOCUMENTO STORICO.** Questo file conserva lo snapshot dell'audit del
-> 2026-07-11 e non rappresenta priorita', scope o stato correnti. L'audit fresco del
-> 2026-08-11 usa come unico tracker attivo
-> [`docs/PRE_GROUP_MANUAL_TESTING_TODO.md`](docs/PRE_GROUP_MANUAL_TESTING_TODO.md),
-> come baseline
-> [`docs/PROJECT_SPECIFICATION.md`](docs/PROJECT_SPECIFICATION.md) e come allegato
-> tecnico [`docs/CODE_ISSUES_BY_GROUP.md`](docs/CODE_ISSUES_BY_GROUP.md).
->
-> Correzioni da applicare a tutto il testo storico sottostante:
->
-> - la specifica ufficiale e i chiarimenti sono disponibili nel contesto di audit e
->   hanno precedenza sulle note interne;
-> - `mvn test` esegue 186 test verdi, mentre 6 test JUnit 4 passano soltanto con
->   esecuzione diretta e non sono scoperti da Maven;
-> - LAN broadcast e demo a due notebook **non** sono validate da test same-host;
-> - crash-restart, torn-write, security e hardening production non sono requisiti
->   automatici e restano opzionali salvo claim esplicito;
-> - il vecchio P0 sul solo timing del vector clock non e' confermato; il finding
->   causale concreto e' l'inversione FIFO durante retry/failover;
-> - il finding sulla failure di persistenza del voto non dimostra una response non
->   durevole gia' esposta e non e' un P0 corrente;
-> - i P0 software confermati sono il gap no-op/sequenza e la race atomica
->   role-term-append; il gate fisico a due notebook e' anch'esso P0 di consegna.
->
-> Tabelle, checklist, claim “Complete” e remediation plan sotto questa nota sono
-> quindi materiale storico, non backlog concorrente.
+## Stato corrente
 
-> **Verdetto: NOT READY – FUNDAMENTAL PROBLEMS**
+**Verdetto finale di consegna: NOT READY.** Il software e' code-ready rispetto ai
+finding implementabili: `CODE-01..10` e `CODE-12..17` sono `VERIFIED`; non restano
+P0/P1 software noti aperti. La consegna finale resta bloccata da:
+
+1. `CODE-11`, correttamente `BLOCKED_BY_DECISION`, per l'interpretazione docente del
+   payload persistente nel log tecnico Raft;
+2. il gate fisico `LAN-01/LAN-02`: demo su almeno due notebook, broadcast HYBRID,
+   firewall, subnet e indirizzi cross-host non sono verificabili su loopback.
+
+| Item | Stato 2026-08-12 | Evidenza sintetica |
+|---|---|---|
+| CODE-01..03 | VERIFIED | fix gia' presenti su `master`, regressioni Raft e vero path applicativo verdi |
+| CODE-04 | VERIFIED | higher-term `AppendEntries` delega il lifecycle a election, fallisce le pending future e continua append/apply |
+| CODE-05..06 | VERIFIED | FIFO single-in-flight e writer unico per connection generation |
+| CODE-07..08 | VERIFIED | JOIN fence Raft locale/atomico; JOIN/LEAVE fuori dallo stream `MSG` |
+| CODE-09..10 | VERIFIED | bootstrap/reconnect eventuali generation-safe, rotazione broker; Directory configurabile end-to-end |
+| CODE-11 | BLOCKED_BY_DECISION | log Raft persistente con payload, ma nessuna API/history/replay client-visible |
+| CODE-12..13 | VERIFIED | fan-out bounded non bloccante; readiness, re-registration e record Directory atomici |
+| CODE-14..17 | VERIFIED | replica monotona, timer generation-safe, lifecycle transazionale, vector clock per ready message |
+
+La verifica automatica finale e' `mvn clean test`: **274 test, 0 failure, 0
+error, 0 skipped**. Include un test applicativo con Directory, tre broker
+`LOCAL_TCP`, socket client reali, forwarding da follower, no-history, ACK, no echo,
+leader failure, rielezione e continuita' delle sequenze. I sei test legacy JUnit 4
+sono stati migrati a Jupiter e ora fanno parte della suite Maven ordinaria.
+Un secondo scenario applicativo verifica la catena causale `A:m1 -> B:riceve ->
+B:m2`, due osservatori con lo stesso ordine e due invii concorrenti cross-broker con
+ACK, no self-echo e nessuna perdita/duplicazione.
+
+E' inoltre passato uno smoke **multi-process locale** con Directory, tre JVM
+`BrokerMain` e tre JVM `ClientMain`: quattro chat osservate nello stesso ordine e una
+sola volta, nessun self-echo, kill del leader, rielezione 2/3 e reconnect reale del
+client attestato al leader terminato. Questa e' evidenza same-host/loopback
+`LOCAL_TCP`, non sostituisce il gate fisico HYBRID su due notebook.
+
+Lo stato dettagliato, le prove per item e le attivita' manuali residue sono mantenuti
+nel ledger esistente
+[`docs/PRE_GROUP_MANUAL_TESTING_TODO.md`](docs/PRE_GROUP_MANUAL_TESTING_TODO.md).
+La baseline normativa resta
+[`docs/PROJECT_SPECIFICATION.md`](docs/PROJECT_SPECIFICATION.md); l'allegato tecnico
+[`docs/CODE_ISSUES_BY_GROUP.md`](docs/CODE_ISSUES_BY_GROUP.md) conserva failure trace
+e root cause storiche, non un backlog parallelo.
+
+## Domanda bloccante per CODE-11
+
+> Nel requisito “brokers do not store messages”, e' ammesso che il log interno
+> persistente di Raft contenga temporaneamente il payload completo dei comandi per
+> replica, commit e recovery, pur non esistendo alcuna API di history/replay e pur
+> non inviando mai ai client messaggi precedenti al loro JOIN? Se no, quale modello
+> di recovery/retention e' richiesto per una replicated state machine Raft?
+
+---
+
+## Snapshot storico del 2026-07-11
+
+Il testo seguente e' preservato per tracciabilita'. Tabelle, conteggi, verdict e
+remediation plan sotto questa linea descrivono lo stato storico e non prevalgono sullo
+stato canonico sopra o sul ledger dettagliato collegato.
+
+> **Verdetto storico: NOT READY – FUNDAMENTAL PROBLEMS**
 
 ## 1. Executive summary
 

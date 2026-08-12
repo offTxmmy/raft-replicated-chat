@@ -87,6 +87,9 @@ public class RaftReplicationManager implements RaftElectionListener {
      * @return appended log entry, or null if not leader
      */
     public synchronized RaftLogEntry appendCommandAsLeader(ChatCommand command) {
+        if (!running) {
+            return null;
+        }
         RaftLogEntry entry;
 
         synchronized (raftNode) {
@@ -105,51 +108,91 @@ public class RaftReplicationManager implements RaftElectionListener {
     public AppendEntriesResponseMessage handleAppendEntries(AppendEntriesRequestMessage request) {
         Objects.requireNonNull(request, "request");
 
-        AppendEntriesResponseMessage response;
-        boolean notifyLeaderActivity;
+        boolean higherTermObserved;
 
         synchronized (this) {
+            if (!running) {
+                return rejectedAppendEntriesResponse();
+            }
+
             long localTerm = raftNode.getCurrentTerm();
             if (request.getTerm() < localTerm) {
-                return new AppendEntriesResponseMessage(localTerm, false, localNodeId, 0L, -1L, 0L);
+                return rejectedAppendEntriesResponse();
             }
 
-            if (request.getTerm() > localTerm || raftNode.getRole() != RaftRole.FOLLOWER) {
-                raftNode.becomeFollower(request.getTerm(), request.getLeaderId());
-            }
+            higherTermObserved = request.getTerm() > localTerm;
+        }
 
-            boolean appended = log.appendEntries(
-                    request.getPrevLogIndex(),
-                    request.getPrevLogTerm(),
-                    request.getEntries()
+        /*
+         * Election lifecycle is owned by RaftElectionManager. In particular, a
+         * higher-term AppendEntries must not update RaftNode here before the
+         * election layer has had a chance to stop leader timers, clear election
+         * tracking, and emit the single step-down callback used by upper layers.
+         *
+         * Both callbacks deliberately run without this manager's lock: the
+         * election listener calls back into onSteppedDown(), so invoking it while
+         * holding this lock would create a cross-manager lock cycle.
+         */
+        if (higherTermObserved && higherTermObserver != null) {
+            higherTermObserver.onHigherTermObserved(request.getTerm());
+        }
+
+        if (leaderActivityObserver != null) {
+            leaderActivityObserver.onValidLeaderActivityObserved(
+                    request.getTerm(),
+                    request.getLeaderId()
             );
+        }
 
-            if (!appended) {
-                long conflictTerm = -1L;
-                long conflictIndex = 0L;
-                long lastIndex = log.lastLogIndex();
-                if (request.getPrevLogIndex() > lastIndex) {
-                    conflictIndex = lastIndex + 1L;
-                } else if (request.getPrevLogIndex() > 0L) {
-                    conflictTerm = log.getTermAt(request.getPrevLogIndex());
-                    conflictIndex = log.firstIndexOfTerm(conflictTerm);
+        synchronized (this) {
+            if (!running) {
+                return rejectedAppendEntriesResponse();
+            }
+
+            synchronized (raftNode) {
+                /*
+                 * A callback may have raced with another election/RPC. Process
+                 * this request only if its term is still current and the election
+                 * owner has completed the transition to FOLLOWER. Holding the
+                 * RaftNode monitor through append/commit prevents a new election
+                 * from interleaving with acceptance of this AppendEntries.
+                 */
+                if (request.getTerm() != raftNode.getCurrentTerm()
+                        || raftNode.getRole() != RaftRole.FOLLOWER) {
+                    return rejectedAppendEntriesResponse();
                 }
-                notifyLeaderActivity = leaderActivityObserver != null;
-                response = new AppendEntriesResponseMessage(
-                        raftNode.getCurrentTerm(),
-                        false,
-                        localNodeId,
-                        0L,
-                        conflictTerm,
-                        conflictIndex
+
+                boolean appended = log.appendEntries(
+                        request.getPrevLogIndex(),
+                        request.getPrevLogTerm(),
+                        request.getEntries()
                 );
-            } else {
+
+                if (!appended) {
+                    long conflictTerm = -1L;
+                    long conflictIndex = 0L;
+                    long lastIndex = log.lastLogIndex();
+                    if (request.getPrevLogIndex() > lastIndex) {
+                        conflictIndex = lastIndex + 1L;
+                    } else if (request.getPrevLogIndex() > 0L) {
+                        conflictTerm = log.getTermAt(request.getPrevLogIndex());
+                        conflictIndex = log.firstIndexOfTerm(conflictTerm);
+                    }
+                    return new AppendEntriesResponseMessage(
+                            raftNode.getCurrentTerm(),
+                            false,
+                            localNodeId,
+                            0L,
+                            conflictTerm,
+                            conflictIndex
+                    );
+                }
+
                 commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
 
                 long ackedMatchIndex = request.getPrevLogIndex() + request.getEntries().size();
 
-                notifyLeaderActivity = leaderActivityObserver != null;
-                response = new AppendEntriesResponseMessage(
+                return new AppendEntriesResponseMessage(
                         raftNode.getCurrentTerm(),
                         true,
                         localNodeId,
@@ -159,12 +202,6 @@ public class RaftReplicationManager implements RaftElectionListener {
                 );
             }
         }
-
-        if (notifyLeaderActivity) {
-            leaderActivityObserver.onValidLeaderActivityObserved(request.getTerm(), request.getLeaderId());
-        }
-
-        return response;
     }
 
     public void handleAppendEntriesResponse(
@@ -219,12 +256,22 @@ public class RaftReplicationManager implements RaftElectionListener {
                         nextIndex = Math.max(1L, nextIndex - 1L);
                     }
 
-                    state.setNextIndex(nextIndex);
+                    // A delayed failure cannot invalidate an index already
+                    // confirmed by a newer successful response.
+                    state.setNextIndex(Math.max(
+                            nextIndex,
+                            state.getMatchIndex() + 1L
+                    ));
                     return;
                 }
 
                 state.updateMatchIndex(response.getMatchIndex());
-                state.setNextIndex(response.getMatchIndex() + 1L);
+                // Success responses may be reordered as well: nextIndex must
+                // never move backwards after confirmed replication progress.
+                state.setNextIndex(Math.max(
+                        state.getNextIndex(),
+                        state.getMatchIndex() + 1L
+                ));
 
                 advanceCommitFromMatches();
             }
@@ -347,6 +394,17 @@ public class RaftReplicationManager implements RaftElectionListener {
         }
 
         commitManager.tryAdvanceCommitIndex(matchIndexes, majority, raftNode.getCurrentTerm());
+    }
+
+    private AppendEntriesResponseMessage rejectedAppendEntriesResponse() {
+        return new AppendEntriesResponseMessage(
+                raftNode.getCurrentTerm(),
+                false,
+                localNodeId,
+                0L,
+                -1L,
+                0L
+        );
     }
 
     private static Set<Integer> immutableVotingSet(Set<Integer> allVotingNodeIds) {

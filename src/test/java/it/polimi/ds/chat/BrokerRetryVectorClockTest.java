@@ -32,6 +32,11 @@ public class BrokerRetryVectorClockTest {
         }
 
         @Override
+        public boolean establishDeliveryBoundary(String boundaryId) {
+            return true;
+        }
+
+        @Override
         public void onDeliver(Consumer<ChatDeliverMessage> callback) {
             // No-op: this test only verifies proposal construction.
         }

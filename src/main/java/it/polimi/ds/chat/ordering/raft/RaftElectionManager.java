@@ -55,6 +55,7 @@ public class RaftElectionManager {
     private volatile boolean running;
     private RaftScheduledTask electionTimeoutTask;
     private RaftScheduledTask heartbeatTask;
+    private long electionTimeoutGeneration;
 
     /**
      * Election currently being tracked by this manager.
@@ -159,7 +160,11 @@ public class RaftElectionManager {
 
         cancelElectionTimeout();
         long randomizedDelayMs = randomElectionTimeoutMs();
-        electionTimeoutTask = raftClock.scheduleOnce(randomizedDelayMs, this::onElectionTimeoutFired);
+        long scheduledGeneration = electionTimeoutGeneration;
+        electionTimeoutTask = raftClock.scheduleOnce(
+                randomizedDelayMs,
+                () -> onElectionTimeoutFired(scheduledGeneration)
+        );
     }
 
     /**
@@ -178,6 +183,10 @@ public class RaftElectionManager {
      * <p>After this method returns, no election timeout is considered active.
      */
     synchronized void cancelElectionTimeout() {
+        // Invalidate even a callback that was already dequeued by the scheduler
+        // and can therefore run despite cancellation of its task handle.
+        electionTimeoutGeneration++;
+
         if (electionTimeoutTask != null) {
             electionTimeoutTask.cancel();
             electionTimeoutTask = null;
@@ -228,12 +237,24 @@ public class RaftElectionManager {
      * - if the static cluster majority is 1, the node wins immediately after self-vote
      */
     void onElectionTimeoutFired() {
+        long currentGeneration;
+
+        synchronized (this) {
+            currentGeneration = electionTimeoutGeneration;
+        }
+
+        onElectionTimeoutFired(currentGeneration);
+    }
+
+    private void onElectionTimeoutFired(long scheduledGeneration) {
         Long leaderElectedTerm = null;
 
         synchronized (this) {
-            if (!running) {
+            if (!running || scheduledGeneration != electionTimeoutGeneration) {
                 return;
             }
+
+            electionTimeoutTask = null;
 
             if (raftNode.isLeader()) {
                 return;
@@ -286,6 +307,14 @@ public class RaftElectionManager {
         int steppedDownLeaderId = RaftNode.NO_LEADER;
 
         synchronized (this) {
+            if (!running) {
+                return new RequestVoteResponseMessage(
+                        raftNode.getCurrentTerm(),
+                        false,
+                        localNodeId
+                );
+            }
+
             long termBefore = raftNode.getCurrentTerm();
             RaftRole roleBefore = raftNode.getRole();
 
@@ -326,11 +355,9 @@ public class RaftElectionManager {
      * and notifies the listener.
      *
      * <p>If the observed term matches the local term and this node is currently a
-     * candidate, it steps down to follower and resets its follower timeout.
+     * candidate or leader, it steps down to follower and resets its follower timeout.
      * If this node is already a follower in the same term, it simply refreshes
      * the known leader and resets the election timeout.
-     *
-     * <p>If this node is already leader in the same term, the event is ignored.
      *
      * @param term the term associated with the observed leader activity
      * @param leaderId the id of the leader that generated the activity
@@ -359,7 +386,8 @@ public class RaftElectionManager {
                 resetElectionTimeout();
                 notifySteppedDown = true;
                 notifyLeaderObserved = previousLeaderId != leaderId;
-            } else if (localRole == RaftRole.CANDIDATE) {
+            } else if (localRole == RaftRole.CANDIDATE
+                    || localRole == RaftRole.LEADER) {
                 raftNode.becomeFollower(term, leaderId);
                 clearElectionTracking();
                 stopHeartbeatSchedule();
@@ -372,8 +400,6 @@ public class RaftElectionManager {
                 notifyLeaderObserved = previousLeaderId != leaderId;
             }
 
-            // A same-term leader observing another same-term leader is not a
-            // valid Raft transition; keep local state unchanged.
         }
 
         if (notifySteppedDown) {

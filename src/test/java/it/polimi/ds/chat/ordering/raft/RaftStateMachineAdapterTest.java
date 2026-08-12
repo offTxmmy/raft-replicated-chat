@@ -131,4 +131,33 @@ class RaftStateMachineAdapterTest {
         assertEquals(2L, holdBackQueue.getExpectedSeq());
         assertEquals(0, holdBackQueue.getPendingCount());
     }
+
+    @Test
+    void joinDeliveryBarrierIsAppliedInternallyWithoutConsumingChatSequence() {
+        List<ChatDeliverMessage> deliveredMessages = new ArrayList<>();
+        RaftStateMachineAdapter adapter = new RaftStateMachineAdapter(deliveredMessages::add);
+
+        adapter.accept(new RaftLogEntry(
+                1L,
+                1L,
+                ChatCommand.deliveryBarrier("join-barrier:session-1", 1)
+        ));
+        adapter.accept(new RaftLogEntry(
+                2L,
+                1L,
+                new ChatCommand(
+                        "msg-1",
+                        1,
+                        "alice",
+                        "after join",
+                        new VectorClock(),
+                        "client-1",
+                        1L
+                )
+        ));
+
+        assertEquals(1, deliveredMessages.size());
+        assertEquals(1L, deliveredMessages.get(0).getSeq());
+        assertEquals("after join", deliveredMessages.get(0).getText());
+    }
 }

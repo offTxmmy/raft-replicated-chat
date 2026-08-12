@@ -4,15 +4,15 @@ import it.polimi.ds.chat.broker.core.Broker;
 import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.common.clock.VectorClock;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class VectorClockMultiBrokerIntegrationTest {
 
@@ -41,7 +41,7 @@ public class VectorClockMultiBrokerIntegrationTest {
     private TracingBroker broker1;
     private TracingBroker broker2;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         broker0 = new TracingBroker(TestConfigs.raftBrokerConfig(0, 5000));
         broker1   = new TracingBroker(TestConfigs.raftBrokerConfig(1, 5002));
@@ -156,20 +156,20 @@ public class VectorClockMultiBrokerIntegrationTest {
                 "4:bob:m4"
         );
 
-        assertEquals("Broker0 should deliver all messages in global order",
-                expectedDelivery, broker0.getDelivered());
-        assertEquals("Broker1 should deliver all messages in global order",
-                expectedDelivery, broker1.getDelivered());
-        assertEquals("Broker2 should deliver all messages in global order",
-                expectedDelivery, broker2.getDelivered());
+        assertEquals(expectedDelivery, broker0.getDelivered(),
+                "Broker0 should deliver all messages in global order");
+        assertEquals(expectedDelivery, broker1.getDelivered(),
+                "Broker1 should deliver all messages in global order");
+        assertEquals(expectedDelivery, broker2.getDelivered(),
+                "Broker2 should deliver all messages in global order");
 
         // --- VERIFICA 2: tutti i broker hanno visto almeno ID 1 e 2 ---
-        assertTrue("Broker0 clock should know at least brokers 1 and 2",
-                broker0.getVectorClock().getClock().size() >= 2);
-        assertTrue("Broker1 clock should know at least brokers 1 and 2",
-                broker1.getVectorClock().getClock().size() >= 2);
-        assertTrue("Broker2 clock should know at least brokers 1 and 2",
-                broker2.getVectorClock().getClock().size() >= 2);
+        assertTrue(broker0.getVectorClock().getClock().size() >= 2,
+                "Broker0 clock should know at least brokers 1 and 2");
+        assertTrue(broker1.getVectorClock().getClock().size() >= 2,
+                "Broker1 clock should know at least brokers 1 and 2");
+        assertTrue(broker2.getVectorClock().getClock().size() >= 2,
+                "Broker2 clock should know at least brokers 1 and 2");
 
         // --- VERIFICA 3: i timestamp per broker 1 e 2 sono coerenti tra i broker ---
 
@@ -182,18 +182,18 @@ public class VectorClockMultiBrokerIntegrationTest {
         int b2Time2  = broker2.getVectorClock().getTimeStamp(2);
 
         // Tutti devono concordare sul numero di eventi visti per broker 1
-        assertEquals("All brokers should agree on broker 1 timestamp", seqTime1, b1Time1);
-        assertEquals("All brokers should agree on broker 1 timestamp", seqTime1, b2Time1);
+        assertEquals(seqTime1, b1Time1, "All brokers should agree on broker 1 timestamp");
+        assertEquals(seqTime1, b2Time1, "All brokers should agree on broker 1 timestamp");
 
         // ...e per broker 2
-        assertEquals("All brokers should agree on broker 2 timestamp", seqTime2, b1Time2);
-        assertEquals("All brokers should agree on broker 2 timestamp", seqTime2, b2Time2);
+        assertEquals(seqTime2, b1Time2, "All brokers should agree on broker 2 timestamp");
+        assertEquals(seqTime2, b2Time2, "All brokers should agree on broker 2 timestamp");
 
         // --- VERIFICA 4: i timestamp sono almeno quelli che ci aspettiamo dalla storia (≥ 2) ---
-        assertTrue("Broker 1 timestamp should be >= 2 (due eventi m1,m3)",
-                seqTime1 >= 2 && b1Time1 >= 2 && b2Time1 >= 2);
+        assertTrue(seqTime1 >= 2 && b1Time1 >= 2 && b2Time1 >= 2,
+                "Broker 1 timestamp should be >= 2 (due eventi m1,m3)");
 
-        assertTrue("Broker 2 timestamp should be >= 2 (due eventi m2,m4)",
-                seqTime2 >= 2 && b1Time2 >= 2 && b2Time2 >= 2);
+        assertTrue(seqTime2 >= 2 && b1Time2 >= 2 && b2Time2 >= 2,
+                "Broker 2 timestamp should be >= 2 (due eventi m2,m4)");
     }
 }

@@ -1,127 +1,128 @@
 package it.polimi.ds.chat.client.messaging;
 
+import it.polimi.ds.chat.client.connection.ClientObjectWriter;
 import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
 
 import java.io.ObjectOutputStream;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
-/**
- * Manages the heartbeat mechanism on the client side.
- * <p>
- * Periodically sends a {@link HeartbeatMessage} to the broker and expects an ACK in response.
- * If a configured number of consecutive heartbeats are missed, triggers a failure callback.
- */
+/** Sends heartbeats through the shared writer of one connection generation. */
 public class ClientHeartbeatManager implements Runnable {
 
-    // Intervallo tra un heartbeat e l'altro
-    private static final long HEARTBEAT_INTERVAL_MS = 1000L; // 1 secondo
-
-    // Numero massimo di heartbeat consecutivi mancati
+    private static final long HEARTBEAT_INTERVAL_MS = 1_000L;
     private static final int MAX_MISSED_HEARTBEATS = 10;
 
-    private final ObjectOutputStream out;
+    private final ClientObjectWriter writer;
+    private final BooleanSupplier generationActive;
     private final HeartbeatFailureHandler failureHandler;
+    private final long heartbeatIntervalMs;
+    private final int maxMissedHeartbeats;
+    private final AtomicLong seqCounter = new AtomicLong(0L);
+    private final AtomicBoolean failureNotified = new AtomicBoolean(false);
 
     private volatile boolean running = true;
+    private int consecutiveMissed;
 
-    // contatore di heartbeat consecutivi non confermati
-    private int consecutiveMissed = 0;
-
-    // Monotonic per-client sequence number used as heartbeat correlation id.
-    private final AtomicLong seqCounter = new AtomicLong(0);
-
-
-    /**
-     * Handler interface for heartbeat failure events.
-     */
     public interface HeartbeatFailureHandler {
-        /**
-         * Called when the maximum number of missed heartbeats is reached.
-         */
         void onHeartbeatFailure();
     }
 
-
-    /**
-     * Constructs a ClientHeartbeatManager.
-     *
-     * @param out            the ObjectOutputStream to send heartbeat messages to the broker
-     * @param failureHandler the handler to invoke on heartbeat failure
-     */
-    public ClientHeartbeatManager(ObjectOutputStream out, HeartbeatFailureHandler failureHandler) {
-        this.out = out;
-        this.failureHandler = failureHandler;
+    /** Legacy constructor retained for callers that own a standalone stream. */
+    public ClientHeartbeatManager(ObjectOutputStream out,
+                                  HeartbeatFailureHandler failureHandler) {
+        this(
+                new ClientObjectWriter(Objects.requireNonNull(out, "out")),
+                () -> true,
+                failureHandler,
+                HEARTBEAT_INTERVAL_MS,
+                MAX_MISSED_HEARTBEATS
+        );
     }
 
+    public ClientHeartbeatManager(ClientObjectWriter writer,
+                                  BooleanSupplier generationActive,
+                                  HeartbeatFailureHandler failureHandler) {
+        this(
+                writer,
+                generationActive,
+                failureHandler,
+                HEARTBEAT_INTERVAL_MS,
+                MAX_MISSED_HEARTBEATS
+        );
+    }
 
-    /**
-     * Stops the heartbeat manager.
-     */
+    ClientHeartbeatManager(ClientObjectWriter writer,
+                           BooleanSupplier generationActive,
+                           HeartbeatFailureHandler failureHandler,
+                           long heartbeatIntervalMs,
+                           int maxMissedHeartbeats) {
+        if (heartbeatIntervalMs <= 0L || maxMissedHeartbeats <= 0) {
+            throw new IllegalArgumentException(
+                    "Heartbeat interval and missed threshold must be positive"
+            );
+        }
+        this.writer = Objects.requireNonNull(writer, "writer");
+        this.generationActive = Objects.requireNonNull(
+                generationActive,
+                "generationActive"
+        );
+        this.failureHandler = failureHandler;
+        this.heartbeatIntervalMs = heartbeatIntervalMs;
+        this.maxMissedHeartbeats = maxMissedHeartbeats;
+    }
+
     public void stop() {
         running = false;
     }
 
-
-    /**
-     * Resets the missed heartbeat counter upon receiving an ACK for a heartbeat.
-     *
-     * @param timestamp the timestamp of the acknowledged heartbeat
-     */
     public synchronized void onHeartbeatAck(long timestamp) {
-        //System.out.println("[HB] ACK ricevuto per heartbeat " + timestamp + " → azzero contatore (consecutiveMissed da " + consecutiveMissed + " a 0)");
-        consecutiveMissed = 0;
+        if (running && generationActive.getAsBoolean()) {
+            consecutiveMissed = 0;
+        }
     }
 
-    /**
-     * Main loop for sending heartbeat messages and monitoring ACKs.
-     * Triggers the failure handler if too many heartbeats are missed.
-     */
     @Override
     public void run() {
         try {
-            while (running) {
-                long ts = seqCounter.incrementAndGet();
+            while (running && generationActive.getAsBoolean()) {
+                long sequence = seqCounter.incrementAndGet();
+                writer.send(new HeartbeatMessage(sequence));
 
-                HeartbeatMessage hb = new HeartbeatMessage(ts);
-
-                //System.out.println("[HB] Invio heartbeat ts=" + ts);
-                out.writeObject(hb);
-                out.flush();
-
-                boolean triggerFailure = false;
+                boolean failed;
                 synchronized (this) {
                     consecutiveMissed++;
-                    //System.out.println("[HB] Heartbeat inviato. consecutiveMissed = " + consecutiveMissed);
-                    if (consecutiveMissed >= MAX_MISSED_HEARTBEATS) {
-                        triggerFailure = true;
+                    failed = consecutiveMissed >= maxMissedHeartbeats;
+                    if (failed) {
                         running = false;
                     }
                 }
 
-                if (triggerFailure) {
-                    System.err.println("[HB] Raggiunta soglia di " + MAX_MISSED_HEARTBEATS
-                            + " heartbeat mancati. Broker sospetto CRASHATO.");
-                    if (failureHandler != null) {
-                        failureHandler.onHeartbeatFailure();
-                    }
-                    break;
+                if (failed) {
+                    notifyFailureOnce();
+                    return;
                 }
 
-                try {
-                    Thread.sleep(HEARTBEAT_INTERVAL_MS);
-                } catch (InterruptedException e) {
-                    running = false;
-                    Thread.currentThread().interrupt();
-                }
+                Thread.sleep(heartbeatIntervalMs);
             }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         } catch (Exception e) {
-            System.err.println("[HB] Errore nel thread heartbeat: " + e.getMessage());
-            //e.printStackTrace(); //PROVO A NON PRINTARE LO STACKTRACEQUI
-            if (failureHandler != null) {
-                //System.err.println("[HB] Invoco failureHandler a causa di eccezione nel heartbeat.");
-                failureHandler.onHeartbeatFailure();
+            if (running && generationActive.getAsBoolean()) {
+                System.err.println("[HB] Heartbeat failed: " + e.getMessage());
+                notifyFailureOnce();
             }
+        } finally {
+            running = false;
         }
     }
 
+    private void notifyFailureOnce() {
+        if (failureHandler != null
+                && failureNotified.compareAndSet(false, true)) {
+            failureHandler.onHeartbeatFailure();
+        }
+    }
 }

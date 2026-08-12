@@ -3,70 +3,178 @@ package it.polimi.ds.chat.client.connection;
 import it.polimi.ds.chat.client.discovery.ClientDirectory;
 
 import java.io.IOException;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.function.LongSupplier;
 
 /**
- * A client connection that first queries the Directory Service to discover the best broker,
- * then connects to that broker for chat communication.
+ * A client connection that asks the Directory Service for a broker before each
+ * connection attempt.
+ *
+ * <p>Recently failed endpoints are quarantined for a bounded interval. If the
+ * Directory has not reaped a dead broker yet, the reconnect loop rejects that
+ * stale answer without repeatedly opening the same dead socket. The quarantine
+ * expires so a broker that restarts at the same endpoint remains reachable.</p>
  */
 public class DirectoryAwareClientConnection extends ClientConnection {
 
-    // Endpoint REALI della DirectoryService (non cambiano mai)
-    private final String directoryHost;
-    private final int directoryPort;
+    private static final long DEFAULT_EXCLUSION_NANOS =
+            TimeUnit.SECONDS.toNanos(5L);
 
-    /**
-     * Constructs a DirectoryAwareClientConnection using the Directory Service host and port.
-     *
-     * @param directoryHost the host of the Directory Service
-     * @param directoryPort the port of the Directory Service
-     */
-    public DirectoryAwareClientConnection(String directoryHost, int directoryPort) {
-        super(directoryHost, directoryPort);
-        this.directoryHost = directoryHost;
-        this.directoryPort = directoryPort;
+    @FunctionalInterface
+    interface BrokerLookup {
+        ClientDirectory.BrokerInfo getBestBroker(Set<Integer> excludedBrokerIds)
+                throws IOException, ClassNotFoundException;
     }
 
-    /**
-     * Opens the connection by querying the Directory Service for the best broker,
-     * then connects to the selected broker.
-     *
-     * @throws IOException if no broker is available or a protocol error occurs
-     */
+    private record Endpoint(int brokerId, String host, int port) {
+    }
+
+    private record HostPort(String host, int port) {
+    }
+
+    private final String directoryHost;
+    private final int directoryPort;
+    private final BrokerLookup brokerLookup;
+    private final LongSupplier nanoTime;
+    private final long exclusionNanos;
+    private final Map<Endpoint, Long> excludedUntil = new ConcurrentHashMap<>();
+    private final Map<HostPort, Integer> knownBrokerIds = new ConcurrentHashMap<>();
+
+    public DirectoryAwareClientConnection(String directoryHost, int directoryPort) {
+        this(
+                directoryHost,
+                directoryPort,
+                excludedBrokerIds -> new ClientDirectory(directoryHost, directoryPort)
+                        .getBestBroker(excludedBrokerIds),
+                System::nanoTime,
+                DEFAULT_EXCLUSION_NANOS
+        );
+    }
+
+    DirectoryAwareClientConnection(String directoryHost,
+                                   int directoryPort,
+                                   BrokerLookup brokerLookup,
+                                   LongSupplier nanoTime,
+                                   long exclusionNanos) {
+        super(directoryHost, directoryPort);
+        if (exclusionNanos < 0L) {
+            throw new IllegalArgumentException("exclusionNanos must be non-negative");
+        }
+        this.directoryHost = directoryHost;
+        this.directoryPort = directoryPort;
+        this.brokerLookup = Objects.requireNonNull(brokerLookup, "brokerLookup");
+        this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
+        this.exclusionNanos = exclusionNanos;
+    }
+
     @Override
     public void open() throws IOException {
-        System.out.println("[CONN] DirectoryAwareClientConnection.open() - INIZIO");
-        System.out.println("[CONN] Directory host/port = " + directoryHost + ":" + directoryPort);
-
-        ClientDirectory dirClient = new ClientDirectory(directoryHost, directoryPort);
-
         ClientDirectory.BrokerInfo brokerInfo;
         try {
-            System.out.println("[CONN] Contatto DirectoryService per ottenere un broker...");
-            brokerInfo = dirClient.getBestBroker();
+            long now = nanoTime.getAsLong();
+            discardExpiredExclusions(now);
+            Set<Integer> excludedBrokerIds = excludedUntil.keySet().stream()
+                    .map(Endpoint::brokerId)
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+            brokerInfo = brokerLookup.getBestBroker(excludedBrokerIds);
         } catch (ClassNotFoundException e) {
-            System.err.println("[CONN] Eccezione ClassNotFound durante getBestBroker: " + e.getMessage());
-            throw new IOException("Errore nel protocollo con il DirectoryService", e);
+            throw new IOException("Invalid Directory Service response", e);
         }
 
         if (brokerInfo == null) {
-            System.err.println("[CONN] Nessun broker disponibile restituito dalla Directory.");
-            throw new IOException("Nessun broker disponibile al momento");
+            throw new IOException("No broker is currently available");
         }
 
-        String brokerHost = brokerInfo.getHost();
-        int brokerPort    = brokerInfo.getPort();
-        int brokerId      = brokerInfo.getBrokerId();
+        Endpoint endpoint = new Endpoint(
+                brokerInfo.getBrokerId(),
+                brokerInfo.getHost(),
+                brokerInfo.getPort()
+        );
+        knownBrokerIds.put(
+                new HostPort(endpoint.host(), endpoint.port()),
+                endpoint.brokerId()
+        );
+        long now = nanoTime.getAsLong();
+        discardExpiredExclusions(now);
 
-        System.out.println("[CONN] Directory ha scelto broker id=" + brokerId +
-                " host=" + brokerHost + " port=" + brokerPort);
+        Long deadline = excludedUntil.get(endpoint);
+        if (deadline != null && now < deadline) {
+            throw new IOException(
+                    "Directory returned recently failed broker "
+                            + endpoint.host() + ":" + endpoint.port()
+            );
+        }
 
-        // Cambiamo host/port della connessione verso il broker scelto
-        reopenTo(brokerHost, brokerPort);
-        System.out.println("[CONN] Dopo reopenTo, getHost()/getPort() = " + getHost() + ":" + getPort());
+        try {
+            openTo(endpoint.host(), endpoint.port());
+            excludedUntil.remove(endpoint);
+        } catch (IOException e) {
+            exclude(endpoint, now);
+            throw e;
+        }
+    }
 
-        // Apriamo la socket verso il broker
-        super.open();
-        System.out.println("[CONN] Connessione aperta verso broker " + getHost() + ":" + getPort());
-        System.out.println("[CONN] DirectoryAwareClientConnection.open() - FINE");
+    @Override
+    public void markEndpointFailed(ClientConnectionGeneration failedGeneration) {
+        if (failedGeneration == null) {
+            return;
+        }
+        exclude(
+                new Endpoint(
+                        knownBrokerIds.getOrDefault(
+                                new HostPort(
+                                        failedGeneration.getHost(),
+                                        failedGeneration.getPort()
+                                ),
+                                -1
+                        ),
+                        failedGeneration.getHost(),
+                        failedGeneration.getPort()
+                ),
+                nanoTime.getAsLong()
+        );
+    }
+
+    void markEndpointFailed(int brokerId, String failedHost, int failedPort) {
+        exclude(new Endpoint(brokerId, failedHost, failedPort), nanoTime.getAsLong());
+    }
+
+    boolean isTemporarilyExcluded(String candidateHost, int candidatePort) {
+        long now = nanoTime.getAsLong();
+        discardExpiredExclusions(now);
+        return excludedUntil.entrySet().stream().anyMatch(entry ->
+                entry.getKey().host().equals(candidateHost)
+                        && entry.getKey().port() == candidatePort
+                        && now < entry.getValue());
+    }
+
+    private void exclude(Endpoint endpoint, long now) {
+        if (exclusionNanos == 0L) {
+            return;
+        }
+        excludedUntil.put(endpoint, now + exclusionNanos);
+    }
+
+    private void discardExpiredExclusions(long now) {
+        excludedUntil.entrySet().removeIf(entry -> now >= entry.getValue());
+        /*
+         * Keep the endpoint-to-id association after a successful open. A later
+         * receiver/heartbeat failure only carries the immutable connection
+         * generation (host/port), and needs this id to exclude the broker on the
+         * very next Directory lookup. The broker set is static and therefore
+         * bounds this small cache naturally.
+         */
+    }
+
+    public String getDirectoryHost() {
+        return directoryHost;
+    }
+
+    public int getDirectoryPort() {
+        return directoryPort;
     }
 }

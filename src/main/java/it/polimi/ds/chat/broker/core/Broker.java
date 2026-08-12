@@ -14,6 +14,7 @@ import it.polimi.ds.chat.common.delivery.HoldBackQueue;
 import it.polimi.ds.chat.common.clock.VectorClock;
 
 import java.io.*;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
@@ -21,9 +22,12 @@ import java.util.Collections;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -36,16 +40,15 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 public class Broker implements Serializable, OrderingServiceCallback {
 
-    // Default Directory Service config.
-    private static final String DIRECTORY_HOST = "localhost";
-    private static final int DIRECTORY_PORT = 60000;
-    private static final int DIRECTORY_CLIENT_PORT = 60001; // Port for peer list queries
     private static final long HEARTBEAT_INTERVAL_MS = 3000;
+    private static final long DIRECTORY_RECONNECT_DELAY_MS = 1000;
+    private static final int DIRECTORY_CONNECT_TIMEOUT_MS = 1000;
 
     // Connection to directory service
-    private transient Socket directorySocket;
+    private transient volatile Socket directorySocket;
     private transient ObjectOutputStream directoryOut;
     private final transient Object directoryLock = new Object();
+    private transient volatile Thread directoryThread;
 
     // Peer registry for broker-to-broker discovery
     private transient PeerRegistry peerRegistry;
@@ -65,8 +68,12 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // All clients currently connected to this broker.
     private final List<ClientHandler> clients = Collections.synchronizedList(new ArrayList<>());
 
-    // Local sequence counter used in fallback / local mode.
-    private long nextSeq = 1;
+    // Every accepted session, including sockets that have not completed JOIN.
+    // Keeping this separate from the fan-out set lets stop() reclaim pre-JOIN
+    // handlers without exposing them to chat history.
+    private final Set<ClientHandler> sessions = ConcurrentHashMap.newKeySet();
+    private final Map<ClientHandler, Thread> sessionThreads = new ConcurrentHashMap<>();
+    private final transient Object sessionLifecycleLock = new Object();
 
     // Ordering service for message ordering (decoupled from networking)
     private transient OrderingService orderingService;
@@ -86,6 +93,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     // Monotonic per-broker sequence number used as id for directory heartbeats.
     private final transient AtomicLong directoryHeartbeatSeq = new AtomicLong(0);
+    private final transient AtomicBoolean directoryClientCountDirty = new AtomicBoolean(true);
+
+    private final transient CountDownLatch clientListenerReady = new CountDownLatch(1);
+    private transient volatile ServerSocket clientServerSocket;
+    private transient volatile boolean running;
 
     /**
      * Construct a broker with the given configuration.
@@ -236,43 +248,182 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @throws IOException if the server socket cannot be opened
      */
     public void start() throws IOException {
-        // Start the ordering service
-        orderingService.start();
-
         try {
+            // Raft must be ready before clients can submit commands.
+            orderingService.start();
+
             boolean assigned = brokerIdLatch.await(10, TimeUnit.SECONDS);
             if (!assigned) {
                 throw new IOException("Failed to initialize broker id within timeout.");
             }
+
+            // Bind the client listener before publishing the endpoint. Once the
+            // ServerSocket is bound, the OS accept backlog is already active even
+            // though this thread has not entered accept() yet.
+            clientServerSocket = new ServerSocket(config.getClientPort());
+            running = true;
+            clientListenerReady.countDown();
+
+            // Complete the remaining local startup before registration. These
+            // operations either succeed or are explicitly best-effort; a failure
+            // before this point is rolled back without ever publishing the broker.
+            startPeerDiscovery();
+            startDirectoryRegistrationLoop();
+
+            System.out.println("Broker " + brokerId + " listening for clients on port "
+                    + clientServerSocket.getLocalPort());
+
+            while (running) {
+                try {
+                    Socket clientSocket = clientServerSocket.accept();
+                    System.out.println("New client connected from "
+                            + clientSocket.getRemoteSocketAddress());
+
+                    startAcceptedClientSession(clientSocket);
+                } catch (SocketException e) {
+                    if (running) {
+                        throw e;
+                    }
+                    break;
+                }
+            }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            stop();
             throw new IOException("Interrupted while waiting for broker id initialization.", e);
+        } catch (IOException | RuntimeException e) {
+            stop();
+            throw e;
+        } finally {
+            if (!running) {
+                stop();
+            }
+        }
+    }
+
+    /**
+     * Stops all broker-owned resources. The method is idempotent and is also
+     * used as the inverse rollback path for partial startup.
+     */
+    public void stop() {
+        running = false;
+
+        ServerSocket listener = clientServerSocket;
+        clientServerSocket = null;
+        if (listener != null) {
+            try {
+                listener.close();
+            } catch (IOException ignored) {
+            }
         }
 
-        // Connect to directory service, register, and start sending heartbeats
-        connectAndRegisterWithDirectoryService();
-        startHeartbeatLoop();
+        Thread heartbeat = directoryThread;
+        if (heartbeat != null) {
+            heartbeat.interrupt();
+        }
+        closeDirectoryConnection();
 
-        // Start peer discovery after registration
-        startPeerDiscovery();
+        if (lanDiscoveryService != null) {
+            lanDiscoveryService.stop();
+        }
 
-        int port = config.getBrokerPort();
-        ServerSocket serverSocket = new ServerSocket(port);
-        System.out.println("Broker " + brokerId + " listening for clients on port " + port);
+        List<ClientHandler> sessionSnapshot;
+        List<Thread> threadSnapshot;
+        synchronized (sessionLifecycleLock) {
+            sessionSnapshot = new ArrayList<>(sessions);
+            threadSnapshot = new ArrayList<>(sessionThreads.values());
+        }
+        for (ClientHandler handler : sessionSnapshot) {
+            handler.closeSession();
+        }
+        for (Thread thread : threadSnapshot) {
+            joinBounded(thread, 1_000L);
+        }
 
-        // Main loop: accept client TCP connections and spawn a ClientHandler for each.
-        while (true) {
-            Socket clientSocket = serverSocket.accept();
-            System.out.println("New client connected from " + clientSocket.getRemoteSocketAddress());
+        // Socket close above must also release a Directory writer blocked in
+        // flush. Wait only after closing it, never while holding its writer lock.
+        joinBounded(heartbeat, 1_000L);
 
-            // One handler per client, running in its own thread.
+        if (orderingService != null) {
+            orderingService.stop();
+        }
+    }
+
+    boolean awaitClientListenerReady(long timeout, TimeUnit unit) throws InterruptedException {
+        return clientListenerReady.await(timeout, unit);
+    }
+
+    boolean isDirectoryRegistrationLoopStartedForTesting() {
+        return directoryThread != null;
+    }
+
+    void installDirectoryConnectionForTesting(
+            Socket socket,
+            ObjectOutputStream output) {
+        synchronized (directoryLock) {
+            directorySocket = socket;
+            directoryOut = output;
+        }
+    }
+
+    void sendDirectoryObjectForTesting(Object message) throws IOException {
+        sendDirectoryObject(message);
+    }
+
+    int activeSessionCountForTesting() {
+        return sessions.size();
+    }
+
+    void startClientSession(Socket clientSocket) {
+        startClientSession(clientSocket, false);
+    }
+
+    private void startAcceptedClientSession(Socket clientSocket) {
+        startClientSession(clientSocket, true);
+    }
+
+    private void startClientSession(Socket clientSocket, boolean requireRunning) {
+        synchronized (sessionLifecycleLock) {
+            if (requireRunning && !running) {
+                try {
+                    clientSocket.close();
+                } catch (IOException ignored) {
+                }
+                return;
+            }
+
             ClientHandler handler = new ClientHandler(clientSocket, this);
-            clients.add(handler);
-            sendClientCountUpdate();
+            sessions.add(handler);
 
-            Thread t = new Thread(handler);
-            t.setDaemon(true);  // daemon so it doesn't block JVM shutdown
-            t.start();
+            Thread thread = new Thread(() -> {
+                try {
+                    handler.run();
+                } finally {
+                    removeClient(handler);
+                    sessionThreads.remove(handler, Thread.currentThread());
+                }
+            }, "ClientHandler-" + clientSocket.getPort());
+            thread.setDaemon(true);
+            sessionThreads.put(handler, thread);
+            try {
+                thread.start();
+            } catch (RuntimeException e) {
+                sessionThreads.remove(handler, thread);
+                sessions.remove(handler);
+                handler.closeSession();
+                throw e;
+            }
+        }
+    }
+
+    private static void joinBounded(Thread thread, long timeoutMillis) {
+        if (thread == null || thread == Thread.currentThread()) {
+            return;
+        }
+        try {
+            thread.join(timeoutMillis);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 
@@ -282,24 +433,43 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param handler the client handler to remove
      */
     public void removeClient(ClientHandler handler) {
-        clients.remove(handler);
-        sendClientCountUpdate();
+        sessions.remove(handler);
+        if (clients.remove(handler)) {
+            sendClientCountUpdate();
+        }
     }
 
     /**
-     * Notify local clients with a broadcast assigned locally (fallback/local mode).
-     *
-     * Assigns a local sequence number and delivers the message to local clients.
-     *
-     * @param sender username of the sender (will not receive the message)
-     * @param text   message text to broadcast
+     * Activates a newly joined session only after a committed Raft boundary has
+     * been applied locally. Until this method succeeds, the handler is not part
+     * of the client fan-out set and therefore cannot observe delayed history.
      */
-    public void broadcastToClients(String sender, String text) {
-        long seq;
-        synchronized (this) {
-            seq = nextSeq++;
+    public boolean activateClient(ClientHandler handler) {
+        if (handler == null || handler.isSessionClosed()) {
+            return false;
         }
-        onChatDeliver(seq, sender, text);
+
+        String boundaryId = "join:" + brokerId + ":" + UUID.randomUUID();
+        AtomicBoolean activated = new AtomicBoolean(false);
+        boolean established = orderingService.establishDeliveryBoundary(boundaryId, () -> {
+            // This callback runs in the serialized state-machine application
+            // path. Holding the same monitor used by fan-out snapshots makes
+            // WELCOME + recipient activation indivisible with respect to the
+            // next locally applied chat entry.
+            synchronized (clients) {
+                if (handler.isSessionClosed()
+                        || !handler.activateAtDeliveryBoundary()) {
+                    return;
+                }
+
+                // WELCOME is already queued when the handler becomes visible
+                // to subsequent chat fan-out.
+                clients.add(handler);
+                activated.set(true);
+                sendClientCountUpdate();
+            }
+        });
+        return established && activated.get();
     }
 
     /**
@@ -322,11 +492,17 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * The client id is used as technical identity; username is only a display name.
      */
     public void onChatDeliver(long seq, String sender, String senderClientId, String text) {
+        List<ClientHandler> snapshot;
         synchronized (clients) {
-            for (ClientHandler handler : clients) {
-                if (senderClientId == null || !senderClientId.equals(handler.getClientId())) {
-                    handler.sendMessageToClient(seq, sender, text);
-                }
+            snapshot = new ArrayList<>(clients);
+        }
+
+        // Never hold the shared client-list monitor while interacting with a
+        // session. ClientHandler only enqueues here; its single outbound worker
+        // owns the actual ObjectOutputStream write.
+        for (ClientHandler handler : snapshot) {
+            if (senderClientId == null || !senderClientId.equals(handler.getClientId())) {
+                handler.sendMessageToClient(seq, sender, text);
             }
         }
     }
@@ -381,32 +557,17 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Enqueue message and get all messages ready for delivery
         List<ChatDeliverMessage> readyMessages = holdBackQueue.enqueue(chatDeliver);
 
-        // Deliver all ready messages to local clients
+        // Merge causal knowledge for each message that is actually released,
+        // before making that message visible to any local client. A message that
+        // is merely buffered must not influence subsequent outgoing proposals.
         for (ChatDeliverMessage msg : readyMessages) {
+            if (msg.getVectorClock() != null) {
+                synchronized (this) {
+                    vectorClock.update(msg.getVectorClock());
+                }
+            }
             onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getClientId(), msg.getText());
         }
-
-        synchronized(this) {
-            this.vectorClock.update(chatDeliver.getVectorClock());
-        }
-    }
-
-    /**
-     * Notify local clients that a user has left the chat.
-     *
-     * @param username username of the user who left
-     */
-    public void notifyLeave(String username) {
-        broadcastToClients("[system]", username + " left the chat");
-    }
-
-    /**
-     * Notify local clients that a user has joined the chat.
-     *
-     * @param username username of the user who joined
-     */
-    public void notifyJoin(String username) {
-        broadcastToClients("[system]", username + " joined the chat");
     }
 
     // =========================================================================
@@ -447,74 +608,148 @@ public class Broker implements Serializable, OrderingServiceCallback {
         return clientId + ":" + clientSeq;
     }
 
-    /**
-     * Connect to the Directory Service and register this broker.
-     *
-     * Establishes a TCP connection and sends a DirectoryRegisterMessage. Errors are logged.
-     */
-    private void connectAndRegisterWithDirectoryService() {
-        System.out.println("Connecting to Directory Service at " + DIRECTORY_HOST + ":" + DIRECTORY_PORT + "...");
-        try {
-            directorySocket = new Socket(DIRECTORY_HOST, DIRECTORY_PORT);
-            directoryOut = new ObjectOutputStream(directorySocket.getOutputStream());
-
-            DirectoryRegisterMessage msg = new DirectoryRegisterMessage(
-                    this.brokerId,
-                    config.getBrokerHost(),
-                    config.getBrokerPort()
-            );
-
-            synchronized (directoryLock) {
-                directoryOut.writeObject(msg);
-                directoryOut.flush();
-            }
-
-            System.out.println("Registered broker in Directory Service: " + msg);
-        } catch (IOException e) {
-            System.err.println("Failed to connect/register with Directory Service: " + e.getMessage());
-        }
-    }
-
-    /**
-     * Start a background thread that periodically sends heartbeats to the Directory Service.
-     *
-     * The thread runs until an IO error occurs or it is interrupted.
-     */
-    private void startHeartbeatLoop() {
-        if (directoryOut == null) {
-            System.err.println("Heartbeat not started: no connection to Directory Service.");
+    /** Starts one reconnecting Directory session owner for this broker. */
+    private void startDirectoryRegistrationLoop() {
+        if (directoryThread != null && directoryThread.isAlive()) {
             return;
         }
 
-        Thread t = new Thread(() -> {
-            while (true) {
-                try {
-                    HeartbeatMessage hb = new HeartbeatMessage(this.brokerId, directoryHeartbeatSeq.incrementAndGet());
+        Thread thread = new Thread(this::directoryRegistrationLoop, "DirectorySession-" + brokerId);
+        thread.setDaemon(true);
+        directoryThread = thread;
+        thread.start();
+    }
 
-                    synchronized (directoryLock) {
-                        directoryOut.writeObject(hb);
-                        directoryOut.flush();
+    private void directoryRegistrationLoop() {
+        while (running && !Thread.currentThread().isInterrupted()) {
+            try {
+                connectAndRegisterWithDirectoryService();
+                directoryClientCountDirty.set(true);
+
+                while (running && !Thread.currentThread().isInterrupted()) {
+                    sendDirectoryObject(new HeartbeatMessage(
+                            this.brokerId,
+                            directoryHeartbeatSeq.incrementAndGet()));
+                    if (directoryClientCountDirty.compareAndSet(true, false)) {
+                        try {
+                            sendDirectoryObject(new ClientCountUpdateMessage(
+                                    brokerId,
+                                    clients.size()));
+                        } catch (IOException e) {
+                            directoryClientCountDirty.set(true);
+                            throw e;
+                        }
                     }
+                    Thread.sleep(directoryHeartbeatIntervalMs());
+                }
+            } catch (IOException e) {
+                if (running) {
+                    System.err.println("Directory connection lost; will re-register at "
+                            + config.getDirectoryHost() + ":" + config.getDirectoryPort()
+                            + ": " + e.getMessage());
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            } finally {
+                closeDirectoryConnection();
+            }
 
-                    Thread.sleep(HEARTBEAT_INTERVAL_MS);
-                } catch (IOException e) {
-                    System.err.println("Failed to send heartbeat: " + e.getMessage());
-                    break;
+            if (running) {
+                try {
+                    Thread.sleep(directoryReconnectDelayMs());
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
                 }
             }
+        }
+    }
 
-            try {
-                if (directorySocket != null) {
-                    directorySocket.close();
+    protected long directoryHeartbeatIntervalMs() {
+        return HEARTBEAT_INTERVAL_MS;
+    }
+
+    protected long directoryReconnectDelayMs() {
+        return DIRECTORY_RECONNECT_DELAY_MS;
+    }
+
+    private void connectAndRegisterWithDirectoryService() throws IOException {
+        Socket socket = new Socket();
+        ObjectOutputStream output = null;
+        boolean installed = false;
+        try {
+            socket.connect(
+                    new InetSocketAddress(config.getDirectoryHost(), config.getDirectoryPort()),
+                    DIRECTORY_CONNECT_TIMEOUT_MS);
+            output = new ObjectOutputStream(socket.getOutputStream());
+
+            DirectoryRegisterMessage registration = new DirectoryRegisterMessage(
+                    this.brokerId,
+                    config.getBrokerHost(),
+                    config.getClientPort());
+
+            synchronized (directoryLock) {
+                if (!running) {
+                    throw new IOException("Broker is stopping");
                 }
-            } catch (IOException ignored) {}
-        }, "HeartbeatSender-" + brokerId);
+                directorySocket = socket;
+                directoryOut = output;
+                output.writeObject(registration);
+                output.flush();
+                installed = true;
+            }
 
-        t.setDaemon(true);
-        t.start();
+            System.out.println("Registered broker in Directory Service at "
+                    + config.getDirectoryHost() + ":" + config.getDirectoryPort()
+                    + ": " + registration);
+        } finally {
+            if (!installed) {
+                if (output != null) {
+                    try {
+                        output.close();
+                    } catch (IOException ignored) {
+                    }
+                }
+                try {
+                    socket.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    private void sendDirectoryObject(Object message) throws IOException {
+        synchronized (directoryLock) {
+            if (directoryOut == null) {
+                throw new IOException("No active Directory connection");
+            }
+            directoryOut.writeObject(message);
+            directoryOut.flush();
+            // Heartbeats and count updates are transient; resetting prevents the
+            // ObjectOutputStream handle table from growing for the lifetime of the broker.
+            directoryOut.reset();
+        }
+    }
+
+    private void closeDirectoryConnection() {
+        // Closing a socket is safe concurrently with a blocked write and is what
+        // releases that write. Do this before acquiring directoryLock; otherwise
+        // stop/reconnect could deadlock behind ObjectOutputStream.flush().
+        Socket socketToClose = directorySocket;
+        if (socketToClose != null) {
+            try {
+                socketToClose.close();
+            } catch (IOException ignored) {
+            }
+        }
+
+        synchronized (directoryLock) {
+            if (directorySocket == socketToClose) {
+                directorySocket = null;
+                directoryOut = null;
+            }
+        }
     }
 
     /**
@@ -523,18 +758,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * Errors while sending are logged.
      */
     private void sendClientCountUpdate() {
-        if (directoryOut == null) return;
-
-        ClientCountUpdateMessage msg = new ClientCountUpdateMessage(brokerId, clients.size());
-
-        try {
-            synchronized (directoryLock) {
-                directoryOut.writeObject(msg);
-                directoryOut.flush();
-            }
-        } catch (IOException e) {
-            System.err.println("Failed to send client count update: " + e.getMessage());
-        }
+        // Only the Directory session owner writes its ObjectOutputStream. Client
+        // handlers merely mark the latest count dirty, keeping Raft fan-out free
+        // from unrelated Directory I/O.
+        directoryClientCountDirty.set(true);
     }
 
     /**

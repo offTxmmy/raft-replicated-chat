@@ -1,126 +1,166 @@
 package it.polimi.ds.chat.client.connection;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Handles the TCP connection between the chat client and a broker.
- * Provides methods for opening, closing, and interacting with the connection.
+ * Owns the successive TCP connection generations between a client and a broker.
+ *
+ * <p>A generation is fully constructed before it is published. Replacing it
+ * invalidates the previous generation while holding the lifecycle lock, so old
+ * receiver/heartbeat/sender workers cannot migrate accidentally to the new
+ * stream.</p>
  */
 public class ClientConnection {
 
-    protected String host;
-    protected int port;
+    private static final int CONNECT_TIMEOUT_MS = 2_000;
+    private static final int STREAM_HANDSHAKE_TIMEOUT_MS = 2_000;
 
-    private Socket socket;
-    private PrintWriter out;
-    private ObjectOutputStream objectOut;
-    private ObjectInputStream objectIn;
+    protected volatile String host;
+    protected volatile int port;
 
-    /**
-     * Constructs a ClientConnection for the specified host and port.
-     *
-     * @param host the broker host to connect to
-     * @param port the broker port to connect to
-     */
+    private final Object lifecycleLock = new Object();
+    private final AtomicLong nextGenerationId = new AtomicLong(0L);
+    private final AtomicBoolean acceptingGenerations = new AtomicBoolean(true);
+    private volatile ClientConnectionGeneration currentGeneration;
+
     public ClientConnection(String host, int port) {
         this.host = host;
         this.port = port;
     }
 
-    /**
-     * Opens the connection to the broker and initializes streams.
-     *
-     * @throws IOException if the connection or streams cannot be established
-     */
+    /** Opens and atomically installs a new connection to the configured endpoint. */
     public void open() throws IOException {
-        openSocket();
-    }
-
-    private void openSocket() throws IOException {
-        this.socket = new Socket(host, port);
-        this.objectOut = new ObjectOutputStream(socket.getOutputStream());
-        this.objectIn = new ObjectInputStream(socket.getInputStream());
-        this.out = new PrintWriter(socket.getOutputStream(), true);
+        openTo(host, port);
     }
 
     /**
-     * Returns the PrintWriter for sending text lines to the broker.
-     *
-     * @return the PrintWriter for the connection
+     * Builds a complete socket/stream generation before publishing it.
+     * Subclasses use this method after selecting an endpoint.
      */
-    public PrintWriter getWriter() {
-        return out;
-    }
+    protected final ClientConnectionGeneration openTo(String newHost, int newPort)
+            throws IOException {
+        ClientConnectionGeneration candidate = createGeneration(newHost, newPort);
 
-    /**
-     * Returns the ObjectOutputStream for sending objects to the broker.
-     *
-     * @return the ObjectOutputStream for the connection
-     */
-    public ObjectOutputStream getObjectOutputStream() {
-        return objectOut;
-    }
-
-    /**
-     * Returns the ObjectInputStream for receiving objects from the broker.
-     *
-     * @return the ObjectInputStream for the connection
-     */
-    public ObjectInputStream getObjectInputStream() {
-        return objectIn;
-    }
-
-    /**
-     * Checks if the connection is currently open.
-     *
-     * @return true if the socket is open, false otherwise
-     */
-    public boolean isOpen() {
-        return socket != null && !socket.isClosed();
-    }
-
-    /**
-     * Closes the connection and underlying socket.
-     */
-    public void close() {
-        try {
-            if (socket != null) {
-                socket.close();
+        synchronized (lifecycleLock) {
+            if (!acceptingGenerations.get()) {
+                candidate.close();
+                throw new IOException("Client connection is shutting down");
             }
-        } catch (IOException ignored) {
+            ClientConnectionGeneration previous = currentGeneration;
+            if (previous != null) {
+                previous.close();
+            }
+
+            host = newHost;
+            port = newPort;
+            currentGeneration = candidate;
+        }
+
+        return candidate;
+    }
+
+    /**
+     * Creates a generation using local variables so a failed connect or stream
+     * handshake cannot expose partially initialized connection state.
+     */
+    protected ClientConnectionGeneration createGeneration(String newHost, int newPort)
+            throws IOException {
+        Socket candidateSocket = new Socket();
+        try {
+            candidateSocket.connect(
+                    new InetSocketAddress(newHost, newPort),
+                    CONNECT_TIMEOUT_MS
+            );
+            candidateSocket.setSoTimeout(STREAM_HANDSHAKE_TIMEOUT_MS);
+
+            ObjectOutputStream objectOut =
+                    new ObjectOutputStream(candidateSocket.getOutputStream());
+            objectOut.flush();
+            ObjectInputStream objectIn =
+                    new ObjectInputStream(candidateSocket.getInputStream());
+
+            candidateSocket.setSoTimeout(0);
+            ClientObjectWriter writer = new ClientObjectWriter(objectOut);
+            return new ClientConnectionGeneration(
+                    nextGenerationId.incrementAndGet(),
+                    newHost,
+                    newPort,
+                    candidateSocket,
+                    objectIn,
+                    writer
+            );
+        } catch (IOException | RuntimeException e) {
+            try {
+                candidateSocket.close();
+            } catch (IOException ignored) {
+            }
+            throw e;
+        }
+    }
+
+    public ClientConnectionGeneration getCurrentGeneration() {
+        return currentGeneration;
+    }
+
+    /**
+     * Closes the generation only if it is still current. Passing an obsolete
+     * generation can therefore never close a newer connection.
+     */
+    public void closeGeneration(ClientConnectionGeneration expectedGeneration) {
+        if (expectedGeneration == null) {
+            return;
+        }
+
+        synchronized (lifecycleLock) {
+            if (currentGeneration == expectedGeneration) {
+                currentGeneration = null;
+            }
+            expectedGeneration.close();
+        }
+    }
+
+    /** Hook used by directory-aware connections to quarantine a failed endpoint. */
+    public void markEndpointFailed(ClientConnectionGeneration failedGeneration) {
+        // Direct connections have no alternate endpoint discovery policy.
+    }
+
+    public boolean isOpen() {
+        ClientConnectionGeneration generation = currentGeneration;
+        return generation != null && generation.isActive();
+    }
+
+    public void close() {
+        ClientConnectionGeneration generation;
+        synchronized (lifecycleLock) {
+            generation = currentGeneration;
+            currentGeneration = null;
+            if (generation != null) {
+                generation.close();
+            }
         }
     }
 
     /**
-     * Returns the host this connection is associated with.
-     *
-     * @return the broker host
+     * Permanently closes this connection owner and prevents an in-flight
+     * reconnect attempt from publishing a generation after client shutdown.
      */
+    public void shutdown() {
+        acceptingGenerations.set(false);
+        close();
+    }
+
     public String getHost() {
         return host;
     }
 
-    /**
-     * Returns the port this connection is associated with.
-     *
-     * @return the broker port
-     */
     public int getPort() {
         return port;
-    }
-
-    /**
-     * Closes the current connection and updates the host and port for reconnection.
-     *
-     * @param newHost the new broker host
-     * @param newPort the new broker port
-     * @throws IOException if an error occurs while closing the connection
-     */
-    protected void reopenTo(String newHost, int newPort) throws IOException {
-        close();
-        this.host = newHost;
-        this.port = newPort;
     }
 
 }

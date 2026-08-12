@@ -12,6 +12,10 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.Socket;
+import java.util.Objects;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -20,10 +24,16 @@ import java.util.concurrent.atomic.AtomicLong;
  * and invoking the appropriate broker logic.
  */
 public class ClientHandler implements Runnable {
+    static final int DEFAULT_OUTBOUND_QUEUE_CAPACITY = 256;
+
     private final Socket socket;
     private final Broker broker;
-    private ObjectOutputStream out;
-    private final Object outLock = new Object();
+    private final BlockingQueue<Object> outboundQueue;
+    private final AtomicBoolean sessionClosed = new AtomicBoolean(false);
+    private final AtomicBoolean joinAttempted = new AtomicBoolean(false);
+    private final AtomicBoolean active = new AtomicBoolean(false);
+    private volatile ObjectOutputStream out;
+    private volatile Thread outboundThread;
     private String username = "anonymous";
     private String clientId;
 
@@ -37,8 +47,16 @@ public class ClientHandler implements Runnable {
      * @param broker the broker instance
      */
     public ClientHandler(Socket socket, Broker broker) {
+        this(socket, broker, DEFAULT_OUTBOUND_QUEUE_CAPACITY);
+    }
+
+    ClientHandler(Socket socket, Broker broker, int outboundQueueCapacity) {
         this.socket = socket;
         this.broker = broker;
+        if (outboundQueueCapacity <= 0) {
+            throw new IllegalArgumentException("outboundQueueCapacity must be > 0");
+        }
+        this.outboundQueue = new ArrayBlockingQueue<>(outboundQueueCapacity);
     }
 
     /**
@@ -60,15 +78,18 @@ public class ClientHandler implements Runnable {
      * @param obj the object to send
      */
     public void sendLine(Object obj) {
-        if (out != null) {
-            try {
-                synchronized (outLock) {
-                    out.writeObject(obj);
-                    out.flush();
-                }
-            } catch (IOException e) {
-                System.err.println("Failed to send object to client " + username + ": " + e.getMessage());
-            }
+        Objects.requireNonNull(obj, "obj");
+        if (sessionClosed.get()) {
+            return;
+        }
+
+        // Never make a Raft/application callback wait for client socket I/O. A
+        // full bounded queue identifies this session as a slow consumer; only
+        // this client is disconnected.
+        if (!outboundQueue.offer(obj)) {
+            System.err.println("Disconnecting slow client " + username
+                    + ": outbound queue is full");
+            closeSession();
         }
     }
 
@@ -81,7 +102,7 @@ public class ClientHandler implements Runnable {
         try (
                 ObjectInputStream in = new ObjectInputStream(socket.getInputStream())
         ) {
-            out = new ObjectOutputStream(socket.getOutputStream());
+            startOutboundWorker(new ObjectOutputStream(socket.getOutputStream()));
             Object obj;
             while ((obj = in.readObject()) != null) {
                 handleCommand(obj);
@@ -89,12 +110,100 @@ public class ClientHandler implements Runnable {
         } catch (IOException | ClassNotFoundException e) {
             System.out.println("Client disconnected: " + e.getMessage());
         } finally {
+            closeSession();
             broker.removeClient(this);
-            broker.notifyLeave(username);
-            try {
-                socket.close();
-            } catch (IOException ignored) {}
         }
+    }
+
+    void startOutboundWorker(ObjectOutputStream output) {
+        Objects.requireNonNull(output, "output");
+        synchronized (this) {
+            if (outboundThread != null) {
+                throw new IllegalStateException("outbound worker already started");
+            }
+            if (sessionClosed.get()) {
+                try {
+                    output.close();
+                } catch (IOException ignored) {
+                }
+                return;
+            }
+            out = output;
+            Thread worker = new Thread(this::outboundLoop,
+                    "ClientOutbound-" + socket.getRemoteSocketAddress());
+            worker.setDaemon(true);
+            outboundThread = worker;
+            worker.start();
+        }
+    }
+
+    private void outboundLoop() {
+        try {
+            while (!sessionClosed.get()) {
+                Object next = outboundQueue.take();
+                ObjectOutputStream output = out;
+                if (output == null) {
+                    return;
+                }
+                output.writeObject(next);
+                output.flush();
+                output.reset();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (IOException e) {
+            if (!sessionClosed.get()) {
+                System.err.println("Failed to send object to client " + username
+                        + ": " + e.getMessage());
+            }
+        } finally {
+            closeSession();
+        }
+    }
+
+    /** Isolates and closes this one client session. Safe to call repeatedly. */
+    public void closeSession() {
+        if (!sessionClosed.compareAndSet(false, true)) {
+            return;
+        }
+
+        Thread worker = outboundThread;
+        if (worker != null && worker != Thread.currentThread()) {
+            worker.interrupt();
+        }
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+        broker.removeClient(this);
+    }
+
+    public boolean isSessionClosed() {
+        return sessionClosed.get();
+    }
+
+    /**
+     * Completes JOIN activation from the ordering service's applied-boundary
+     * callback. WELCOME is queued before Broker publishes this handler to its
+     * fan-out set, so the first subsequent chat cannot overtake it.
+     *
+     * @return {@code true} if this live session was activated
+     */
+    public boolean activateAtDeliveryBoundary() {
+        if (sessionClosed.get() || !active.compareAndSet(false, true)) {
+            return false;
+        }
+
+        sendLine(ClientJoinMessage.welcome(username));
+        if (sessionClosed.get()) {
+            active.set(false);
+            return false;
+        }
+        return true;
+    }
+
+    int pendingOutboundMessages() {
+        return outboundQueue.size();
     }
 
     /**
@@ -102,20 +211,28 @@ public class ClientHandler implements Runnable {
      *
      * @param obj the received object (String or HeartbeatMessage)
      */
-    private void handleCommand(Object obj) {
+    void handleCommand(Object obj) {
         if (obj instanceof String line) {
             Object msg = parseLineToMessage(line, username);
             if (msg instanceof ClientJoinMessage) {
+                if (!joinAttempted.compareAndSet(false, true)) {
+                    sendLine("ERROR JOIN already processed");
+                    closeSession();
+                    return;
+                }
                 username = ClientJoinMessage.parseJoin(line);
                 clientId = ClientJoinMessage.parseClientId(line);
-                sendLine(ClientJoinMessage.welcome(username));
-                broker.notifyJoin(username);
+                if (!broker.activateClient(this)) {
+                    closeSession();
+                }
             } else if (msg instanceof ClientQuitMessage) {
-                try {
-                    socket.close();
-                } catch (IOException ignored) {}
+                closeSession();
             } else if (msg instanceof ClientMessage) {
                 ClientMessage clientMessage = (ClientMessage) msg;
+                if (!active.get()) {
+                    sendLine("ERROR JOIN required before MSG");
+                    return;
+                }
                 if (clientId == null) {
                     clientId = clientMessage.getClientId();
                 }

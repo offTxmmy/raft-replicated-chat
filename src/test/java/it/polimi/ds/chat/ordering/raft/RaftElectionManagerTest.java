@@ -124,6 +124,34 @@ class RaftElectionManagerTest {
         assertFalse(fakeClock.lastOneShotTask.cancelled);
     }
 
+    @Test
+    void cancelledTimeoutCallbackShouldNotStartElectionAfterReset() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RaftElectionManager manager =
+                newManager(2, setOf(1, 2, 3), fakeClock, sender);
+        manager.start();
+
+        FakeScheduledTask staleTask = fakeClock.lastOneShotTask;
+        manager.resetElectionTimeout();
+        FakeScheduledTask currentTask = fakeClock.lastOneShotTask;
+
+        // Model a scheduler that had already dequeued the old Runnable before
+        // cancel() won the race: the Runnable still executes, but its generation
+        // is no longer current.
+        staleTask.fireEvenIfCancelled();
+
+        assertEquals(RaftRole.FOLLOWER, managerNode(manager).getRole());
+        assertEquals(0L, managerNode(manager).getCurrentTerm());
+        assertNull(manager.getCurrentElectionTerm());
+        assertTrue(sender.sentRequests.isEmpty());
+        assertFalse(currentTask.cancelled);
+
+        currentTask.fire();
+        assertEquals(RaftRole.CANDIDATE, managerNode(manager).getRole());
+        assertEquals(1L, managerNode(manager).getCurrentTerm());
+    }
+
     /**
      * Verifies that heartbeat scheduling can be started and stopped correctly.
      */
@@ -654,6 +682,30 @@ class RaftElectionManagerTest {
         assertEquals(2, fakeClock.oneShotScheduleCount);
     }
 
+    @Test
+    void stoppedManagerShouldDenyVoteRequestWithoutMutatingNode() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+        RaftElectionManager manager =
+                newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+        manager.start();
+        manager.stop();
+
+        RequestVoteResponseMessage response = manager.onRequestVoteRequest(
+                new RequestVoteRequestMessage(5L, 1, 0L, 0L)
+        );
+
+        assertFalse(response.isVoteGranted());
+        assertEquals(0L, response.getTerm());
+        assertEquals(2, response.getVoterId());
+        assertEquals(RaftRole.FOLLOWER, managerNode(manager).getRole());
+        assertEquals(0L, managerNode(manager).getCurrentTerm());
+        assertNull(managerNode(manager).getVotedFor());
+        assertEquals(RaftNode.NO_LEADER, managerNode(manager).getLeaderId());
+        assertEquals(0, listener.steppedDownCount);
+    }
+
     /**
      * Verifies that denying an incoming RequestVote request in the same term does not
      * reset the election timeout.
@@ -746,6 +798,32 @@ class RaftElectionManagerTest {
         assertEquals(1, listener.steppedDownCount);
         assertEquals(1L, listener.lastSteppedDownTerm);
         assertEquals(1, listener.lastKnownLeaderId);
+    }
+
+    @Test
+    void validLeaderActivityInSameTermShouldStepDownLeader() {
+        FakeClock fakeClock = new FakeClock();
+        RecordingVoteRequestSender sender = new RecordingVoteRequestSender();
+        RecordingElectionListener listener = new RecordingElectionListener();
+        RaftElectionManager manager =
+                newManager(2, setOf(1, 2, 3), fakeClock, sender, listener);
+
+        manager.start();
+        fakeClock.lastOneShotTask.fire();
+        manager.onRequestVoteResponse(
+                new RequestVoteResponseMessage(1L, true, 1)
+        );
+
+        FakeScheduledTask heartbeatTask = fakeClock.lastFixedRateTask;
+        manager.onValidLeaderActivityObserved(1L, 1);
+
+        assertEquals(RaftRole.FOLLOWER, managerNode(manager).getRole());
+        assertEquals(1L, managerNode(manager).getCurrentTerm());
+        assertEquals(1, managerNode(manager).getLeaderId());
+        assertTrue(heartbeatTask.cancelled);
+        assertFalse(fakeClock.lastOneShotTask.cancelled);
+        assertEquals(1, listener.steppedDownCount);
+        assertEquals(1, listener.leaderObservedCount);
     }
 
     /**
@@ -1407,6 +1485,10 @@ class RaftElectionManagerTest {
             if (!cancelled) {
                 task.run();
             }
+        }
+
+        private void fireEvenIfCancelled() {
+            task.run();
         }
     }
 }

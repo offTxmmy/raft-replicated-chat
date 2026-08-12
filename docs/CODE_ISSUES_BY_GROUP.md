@@ -1,11 +1,19 @@
 # Allegato tecnico ai finding di codice
 
-Audit fresco: **2026-08-11**, commit
-`c77dbb981a3db837c50ef17bf9bd279278c04998`.
+Failure analysis originale: **2026-08-11**, commit
+`c77dbb981a3db837c50ef17bf9bd279278c04998`. Verifica aggiornata:
+**2026-08-12**, current `HEAD`
+`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832` con modifiche non committate nel
+working tree.
 
 Questo documento conserva evidenze, execution trace e ragionamento tecnico. Non e'
 un secondo backlog: priorita', stato, azione e verifica ufficiali sono esclusivamente
 nel tracker canonico [`PRE_GROUP_MANUAL_TESTING_TODO.md`](PRE_GROUP_MANUAL_TESTING_TODO.md).
+
+> **Stato corrente:** le failure trace sotto restano utili come root cause storiche,
+> ma `CODE-01..10` e `CODE-12..17` sono stati corretti e verificati. `CODE-11` resta
+> `BLOCKED_BY_DECISION`: il log tecnico Raft conserva payload per replica/recovery,
+> senza history API o replay client-visible. Nessun altro CODE e' aperto.
 
 ## 1. Percorso production ricostruito
 

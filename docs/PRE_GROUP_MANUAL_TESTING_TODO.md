@@ -1,13 +1,15 @@
 # Tracker canonico pre-consegna
 
-Audit fresco: **2026-08-11**
+Audit aggiornato: **2026-08-12**
 
-Commit ispezionato: `c77dbb981a3db837c50ef17bf9bd279278c04998`
+Commit di partenza e current `HEAD` ispezionato:
+`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832`
 
 Verdetto corrente: **NOT READY**
 
-Questo e' l'unico tracker attivo del repository. Gli altri documenti sono baseline
-normative, approfondimenti tecnici o storico e non costituiscono backlog paralleli.
+Questo e' il ledger dettagliato del tracker canonico esposto da
+`PROJECT_DELIVERY_AUDIT.md`. Gli altri documenti sono baseline normative,
+approfondimenti tecnici o storico e non costituiscono backlog paralleli.
 
 ## Regole del tracker
 
@@ -28,18 +30,35 @@ su due notebook non e' `VERIFIED`.
 
 ## Evidenza corrente
 
-- `mvn test`: **186 test**, 0 failure, 0 error, 0 skipped.
-- Sei test JUnit 4 aggiuntivi non sono scoperti da Maven; eseguiti direttamente con
-  `JUnitCore`: **OK (6 tests)**.
-- Livelli reali: unit/component e un'integrazione Raft in-process; **0 test
-  process-level completi, 0 true E2E, 0 test multi-host**.
-- Smoke multi-process fresco, con tre broker e client socket diretti: tutti i broker
-  hanno osservato `Received seq = 2, expected = 1`. Due client su broker differenti
-  hanno inoltre visto entrambi `MSG 1`, ma con notifiche JOIN locali differenti.
-- Il tentativo completo con `ClientMain` non e' usato come prova: nell'ambiente di
-  audit la porta Directory client hard-coded `60001` era occupata dal processo Codex.
-- Nessuna sorgente, test, `pom.xml` o configurazione runtime e' stata modificata
-  durante l'audit.
+- Baseline pre-modifica su `e639cf7`: `mvn clean test` ha eseguito **209 test** con
+  **1 failure temporale** in
+  `RaftOrderingServiceIntegrationTest.retryAfterLeaderChangeShouldNotDuplicateExistingProposal`;
+  il rerun isolato e' passato. Il working tree iniziale conteneva soltanto
+  `?? raft-data/`, preesistente e intenzionalmente non toccato.
+- Suite finale: `mvn clean test` esegue **274 test**, 0 failure, 0 error, 0 skipped.
+- I sei test JUnit 4 prima esclusi sono migrati a Jupiter e vengono ora scoperti dalla
+  normale suite Maven; la dipendenza JUnit 4 compile-scope e' stata rimossa.
+- Il nuovo `ReplicatedChatApplicationIntegrationTest` attraversa il vero percorso
+  `client socket -> Broker -> Raft -> apply -> HoldBackQueue -> client socket` con
+  Directory, tre broker `LOCAL_TCP`, follower forwarding, ACK/no-echo, JOIN
+  no-history e leader failover. E' multi-broker e usa socket reali, ma resta
+  **in-process/same-host**.
+- Uno smoke separato ha avviato processi OS reali: una Directory, tre `BrokerMain` e
+  tre `ClientMain`, distribuiti uno per endpoint broker. Quattro chat sono arrivate
+  ai destinatari nello stesso ordine e una sola volta; il sender non ha visto echo.
+  Dopo il kill del leader, il cluster 2/3 ha eletto un nuovo leader e il client
+  collegato al processo terminato si e' riconnesso continuando la chat. Ambiente
+  same-host/loopback `LOCAL_TCP`: non e' una prova LAN fisica HYBRID.
+- Test deterministici aggiuntivi coprono FIFO/retry/reconnect, un solo writer per
+  generation, write bloccate, slow consumer, Directory restart/replacement,
+  lifecycle transazionale, higher-term `AppendEntries`, response obsolete, timer
+  cancellati e vector clock su messaggi ready.
+- Lo scenario applicativo causale usa il protocollo socket reale: A invia `m1`, B su
+  un altro broker la riceve prima di inviare `m2`; due osservatori vedono `m1 < m2`.
+  Invii concorrenti da A/B producono lo stesso total order per entrambi, ACK esatti,
+  nessun self-echo, perdita o duplicazione.
+- Non sono stati eseguiti test multi-host o su due notebook. La modalita' HYBRID e'
+  coperta same-host, ma broadcast cross-host, firewall e subnet restano gate manuali.
 
 ---
 
@@ -60,7 +79,10 @@ su due notebook non e' `VERIFIED`.
   interno senza esporre no-op ai client. Definire anche il recovery del watermark.
 - **Verifica:** prima chat e prima chat dopo rielezione arrivano a client su broker
   differenti; nessun `Gap detected`; sequenze client-visible contigue.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** la sequenza applicativa densa resta separata dagli indici
+  Raft; no-op e JOIN barrier non consumano sequence. Il nuovo E2E applicativo verifica
+  `MSG 1`, consegne successive e continuita' dopo rielezione.
+- **Stato:** VERIFIED
 
 ## CODE-02 - Rendere atomica la leadership rispetto ad append e send
 
@@ -79,7 +101,9 @@ su due notebook non e' `VERIFIED`.
   e invio; nessuna mutazione o heartbeat deve sopravvivere allo step-down.
 - **Verifica:** test deterministico con latch fra role-check e append/send; dopo
   step-down non compare alcuna entry o heartbeat della vecchia leadership.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** gia' chiuso dai fix Raft precedenti su `master`; restano verdi
+  i regression test deterministici su append/send e step-down.
+- **Stato:** VERIFIED
 
 ## CODE-03 - Processare il termine superiore prima dei filtri di ruolo
 
@@ -97,7 +121,9 @@ su due notebook non e' `VERIFIED`.
 - **Verifica:** response higher-term ritardata dopo cambio ruolo aggiorna sempre il
   term; dopo step-down il fake clock osserva una nuova election se non arriva leader
   activity.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** gia' chiuso su `master`; election possiede term/role/timer e
+  ogni response higher-term viene osservata prima dei filtri di ruolo.
+- **Stato:** VERIFIED
 
 ## CODE-04 - Rendere dedup e retry leader-change-safe
 
@@ -115,7 +141,11 @@ su due notebook non e' `VERIFIED`.
   leadership loss senza produrre ACK prematuri.
 - **Verifica:** crash/leader change prima dell'ACK e prima del commit noto al nuovo
   leader produce una sola application; una key troncata puo' essere riproposta.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** dedup deterministica, cleanup su truncation/append failure e
+  leadership loss sono verificati. Il percorso residuo higher-term `AppendEntries`
+  passa ora da `RaftElectionManager`, fallisce le vere `pendingCommits`, cancella il
+  lifecycle leader una sola volta e continua append/commit/apply.
+- **Stato:** VERIFIED
 
 ## CODE-05 - Preservare il program order del singolo client
 
@@ -131,7 +161,10 @@ su due notebook non e' `VERIFIED`.
   introdurre gating server-side per `(clientId, nextClientSeq)` con gestione dei gap.
 - **Verifica:** due messaggi dello stesso client durante failover/reconnect sono
   committati e consegnati una sola volta nell'ordine `1,2`.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** `ClientMessageSender` usa una FIFO single-in-flight: solo la
+  testa e' inviata/ritentata e soltanto il suo ACK committed abilita la successiva.
+  Test component e socket verificano wire order `1,1,2`, reconnect e ACK obsoleti.
+- **Stato:** VERIFIED
 
 ## CODE-06 - Usare un solo writer per ogni ObjectOutputStream client
 
@@ -147,7 +180,10 @@ su due notebook non e' `VERIFIED`.
   atomica di generazione; idealmente una coda outbound bounded.
 - **Verifica:** stress socket con heartbeat, input e retry concorrenti; il broker
   deserializza tutti gli oggetti e gli ACK corrispondono alle key attese.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** JOIN, QUIT, chat/retry e heartbeat condividono un
+  `ClientObjectWriter` serializzato per generation; invalidazione, socket close e
+  quiescenza impediscono scritture tardive sul vecchio stream.
+- **Stato:** VERIFIED
 
 ## CODE-07 - Introdurre un watermark di JOIN per la semantica no-history
 
@@ -162,7 +198,10 @@ su due notebook non e' `VERIFIED`.
   oppure accettare client solo dopo catch-up; non usare il log tecnico come replay.
 - **Verifica:** client collegato dopo il commit ma prima dell'apply locale non riceve
   il vecchio messaggio e riceve il primo messaggio successivo al JOIN.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** ogni JOIN propone un fence interno Raft. La sessione resta
+  pending fino all'apply locale; WELCOME e attivazione avvengono atomicamente nel
+  commit loop prima dell'entry successiva. Test con latch ed E2E provano no-history.
+- **Stato:** VERIFIED
 
 ## CODE-08 - Separare JOIN/LEAVE dallo stream chat globale
 
@@ -178,7 +217,9 @@ su due notebook non e' `VERIFIED`.
   e fuori dal contratto chat, oppure ordinarle via consenso.
 - **Verifica:** confrontare gli stream di client su broker diversi durante JOIN/LEAVE;
   i messaggi soggetti al contratto globale devono coincidere.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** le notifiche automatiche JOIN/LEAVE sono rimosse. Il fence di
+  sessione e' interno e non consuma sequence; solo chat committate producono `MSG`.
+- **Stato:** VERIFIED
 
 ## CODE-09 - Rendere la riconnessione eventuale e FIFO
 
@@ -195,7 +236,15 @@ su due notebook non e' `VERIFIED`.
   con CODE-05 e CODE-06.
 - **Verifica:** kill del broker con Directory ancora stale; il client raggiunge un
   altro broker e consegna i pending in FIFO senza duplicati.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** controller single-worker con backoff 250 ms..2 s, cancellazione
+  su quit, callback generation-aware e bootstrap iniziale nello stesso loop eventuale.
+  La richiesta Directory porta gli id temporaneamente esclusi, quindi un endpoint
+  ancora registrato ma irraggiungibile per quel client non impedisce la selezione di
+  un broker vivo. Test con Directory reale copre stale preferred endpoint, rotazione,
+  JOIN e pending head. Un secondo test forza il failure dopo l'installazione su A,
+  lascia A registrato/preferito, verifica `excluded={A}`, JOIN/retry su B e ACK1 ->
+  seq2 -> ACK2/QUIT senza inversioni o duplicati.
+- **Stato:** VERIFIED
 
 ## CODE-10 - Rendere configurabile la Directory dei broker
 
@@ -211,7 +260,13 @@ su due notebook non e' `VERIFIED`.
   propagarla a bootstrap e runtime e fallire esplicitamente su mismatch.
 - **Verifica:** broker su due notebook usano lo stesso Directory Service senza edit
   del sorgente; voter set, endpoint pubblicizzati e registrazioni coincidono.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** host/porta Directory sono in `BrokerConfig` e CLI e vengono
+  usati da bootstrap, registration, heartbeat e re-registration. Il voter set resta
+  statico e indipendente. L'RPC port CLI deve coincidere con l'endpoint del voter
+  locale e il client port viene pubblicato coerentemente. Config e socket integration
+  same-host sono verdi; la prova fisica cross-host resta `LAN-01/LAN-02`, non un CODE
+  aperto.
+- **Stato:** VERIFIED
 
 ## CODE-11 - Chiudere il contratto “brokers do not store messages”
 
@@ -228,6 +283,19 @@ su due notebook non e' `VERIFIED`.
   della stessa identita' o un design conforme esplicitamente approvato.
 - **Verifica:** risposta docente o decisione progettuale tracciata, comportamento
   no-history provato da TEST-05/MAN-05.
+- **Analisi 2026-08-12:** `FileRaftPersistence` conserva il `ChatCommand` completo
+  per log matching, replica e recovery della replicated state machine. Non esistono
+  history API, offline inbox o replay volontario; il JOIN fence impedisce anche la
+  history accidentale durante il catch-up. Rimuovere il payload senza un modello
+  alternativo romperebbe Raft/recovery e non viene fatto senza decisione esterna.
+- **Domanda docente:** “Nel requisito *brokers do not store messages*, e' ammesso che
+  il log tecnico persistente di Raft contenga temporaneamente il payload completo per
+  replica, commit e recovery, pur non essendo mai esposto come history/replay ai
+  client? Se no, quale modello di recovery e retention e' richiesto?”
+- **Alternative se vietato:** broker crash-stop senza riuso della stessa identita' e
+  senza recovery locale; storage volatile con perdita dello stato al crash; oppure
+  log cifrato/esterno e retention/snapshot esplicitamente approvati. Tutte richiedono
+  una scelta architetturale/docente e non sono fix cosmetici equivalenti.
 - **Stato:** BLOCKED_BY_DECISION
 
 ## CODE-12 - Isolare Raft dai client lenti
@@ -246,7 +314,10 @@ su due notebook non e' `VERIFIED`.
   deterministica dalla fan-out best-effort e isolare le failure per sessione.
 - **Verifica:** un client non legge mentre un altro continua a ricevere e il cluster
   mantiene heartbeat/commit entro deadline.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** fan-out su snapshot e `offer` non bloccante verso una coda
+  bounded per sessione; un solo worker effettua I/O. Queue full/write failure chiude
+  soltanto lo slow consumer e l'application callback ritorna senza attendere socket.
+- **Stato:** VERIFIED
 
 ## CODE-13 - Correggere readiness e lifecycle Directory
 
@@ -262,7 +333,11 @@ su due notebook non e' `VERIFIED`.
   re-registration e sostituzione atomica del record per broker id.
 - **Verifica:** porta client occupata non pubblica il broker; restart Directory porta
   alla ricomparsa dei broker senza riavviarli.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** bind client precede la pubblicazione; il broker mantiene un
+  loop di re-register. Directory usa uno slot atomico/epoch per broker id, replacement
+  generation-safe e startup dei due listener transazionale. Testano bind failure,
+  restart, stale replacement e heartbeat/reaper.
+- **Stato:** VERIFIED
 
 ## CODE-14 - Rendere monotono lo stato di replica rispetto a response obsolete
 
@@ -277,7 +352,9 @@ su due notebook non e' `VERIFIED`.
   `nextIndex >= matchIndex + 1` e ignorare backtrack obsoleti.
 - **Verifica:** consegnare `success(10)`, `success(5)`, `failure(2)` fuori ordine;
   `nextIndex` non regredisce sotto 11.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** `matchIndex` e `nextIndex` sono monotoni e ogni backtrack e'
+  clampato a `matchIndex + 1`; il trace `success(10), success(5), failure(2)` e' testato.
+- **Stato:** VERIFIED
 
 ## CODE-15 - Proteggere i timer election da callback cancellate
 
@@ -290,7 +367,9 @@ su due notebook non e' `VERIFIED`.
   violazione safety.
 - **Azione:** token/generation validato nel callback o event loop seriale.
 - **Verifica:** fake clock/latch con vecchio callback dopo reset; il term non avanza.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** ogni election timeout cattura una generation; callback
+  cancellate/dequeued non mutano il term dopo reset o stop. Fake clock deterministico.
+- **Stato:** VERIFIED
 
 ## CODE-16 - Rendere transazionale il lifecycle dei processi
 
@@ -306,7 +385,12 @@ su due notebook non e' `VERIFIED`.
   tutti i bind e stop idempotente che chiude listener/executor e attende i thread.
 - **Verifica:** iniettare failure a ogni fase e poi riavviare sulle stesse porte/storage;
   nessun listener, thread o callback della vecchia istanza resta attivo.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** ordering, broker e Directory eseguono rollback inverso e stop
+  idempotente/bounded; manager fermati rifiutano RPC e append senza mutazioni. Una
+  lifecycle generation e riferimenti manager per-run impediscono inoltre a callback
+  uscite dal vecchio run di toccare quello riavviato. Testano bind parziali, riuso
+  porta, restart ordering, sessioni pre-JOIN e writer bloccati.
+- **Stato:** VERIFIED
 
 ## CODE-17 - Rendere coerente il bookkeeping della vector clock
 
@@ -324,7 +408,10 @@ su due notebook non e' `VERIFIED`.
   formalmente che il solo total-order service estende happens-before.
 - **Verifica:** unit test con piu' messaggi buffered/ready e TEST-07 sul path reale;
   nessun claim causale deve dipendere da metadata non aggiornati.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** il clock viene unito per ogni messaggio effettivamente
+  rilasciato, prima della visibilita'; un incoming ancora held-back non influenza nuove
+  proposte. Unit/component test coprono prefissi buffered/ready.
+- **Stato:** VERIFIED
 
 ---
 
@@ -341,7 +428,9 @@ su due notebook non e' `VERIFIED`.
 - **Azione:** migrare le tre classi a Jupiter oppure aggiungere Vintage; portare la
   dipendenza JUnit 4 a scope `test` se resta necessaria.
 - **Verifica:** `mvn test` riporta 192/0/0/0 e nessuna suite diretta separata.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** le tre classi sono migrate a Jupiter e JUnit 4 e' rimosso dal
+  compile scope. Tutti i test fanno parte dei 274 eseguiti dalla suite finale.
+- **Stato:** VERIFIED
 
 ## TEST-02 - Aggiungere un vero E2E applicativo
 
@@ -355,7 +444,11 @@ su due notebook non e' `VERIFIED`.
   verificare prima chat e chat dopo rielezione.
 - **Verifica:** attraversamento `Client -> Broker -> Raft -> apply -> HBQ -> Client`,
   con asserzioni su payload, sequenza, ACK e assenza duplicati.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** `ReplicatedChatApplicationIntegrationTest` attraversa il
+  percorso completo con Directory, 3 broker, socket client, follower forwarding,
+  no-history, ACK/no-echo e leader failover. E' in-process su loopback; l'isolamento
+  in processi OS e' tracciato separatamente in MAN-01.
+- **Stato:** VERIFIED
 
 ## TEST-03 - Coprire le race Raft di leadership e higher-term
 
@@ -367,7 +460,9 @@ su due notebook non e' `VERIFIED`.
 - **Impatto:** CODE-02 e CODE-03 non hanno regressioni deterministiche.
 - **Azione:** fake clock e latch, senza `sleep`, per forzare gli interleaving descritti.
 - **Verifica:** nessuna entry old-leader; term aggiornato e timeout follower armato.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** latch/fake clock e test cross-manager coprono append/send,
+  response tardive e vero higher-term `handleAppendEntries` con pending future.
+- **Stato:** VERIFIED
 
 ## TEST-04 - Coprire dedup, ACK perso e FIFO attraverso failover
 
@@ -379,7 +474,10 @@ su due notebook non e' `VERIFIED`.
 - **Azione:** failure fra replicate/commit/ACK, retry sul nuovo leader prima della
   no-op, truncation e rielezione, due clientSeq pending.
 - **Verifica:** una sola application per key, nessun ACK prematuro, ordine `1,2`.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** test Raft coprono dedup, truncation, ACK perso/leader change;
+  test client component/socket coprono retry head e FIFO `1,1,2`. L'E2E applicativo
+  verifica inoltre sequenze contigue prima/dopo leader failover.
+- **Stato:** VERIFIED
 
 ## TEST-05 - Coprire no-history e notifiche di sessione
 
@@ -392,7 +490,10 @@ su due notebook non e' `VERIFIED`.
 - **Azione:** controllare commit/apply con latch, poi JOIN; confrontare stream completi
   di client su broker differenti.
 - **Verifica:** nessun messaggio pre-JOIN; stream soggetto a ordering identico.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** test con callback/latch forza old delivery durante il fence e
+  verifica WELCOME -> first new MSG; l'E2E committa old prima del JOIN e non lo espone.
+  JOIN/QUIT non generano `MSG`.
+- **Stato:** VERIFIED
 
 ## TEST-06 - Coprire stream writer, reconnect e Directory lifecycle
 
@@ -405,7 +506,11 @@ su due notebook non e' `VERIFIED`.
 - **Azione:** stress concorrente e test process-level con endpoint stale, porta
   occupata, broker alternativo e restart Directory.
 - **Verifica:** stream sempre leggibile, reconnect eventuale, nessun endpoint falso.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** writer concorrente e write bloccata, bootstrap/reconnect con
+  Directory reale e preferred broker irraggiungibile, generation replacement, bind
+  failure, Directory restart/re-register e record same-id sono coperti da test
+  deterministici e socket integration.
+- **Stato:** VERIFIED
 
 ## TEST-07 - Provare causalita' e concorrenza sul percorso reale
 
@@ -420,7 +525,12 @@ su due notebook non e' `VERIFIED`.
 - **Verifica:** almeno due client osservatori vedono `m1 < m2` e lo stesso ordine dei
   concorrenti; i sender ricevono ACK e la proiezione attesa senza il proprio echo;
   nessuna perdita/duplicazione.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** test applicativo con Directory, tre broker e socket reali:
+  A invia `m1`, B su broker differente la riceve e poi invia `m2`; due osservatori
+  vedono `m1 < m2`. A/B inviano poi contemporaneamente con latch; gli osservatori
+  vedono lo stesso ordine totale e i sender ricevono un solo ACK, senza self-echo,
+  perdita o duplicazione.
+- **Stato:** VERIFIED
 
 ## TEST-08 - Ripulire i test deboli/flaky
 
@@ -449,7 +559,12 @@ su due notebook non e' `VERIFIED`.
 - **Azione:** dopo CODE-01/02/06, avviare Directory, tre `BrokerMain` e almeno tre
   `ClientMain`; conservare comandi, log e commit hash.
 - **Verifica:** JOIN, chat cross-broker, ACK e shutdown senza gap/eccezioni.
-- **Stato:** OPEN
+- **Esito 2026-08-12:** PASS su Windows con JVM reali: Directory, tre broker
+  `LOCAL_TCP` e tre `ClientMain` su tre endpoint distinti. Quattro messaggi sono stati
+  osservati nello stesso ordine/esattamente una volta, senza self-echo; kill del
+  leader, rielezione e reconnect del client sul leader terminato sono riusciti.
+  Processi e directory temporanee sono stati chiusi e rimossi.
+- **Stato:** VERIFIED
 
 ## MAN-02 - Failure di leader, follower e link senza partition
 
@@ -463,7 +578,10 @@ su due notebook non e' `VERIFIED`.
   temporaneo di un link senza dividere stabilmente il cluster.
 - **Verifica:** nuova election, nessun commit in minoranza accidentale, chat successiva
   consegnata nello stesso ordine ai destinatari comuni e nessuna duplicate delivery.
-- **Stato:** OPEN
+- **Esito parziale 2026-08-12:** lo smoke multi-process ha coperto il kill del leader
+  con maggioranza 2/3, nuova election e chat successiva senza duplicati. Restano da
+  eseguire esplicitamente kill del follower e failure/ritardo del singolo link.
+- **Stato:** READY_TO_VERIFY
 
 ## MAN-03 - Failure e riconnessione client
 
@@ -475,7 +593,11 @@ su due notebook non e' `VERIFIED`.
 - **Azione:** lasciare pending due messaggi, uccidere il broker connesso, attendere
   riassegnazione e continuare la chat.
 - **Verifica:** eventuale riconnessione, FIFO, un solo ACK/delivery per key.
-- **Stato:** OPEN
+- **Esito parziale 2026-08-12:** un vero `ClientMain` collegato al leader ucciso si e'
+  riconnesso e ha continuato a inviare; i test socket deterministici coprono pending
+  FIFO e dedup. Resta utile ripetere manualmente il kill con due input certamente
+  pending nel preciso istante del failure.
+- **Stato:** READY_TO_VERIFY
 
 ## MAN-04 - Ordine totale, causalita' e concorrenza cross-broker
 
@@ -488,7 +610,10 @@ su due notebook non e' `VERIFIED`.
   da broker diversi mentre C/D restano osservatori.
 - **Verifica:** C e D producono lo stesso transcript e vedono `m1 < m2`; A/B ricevono
   ACK e le proiezioni corrette che escludono il proprio messaggio.
-- **Stato:** OPEN
+- **Esito parziale 2026-08-12:** lo scenario esatto e' verde nel test applicativo
+  same-host con socket reali e tre broker. Resta da ripeterlo nel run manuale con JVM
+  separate e, infine, sui due notebook della demo.
+- **Stato:** READY_TO_VERIFY
 
 ## MAN-05 - Connected-only/no-history
 
@@ -500,7 +625,10 @@ su due notebook non e' `VERIFIED`.
 - **Azione:** committare `old`, collegare un client a follower arretrato prima del suo
   apply, completare catch-up, poi inviare `new`.
 - **Verifica:** il client non vede `old` e vede `new`; nessun replay dopo reconnect.
-- **Stato:** OPEN
+- **Esito parziale 2026-08-12:** unit/component ed E2E in-process verificano il fence,
+  `old` escluso e `new` consegnato. Resta la ripetizione manuale con follower
+  deliberatamente arretrato e processi separati.
+- **Stato:** READY_TO_VERIFY
 
 ## MAN-06 - Runbook riproducibile e raccolta evidenze
 
@@ -592,15 +720,15 @@ obbligatorie.
 - **Categoria:** OPTIONAL / PRODUCTION HARDENING
 - **Priorita':** P2
 - **Area/file:** `RaftOrderingService.start`
-- **Problema:** tutte le entry persistite, incluse quelle oltre `commitIndex`, vengono
-  inserite nel set committed.
-- **Impatto:** in crash-recovery un retry puo' ricevere `true` prima del commit e poi
-  essere perso.
-- **Azione:** ricostruire committed keys solo fino al commit progress; il resto resta
-  in-flight.
+- **Problema storico:** tutte le entry persistite, incluse quelle oltre il progresso
+  applicato, venivano inserite nel set committed.
+- **Impatto storico:** in crash-recovery un retry poteva ricevere `true` prima del
+  commit e poi essere perso.
+- **Azione implementata:** ricostruire `committedProposalKeys` soltanto fino al
+  `restoredLastApplied`; la tail successiva non viene dichiarata applicata.
 - **Verifica:** entry persistita non committed, restart e retry: nessun ACK prima del
   quorum.
-- **Stato:** OPTIONAL
+- **Stato:** VERIFIED
 
 ## OPT-03 - Riparare fisicamente la tail WAL parziale
 
@@ -697,13 +825,12 @@ obbligatorie.
   API non persistenti; log di MAN/LAN ricostruibili.
 - **Stato:** OPTIONAL
 
-## Ordine di esecuzione raccomandato
+## Ordine residuo raccomandato
 
-1. `CODE-01` e `TEST-02`.
-2. `CODE-02`, `CODE-03` e `TEST-03`.
-3. `CODE-04`, `CODE-05`, `CODE-06` e `TEST-04`.
-4. `CODE-07`, `CODE-08` e `TEST-05`.
-5. `CODE-09`, `CODE-10`, `TEST-06` e `MAN-01..05`.
-6. Decisione `CODE-11`.
-7. `LAN-01..03` sul materiale fisico della demo.
-8. P2/P3 e crash-recovery soltanto secondo i claim scelti.
+1. Ottenere la decisione docente per `CODE-11` e registrarla senza reinterpretazioni.
+2. Completare gli scenari manuali residui `MAN-02..05` sul build candidato
+   (`TEST-07` e `MAN-01` sono gia' verificati automaticamente/multi-process locale).
+3. Eseguire `LAN-01/LAN-02` su due notebook e conservare topologia, comandi e log.
+4. Preparare `MAN-06/LAN-03` usando soltanto claim dimostrati.
+5. Affrontare gli `OPT-*` ancora `OPTIONAL` solo se il gruppo decide di promettere le
+   relative garanzie production/crash-recovery.

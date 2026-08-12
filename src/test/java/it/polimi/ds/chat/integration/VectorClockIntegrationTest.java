@@ -5,15 +5,15 @@ import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.TestConfigs;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.common.clock.VectorClock;
-import org.junit.Before;
-import org.junit.Test;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class VectorClockIntegrationTest {
 
@@ -37,7 +37,7 @@ public class VectorClockIntegrationTest {
     private InMemoryBroker broker0;
     private InMemoryBroker follower;
 
-    @Before
+    @BeforeEach
     public void setUp() {
         broker0 = new InMemoryBroker(TestConfigs.raftBrokerConfig(0, 5000));
         follower = new InMemoryBroker(TestConfigs.raftBrokerConfig(1, 5002));
@@ -68,10 +68,14 @@ public class VectorClockIntegrationTest {
                 "3:alice:all good"
         );
 
-        assertEquals("Broker 0 should deliver every message to its clients", expectedOrder, broker0.getDelivered());
-        assertEquals("Follower should deliver every message to its clients", expectedOrder, follower.getDelivered());
+        assertEquals(expectedOrder, broker0.getDelivered(),
+                "Broker 0 should deliver every message to its clients");
+        assertEquals(expectedOrder, follower.getDelivered(),
+                "Follower should deliver every message to its clients");
 
-        assertTrue("Broker 0 vector clock should have recorded both brokers", broker0.getVectorClock().getClock().size() >= 2);
-        assertTrue("Follower vector clock should have recorded both brokers", follower.getVectorClock().getClock().size() >= 2);
+        assertTrue(broker0.getVectorClock().getClock().size() >= 2,
+                "Broker 0 vector clock should have recorded both brokers");
+        assertTrue(follower.getVectorClock().getClock().size() >= 2,
+                "Follower vector clock should have recorded both brokers");
     }
 }

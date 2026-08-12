@@ -28,6 +28,38 @@ public interface OrderingService {
     boolean propose(ChatReqMessage request);
 
     /**
+     * Establishes a committed delivery boundary for a newly joined local client.
+     * The call succeeds only after the boundary has also been applied by this
+     * broker, so commands preceding it cannot become visible to that client.
+     *
+     * @param boundaryId unique id for this connection's JOIN boundary
+     * @return true once the boundary is committed and locally applied
+     */
+    boolean establishDeliveryBoundary(String boundaryId);
+
+    /**
+     * Establishes a local delivery boundary and runs the activation callback
+     * synchronously at that boundary. Implementations that apply an ordered
+     * log must invoke {@code onApplied} from their serialized state-machine
+     * application path, before any later entry can be delivered locally.
+     *
+     * <p>The default keeps simple/testing implementations source compatible;
+     * replicated implementations must override it to provide the atomic
+     * boundary semantics described above.</p>
+     *
+     * @param boundaryId unique id for this connection's JOIN boundary
+     * @param onApplied local activation to run at the boundary
+     * @return true once the boundary and activation have completed
+     */
+    default boolean establishDeliveryBoundary(String boundaryId, Runnable onApplied) {
+        boolean established = establishDeliveryBoundary(boundaryId);
+        if (established) {
+            onApplied.run();
+        }
+        return established;
+    }
+
+    /**
      * Register a callback to be notified when ordered messages are ready for delivery.
      * The callback receives ChatDeliverMessage with assigned sequence numbers.
      *

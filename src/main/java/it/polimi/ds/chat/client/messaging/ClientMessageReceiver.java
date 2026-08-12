@@ -1,103 +1,154 @@
 package it.polimi.ds.chat.client.messaging;
 
+import it.polimi.ds.chat.client.connection.ClientConnectionGeneration;
 import it.polimi.ds.chat.protocol.client.ClientAckMessages;
-import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
 import it.polimi.ds.chat.protocol.client.HeartbeatAckMessage;
+import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
-/**
- * Receives and processes messages from the broker for the chat client.
- * Handles incoming chat messages, ACKs, and heartbeat messages.
- */
+/** Receives broker responses for exactly one connection generation. */
 public class ClientMessageReceiver implements Runnable {
 
-    private final ObjectInputStream in;
+    @FunctionalInterface
+    public interface ConnectionFailureHandler {
+        void onConnectionFailure();
+    }
+
+    private final ObjectInputStream input;
     private final ClientMessageSender sender;
     private final String clientId;
     private final ClientHeartbeatManager heartbeatManager;
+    private final BooleanSupplier generationActive;
+    private final ConnectionFailureHandler failureHandler;
+    private final AtomicBoolean failureNotified = new AtomicBoolean(false);
 
     private volatile boolean running = true;
 
-    /**
-     * Constructs a ClientMessageReceiver.
-     *
-     * @param in               the ObjectInputStream to receive messages from the broker
-     * @param sender           the ClientMessageSender to handle ACKs
-     * @param clientId         the stable id of this client process
-     * @param heartbeatManager the heartbeat manager to notify on heartbeat ACKs
-     */
-    public ClientMessageReceiver(ObjectInputStream in,
+    /** Legacy constructor retained for a standalone input stream. */
+    public ClientMessageReceiver(ObjectInputStream input,
                                  ClientMessageSender sender,
                                  String clientId,
                                  ClientHeartbeatManager heartbeatManager) {
-        this.in = in;
-        this.sender = sender;
-        this.clientId = clientId;
-        this.heartbeatManager = heartbeatManager;
+        this(
+                input,
+                sender,
+                clientId,
+                heartbeatManager,
+                () -> true,
+                null
+        );
     }
 
-    /**
-     * Shuts down the receiver and closes the input stream.
-     */
-    public void shutdown() {
+    public ClientMessageReceiver(ClientConnectionGeneration generation,
+                                 ClientMessageSender sender,
+                                 String clientId,
+                                 ClientHeartbeatManager heartbeatManager,
+                                 ConnectionFailureHandler failureHandler) {
+        this(
+                Objects.requireNonNull(generation, "generation").getInputStream(),
+                sender,
+                clientId,
+                heartbeatManager,
+                generation::isActive,
+                failureHandler
+        );
+    }
+
+    ClientMessageReceiver(ObjectInputStream input,
+                          ClientMessageSender sender,
+                          String clientId,
+                          ClientHeartbeatManager heartbeatManager,
+                          BooleanSupplier generationActive,
+                          ConnectionFailureHandler failureHandler) {
+        this.input = Objects.requireNonNull(input, "input");
+        this.sender = Objects.requireNonNull(sender, "sender");
+        this.clientId = Objects.requireNonNull(clientId, "clientId");
+        this.heartbeatManager = heartbeatManager;
+        this.generationActive = Objects.requireNonNull(
+                generationActive,
+                "generationActive"
+        );
+        this.failureHandler = failureHandler;
+    }
+
+    /** Stops processing; the generation owner closes the socket to unblock read. */
+    public void stop() {
         running = false;
+    }
+
+    /** Legacy shutdown also closes the directly owned input stream. */
+    public void shutdown() {
+        stop();
         try {
-            in.close();
+            input.close();
         } catch (IOException ignored) {
         }
     }
 
-    /**
-     * Main loop for receiving and processing messages from the broker.
-     * Handles chat messages, ACKs, and heartbeat messages.
-     */
     @Override
     public void run() {
         try {
-            while (running) {
-                Object obj = in.readObject();
-
-                if (obj instanceof HeartbeatAckMessage) {
-                    HeartbeatAckMessage ack = (HeartbeatAckMessage) obj;
-
-                    //System.out.println("[HB] ACK ricevuto dal broker (ts=" + ack.getTimestamp() + ", brokerId=" + ack.getBrokerId() + ")");
-
-                    if (heartbeatManager != null) {
-                        heartbeatManager.onHeartbeatAck(ack.getTimestamp());
-                    }
-                    continue;
+            while (running && generationActive.getAsBoolean()) {
+                Object object = input.readObject();
+                if (!running || !generationActive.getAsBoolean()) {
+                    return;
                 }
-                if (obj instanceof HeartbeatMessage) {
-                    HeartbeatMessage hb = (HeartbeatMessage) obj;
-                    if (heartbeatManager != null) {
-                        heartbeatManager.onHeartbeatAck(hb.getTimestamp());
-                    }
-                    continue;
-                }
-                if (obj instanceof String) {
-                    String line = (String) obj;
-                    if (ClientAckMessages.isAck(line)) {
-                        try {
-                            String ackClientId = ClientAckMessages.parseClientId(line);
-                            long clientSeq = ClientAckMessages.parseClientSeq(line);
-
-                            if (clientId.equals(ackClientId)) {
-                                sender.handleAck(ackClientId, clientSeq);
-                            }
-                        } catch (Exception e) {
-                            System.err.println("Errore parsing ACK: " + e.getMessage());
-                        }
-                    } else {
-                        System.out.println(line);
-                    }
-                }
+                handleObject(object);
             }
         } catch (IOException | ClassNotFoundException e) {
-            if (running) {
+            if (running && generationActive.getAsBoolean()) {
                 System.err.println("Connection error (receiver): " + e.getMessage());
+                notifyFailureOnce();
             }
+        } finally {
+            running = false;
+        }
+    }
+
+    private void handleObject(Object object) {
+        if (object instanceof HeartbeatAckMessage ack) {
+            if (heartbeatManager != null) {
+                heartbeatManager.onHeartbeatAck(ack.getTimestamp());
+            }
+            return;
+        }
+
+        if (object instanceof HeartbeatMessage heartbeat) {
+            if (heartbeatManager != null) {
+                heartbeatManager.onHeartbeatAck(heartbeat.getTimestamp());
+            }
+            return;
+        }
+
+        if (!(object instanceof String line)) {
+            return;
+        }
+
+        if (!ClientAckMessages.isAck(line)) {
+            System.out.println(line);
+            return;
+        }
+
+        try {
+            String acknowledgedClientId = ClientAckMessages.parseClientId(line);
+            long clientSeq = ClientAckMessages.parseClientSeq(line);
+            if (clientId.equals(acknowledgedClientId)) {
+                sender.handleAck(acknowledgedClientId, clientSeq);
+            }
+        } catch (RuntimeException e) {
+            System.err.println("Invalid ACK: " + e.getMessage());
+        }
+    }
+
+    private void notifyFailureOnce() {
+        if (failureHandler != null
+                && failureNotified.compareAndSet(false, true)) {
+            failureHandler.onConnectionFailure();
         }
     }
 }

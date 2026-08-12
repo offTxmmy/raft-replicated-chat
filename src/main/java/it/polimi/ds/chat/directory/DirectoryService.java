@@ -1,395 +1,701 @@
 package it.polimi.ds.chat.directory;
 
-import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
-import it.polimi.ds.chat.protocol.broker.*;
-import it.polimi.ds.chat.protocol.chat.*;
-import it.polimi.ds.chat.protocol.client.*;
-import it.polimi.ds.chat.protocol.directory.*;
+import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
+import it.polimi.ds.chat.protocol.directory.ClientCountUpdateMessage;
+import it.polimi.ds.chat.protocol.directory.DirectoryRegisterMessage;
+import it.polimi.ds.chat.protocol.directory.GetBrokerRequestMessage;
+import it.polimi.ds.chat.protocol.directory.GetBrokerResponseMessage;
+import it.polimi.ds.chat.protocol.directory.GetClusterRequestMessage;
+import it.polimi.ds.chat.protocol.directory.GetClusterResponseMessage;
 
-import java.io.*;
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.file.Paths;
+import java.net.SocketException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 /**
- * DirectoryService manages broker registration, heartbeats, and client/broker lookup requests.
- * It listens for broker and client connections, maintains broker liveness, and provides peer information.
+ * Directory for broker bootstrap and client-side broker selection.
+ *
+ * <p>The configured Raft voter set is immutable and independent from the live
+ * broker registry. The latter is a lease-style availability view used only for
+ * client selection. Each broker id owns one atomic registry slot, so endpoint,
+ * client count and heartbeat time cannot get out of sync across independent
+ * maps.</p>
  */
 public class DirectoryService {
 
-    private static final long HEARTBEAT_TIMEOUT_MS = 10_000;
-    private static final long REAPER_INTERVAL_MS   = 5_000;
+    static final long DEFAULT_HEARTBEAT_TIMEOUT_MS = 10_000L;
+    static final long DEFAULT_REAPER_INTERVAL_MS = 5_000L;
 
-    // broker configuration + client count
-    private final Map<BrokerConfig, Integer> registeredBrokers = new ConcurrentHashMap<>();
-    // last heartbeat time per brokerId
-    private final Map<Integer, Long> lastHeartbeats = new ConcurrentHashMap<>();
-    // index by brokerId for fast lookup
-    private final Map<Integer, BrokerConfig> brokersById = new ConcurrentHashMap<>();
+    private final Object registryLock = new Object();
+    private final Object lifecycleLock = new Object();
+    private final Map<Integer, BrokerSlot> brokerSlots = new HashMap<>();
+    private final Set<Socket> activeConnections = ConcurrentHashMap.newKeySet();
+    private final Set<Thread> connectionThreads = ConcurrentHashMap.newKeySet();
+    private final AtomicLong registrationEpoch = new AtomicLong();
 
-    // Static cluster topology (id -> endpoint). Configured at startup, served to brokers on request.
     private final Map<Integer, RaftPeerEndpoint> clusterVoters;
+    private final LongSupplier clock;
+    private final long heartbeatTimeoutMs;
+    private final long reaperIntervalMs;
+
+    private final CountDownLatch brokerListenerReady = new CountDownLatch(1);
+    private final CountDownLatch clientListenerReady = new CountDownLatch(1);
+
+    private volatile boolean running = true;
+    private volatile ServerSocket brokerListenerSocket;
+    private volatile ServerSocket clientListenerSocket;
+    private volatile Thread brokerListenerThread;
+    private volatile Thread clientListenerThread;
+    private volatile Thread reaperThread;
 
     /**
-     * Main entry point for the Directory Service.
-     * Starts listeners for broker and client connections.
+     * Main entry point.
      *
-     * @param args [0] = votersCSV (id@host:rpcPort[:clientPort],...)
+     * @param args voters CSV followed by optional broker/client listener ports
      */
     public static void main(String[] args) {
-        int brokerPort = 60000;
-        int clientPort = 60001;
-
-        if (args.length < 1) {
-            System.err.println("Usage: DirectoryService <votersCSV>");
+        if (args.length < 1 || args.length > 3) {
+            System.err.println("Usage: DirectoryService <votersCSV> [brokerPort] [clientPort]");
             System.err.println("  votersCSV: id@host:rpcPort[:clientPort],id@host:rpcPort[:clientPort],...");
             System.exit(2);
         }
 
+        int brokerPort = args.length >= 2 ? Integer.parseInt(args[1]) : 60000;
+        int clientPort = args.length >= 3 ? Integer.parseInt(args[2]) : 60001;
         Map<Integer, RaftPeerEndpoint> voters = parseVoters(args[0]);
 
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: DIRECTORY SERVICE---");
         System.out.println("Configured cluster voters: " + voters.keySet());
 
         DirectoryService service = new DirectoryService(voters);
-
-        // Lister on brokerPort (register + heartbeat)
-        new Thread(() -> service.startBrokersListener(brokerPort), "Dir-BrokerListener").start();
-
-        // Listen on clientPort (GET_BROKER)
-        new Thread(() -> service.startClientsListener(clientPort), "Dir-ClientListener").start();
+        try {
+            service.start(brokerPort, clientPort);
+        } catch (IOException | RuntimeException e) {
+            service.stop();
+            System.err.println("Directory Service startup failed: " + e.getMessage());
+            System.exit(1);
+        }
     }
 
-    /**
-     * Constructs a DirectoryService with a preconfigured static cluster topology.
-     *
-     * @param clusterVoters static voter set served to brokers via GetClusterRequest
-     */
     public DirectoryService(Map<Integer, RaftPeerEndpoint> clusterVoters) {
-        this.clusterVoters = (clusterVoters == null)
-                ? Collections.emptyMap()
-                : Collections.unmodifiableMap(new HashMap<>(clusterVoters));
-        startReaperThread();
+        this(
+                clusterVoters,
+                System::currentTimeMillis,
+                DEFAULT_HEARTBEAT_TIMEOUT_MS,
+                DEFAULT_REAPER_INTERVAL_MS,
+                true);
     }
 
-    /**
-     * Backwards-compatible constructor: no preconfigured cluster topology.
-     * Brokers requesting the cluster will receive a negative response.
-     */
     public DirectoryService() {
         this(Collections.emptyMap());
     }
 
+    DirectoryService(
+            Map<Integer, RaftPeerEndpoint> clusterVoters,
+            LongSupplier clock,
+            long heartbeatTimeoutMs,
+            long reaperIntervalMs,
+            boolean startReaper) {
+        this.clusterVoters = clusterVoters == null
+                ? Collections.emptyMap()
+                : Collections.unmodifiableMap(new HashMap<>(clusterVoters));
+        this.clock = Objects.requireNonNull(clock, "clock");
+        if (heartbeatTimeoutMs <= 0L || reaperIntervalMs <= 0L) {
+            throw new IllegalArgumentException("Directory timing values must be > 0");
+        }
+        this.heartbeatTimeoutMs = heartbeatTimeoutMs;
+        this.reaperIntervalMs = reaperIntervalMs;
+        if (startReaper) {
+            startReaperThread();
+        }
+    }
+
     /**
-     * Starts a TCP listener for broker connections (registration and heartbeat).
-     *
-     * @param port the port to listen on for broker connections
+     * Starts both public listeners as one lifecycle transaction. Both sockets
+     * are bound before either endpoint or accept thread is published. A failure
+     * therefore leaves no half-started Directory service behind.
      */
+    public void start(int brokerPort, int clientPort) throws IOException {
+        ServerSocket brokerSocket = null;
+        ServerSocket clientSocket = null;
+        try {
+            brokerSocket = new ServerSocket(brokerPort);
+            clientSocket = new ServerSocket(clientPort);
+            ServerSocket boundBrokerSocket = brokerSocket;
+            ServerSocket boundClientSocket = clientSocket;
+
+            synchronized (lifecycleLock) {
+                if (!running) {
+                    throw new IOException("Directory Service has been stopped");
+                }
+                if (brokerListenerSocket != null || clientListenerSocket != null) {
+                    throw new IllegalStateException("Directory Service listeners already started");
+                }
+
+                brokerListenerSocket = brokerSocket;
+                clientListenerSocket = clientSocket;
+                brokerListenerThread = new Thread(
+                        () -> runBrokerListener(boundBrokerSocket, true),
+                        "Dir-BrokerListener");
+                clientListenerThread = new Thread(
+                        () -> runClientListener(boundClientSocket, true),
+                        "Dir-ClientListener");
+                brokerListenerThread.start();
+                clientListenerThread.start();
+            }
+        } catch (IOException | RuntimeException e) {
+            closeQuietly(clientSocket);
+            closeQuietly(brokerSocket);
+            stop();
+            throw e;
+        }
+    }
+
+    /** Backwards-compatible single listener entry point used by focused tests. */
     public void startBrokersListener(int port) {
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Directory Service listening on port " + port);
-
-            while (true) {
-                Socket socket = serverSocket.accept();
-                System.out.println("New connection from " + socket.getRemoteSocketAddress());
-
-                new Thread(() -> handleConnection(socket)).start();
+        try {
+            ServerSocket socket = new ServerSocket(port);
+            synchronized (lifecycleLock) {
+                if (!running || brokerListenerSocket != null) {
+                    closeQuietly(socket);
+                    return;
+                }
+                brokerListenerSocket = socket;
+                brokerListenerThread = Thread.currentThread();
             }
+            runBrokerListener(socket, false);
         } catch (IOException e) {
-            System.err.println("Directory Service error: " + e.getMessage());
-            e.printStackTrace();
+            if (running) {
+                System.err.println("Directory Service error: " + e.getMessage());
+            }
         }
     }
 
-    /**
-     * Starts a TCP listener for client connections (broker lookup requests).
-     *
-     * @param port the port to listen on for client connections
-     */
+    /** Backwards-compatible single listener entry point used by focused tests. */
     public void startClientsListener(int port) {
-        try (ServerSocket serverSocket = new ServerSocket(port)) {
-            System.out.println("Directory Service listening for CLIENTS on port " + port);
-
-            while (true) {
-                Socket socket = serverSocket.accept();
-                System.out.println("New client directory request from " + socket.getRemoteSocketAddress());
-
-                new Thread(() -> handleClientConnection(socket)).start();
+        try {
+            ServerSocket socket = new ServerSocket(port);
+            synchronized (lifecycleLock) {
+                if (!running || clientListenerSocket != null) {
+                    closeQuietly(socket);
+                    return;
+                }
+                clientListenerSocket = socket;
+                clientListenerThread = Thread.currentThread();
             }
+            runClientListener(socket, false);
         } catch (IOException e) {
-            System.err.println("Directory Service client listener error: " + e.getMessage());
-            e.printStackTrace();
+            if (running) {
+                System.err.println("Directory Service client listener error: " + e.getMessage());
+            }
         }
     }
 
-    /**
-     * Handles a client connection, processing broker or peer list requests.
-     *
-     * @param socket the client socket
-     */
+    /** Stops listeners, handlers and the reaper, waiting for bounded teardown. */
+    public void stop() {
+        Thread brokerListener;
+        Thread clientListener;
+        Thread reaper;
+        synchronized (lifecycleLock) {
+            running = false;
+            brokerListener = brokerListenerThread;
+            clientListener = clientListenerThread;
+            reaper = reaperThread;
+        }
+
+        closeQuietly(brokerListenerSocket);
+        closeQuietly(clientListenerSocket);
+        closeActiveConnections();
+        if (reaper != null) {
+            reaper.interrupt();
+        }
+
+        List<Thread> listeners = new ArrayList<>(2);
+        listeners.add(brokerListener);
+        listeners.add(clientListener);
+        joinThreadsBounded(listeners, 1_000L);
+
+        // No listener can add another handler after the previous join. Close a
+        // second snapshot to cover an accept that completed concurrently with
+        // the first close, then wait for all currently owned workers.
+        closeActiveConnections();
+        joinThreadsBounded(new ArrayList<>(connectionThreads), 1_000L);
+        joinThreadsBounded(Collections.singletonList(reaper), 1_000L);
+    }
+
+    private void runBrokerListener(ServerSocket serverSocket, boolean coupledLifecycle) {
+        boolean failed = false;
+        brokerListenerReady.countDown();
+        System.out.println("Directory Service listening on port " + serverSocket.getLocalPort());
+        try (serverSocket) {
+            while (running) {
+                try {
+                    Socket socket = serverSocket.accept();
+                    startConnectionHandler(
+                            socket,
+                            () -> handleBrokerConnection(socket),
+                            "Dir-BrokerConnection-" + socket.getRemoteSocketAddress());
+                } catch (SocketException e) {
+                    if (running) {
+                        failed = true;
+                        System.err.println("Directory Service broker listener error: "
+                                + e.getMessage());
+                    }
+                    break;
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            if (running) {
+                failed = true;
+                System.err.println("Directory Service broker listener error: " + e.getMessage());
+            }
+        } finally {
+            synchronized (lifecycleLock) {
+                if (brokerListenerSocket == serverSocket) {
+                    brokerListenerSocket = null;
+                }
+            }
+        }
+
+        if (failed && coupledLifecycle) {
+            stop();
+        }
+    }
+
+    private void runClientListener(ServerSocket serverSocket, boolean coupledLifecycle) {
+        boolean failed = false;
+        clientListenerReady.countDown();
+        System.out.println("Directory Service listening for CLIENTS on port "
+                + serverSocket.getLocalPort());
+        try (serverSocket) {
+            while (running) {
+                try {
+                    Socket socket = serverSocket.accept();
+                    startConnectionHandler(
+                            socket,
+                            () -> handleClientConnection(socket),
+                            "Dir-ClientConnection-" + socket.getRemoteSocketAddress());
+                } catch (SocketException e) {
+                    if (running) {
+                        failed = true;
+                        System.err.println("Directory Service client listener error: "
+                                + e.getMessage());
+                    }
+                    break;
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            if (running) {
+                failed = true;
+                System.err.println("Directory Service client listener error: " + e.getMessage());
+            }
+        } finally {
+            synchronized (lifecycleLock) {
+                if (clientListenerSocket == serverSocket) {
+                    clientListenerSocket = null;
+                }
+            }
+        }
+
+        if (failed && coupledLifecycle) {
+            stop();
+        }
+    }
+
+    private void startConnectionHandler(Socket socket, Runnable action, String threadName) {
+        synchronized (lifecycleLock) {
+            if (!running) {
+                closeQuietly(socket);
+                return;
+            }
+
+            activeConnections.add(socket);
+            Thread handler = new Thread(() -> {
+                try {
+                    action.run();
+                } finally {
+                    activeConnections.remove(socket);
+                    connectionThreads.remove(Thread.currentThread());
+                }
+            }, threadName);
+            handler.setDaemon(true);
+            connectionThreads.add(handler);
+            try {
+                handler.start();
+            } catch (RuntimeException e) {
+                connectionThreads.remove(handler);
+                activeConnections.remove(socket);
+                closeQuietly(socket);
+                throw e;
+            }
+        }
+    }
+
     private void handleClientConnection(Socket socket) {
-        try (ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+        try (socket;
+             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
              ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-
             Object obj = in.readObject();
-
-            if (obj instanceof GetBrokerRequestMessage req) {
-                handleGetBrokerRequest(out);
+            if (obj instanceof GetBrokerRequestMessage request) {
+                handleGetBrokerRequest(out, request);
             } else {
                 System.out.println("Unknown client request object: " + obj);
             }
-
         } catch (IOException | ClassNotFoundException e) {
-            System.err.println("Error handling client directory request: " + e.getMessage());
-        } finally {
-            try {
-                socket.close();
-            } catch (IOException ignored) {}
+            if (running) {
+                System.err.println("Error handling client directory request: " + e.getMessage());
+            }
         }
     }
 
-    /**
-     * Handles a client request for the best broker and sends a response.
-     *
-     * @param out the output stream to the client
-     * @throws IOException if an I/O error occurs
-     */
-    private void handleGetBrokerRequest(ObjectOutputStream out) throws IOException {
-        BrokerConfig best = chooseBestBroker();
-
-        GetBrokerResponseMessage resp;
-        if (best != null) {
-            resp = new GetBrokerResponseMessage(
-                    true,
-                    best.getBrokerHost(),
-                    best.getBrokerPort(),
-                    best.getBrokerId()
-            );
-            System.out.println("Returned broker " + best.getBrokerId() +
-                    " (" + best.getBrokerHost() + ":" + best.getBrokerPort() + ") to client");
+    private void handleGetBrokerRequest(
+            ObjectOutputStream out,
+            GetBrokerRequestMessage request
+    ) throws IOException {
+        BrokerRecord best = chooseBestBroker(request.getExcludedBrokerIds());
+        GetBrokerResponseMessage response;
+        if (best == null) {
+            response = new GetBrokerResponseMessage(false, null, -1, -1);
         } else {
-            resp = new GetBrokerResponseMessage(false, null, -1, -1);
-            System.out.println("No brokers available to client request");
+            response = new GetBrokerResponseMessage(
+                    true,
+                    best.host(),
+                    best.port(),
+                    best.brokerId());
         }
-
-        out.writeObject(resp);
+        out.writeObject(response);
         out.flush();
     }
 
-    /**
-     * Handles a broker connection, processing registration and heartbeats.
-     * Also handles one-shot GetClusterRequestMessage queries used at broker startup.
-     *
-     * @param socket the broker socket
-     */
-    private void handleConnection(Socket socket) {
-        try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-
-            // Expected first message: DirectoryRegisterMessage OR GetClusterRequestMessage
+    private void handleBrokerConnection(Socket socket) {
+        RegistrationLease lease = null;
+        try (socket; ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
             Object first = in.readObject();
-
-            if (first instanceof GetClusterRequestMessage req) {
-                handleGetClusterRequest(socket, req);
+            if (first instanceof GetClusterRequestMessage request) {
+                handleGetClusterRequest(socket, request);
+                return;
+            }
+            if (!(first instanceof DirectoryRegisterMessage registration)) {
+                System.out.println("Unknown first object from " + socket.getRemoteSocketAddress()
+                        + ": " + first);
                 return;
             }
 
-            if (!(first instanceof DirectoryRegisterMessage msg)) {
-                System.out.println("Unknown first object from " + socket.getRemoteSocketAddress() + ": " + first);
-                return;
-            }
-
-            registerBroker(msg);
-            int brokerId = msg.getBrokerId();
-
-            // Loop: receive HeartbeatMessage on the same connection
-            while (true) {
+            lease = registerBroker(registration);
+            while (running) {
                 Object obj = in.readObject();
-                if (obj instanceof HeartbeatMessage hb) {
-                    // update last heartbeat time using the local receive clock; the
-                    // heartbeat payload now carries a monotonic sequence number
-                    // (not a wall-clock value), so we can't subtract it from `now`.
-                    lastHeartbeats.put(brokerId, System.currentTimeMillis());
-                    // System.out.println("Heartbeat from broker " + brokerId);
-                } else if (obj instanceof ClientCountUpdateMessage cc) {
-                    updateClientCount(cc);
+                if (obj instanceof HeartbeatMessage) {
+                    recordHeartbeat(lease);
+                } else if (obj instanceof ClientCountUpdateMessage update) {
+                    updateClientCount(lease, update);
                 } else {
-                    System.out.println("Unknown object from broker " + brokerId + ": " + obj);
+                    System.out.println("Unknown object from broker " + lease.brokerId() + ": " + obj);
                 }
             }
-
         } catch (IOException e) {
-            System.err.println("Connection with broker died: " + e.getMessage());
-            // The reaper will clean up based on heartbeat timeout
+            if (running) {
+                System.err.println("Connection with broker died: " + e.getMessage());
+            }
         } catch (ClassNotFoundException e) {
             System.err.println("Unknown class from broker: " + e.getMessage());
         } finally {
-            try {
-                socket.close();
-            } catch (IOException ignored) {}
+            activeConnections.remove(socket);
+            if (lease != null) {
+                deactivateLease(lease);
+            }
         }
     }
 
-    /**
-     * Handles a broker's startup request for the static cluster topology.
-     * Writes a GetClusterResponseMessage and closes the connection.
-     */
-    private void handleGetClusterRequest(Socket socket, GetClusterRequestMessage req) throws IOException {
-        int nodeId = req.getNodeId();
+    private void handleGetClusterRequest(Socket socket, GetClusterRequestMessage request)
+            throws IOException {
+        int nodeId = request.getNodeId();
         boolean ok = !clusterVoters.isEmpty() && clusterVoters.containsKey(nodeId);
-
-        GetClusterResponseMessage resp = new GetClusterResponseMessage(
+        GetClusterResponseMessage response = new GetClusterResponseMessage(
                 ok,
-                ok ? clusterVoters : Collections.emptyMap()
-        );
+                ok ? clusterVoters : Collections.emptyMap());
 
         ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-        out.writeObject(resp);
+        out.writeObject(response);
         out.flush();
-
-        System.out.println("Served cluster info to broker nodeId=" + nodeId
-                + " (ok=" + ok + ", voters=" + clusterVoters.keySet() + ")");
     }
 
     /**
-     * Updates the client count for a broker based on a received message.
-     *
-     * @param cc the client count update message
+     * Backwards-compatible direct count update. Network handlers use the
+     * generation-aware overload below so an obsolete connection cannot mutate a
+     * replacement record.
      */
-    public void updateClientCount(ClientCountUpdateMessage cc) {
-        int brokerId = cc.getBrokerId();
-        int clientCount = cc.getClientCount();
-
-        BrokerConfig cfg = brokersById.get(brokerId);
-        if (cfg != null) {
-            registeredBrokers.put(cfg, clientCount);
-            // System.out.println("Updated client count for broker " + brokerId + ": " + clientCount);
-        } else {
-            System.out.println("Received ClientCountUpdate for unknown brokerId=" + brokerId);
+    public void updateClientCount(ClientCountUpdateMessage update) {
+        synchronized (registryLock) {
+            BrokerSlot slot = brokerSlots.get(update.getBrokerId());
+            if (slot == null || slot.active() == null) {
+                return;
+            }
+            BrokerRecord current = slot.active();
+            BrokerRecord replacement = current.withClientCount(update.getClientCount(), clock.getAsLong());
+            brokerSlots.put(update.getBrokerId(), new BrokerSlot(slot.epoch(), replacement));
+            registryLock.notifyAll();
         }
     }
 
-    /**
-     * Registers a broker in the directory based on the registration message.
-     *
-     * @param msg the registration message from the broker
-     * @return the created BrokerConfig
-     */
-    private BrokerConfig registerBroker(DirectoryRegisterMessage msg) {
-        int brokerId = msg.getBrokerId();
-        String host = msg.getBrokerHost();
-        int port = msg.getBrokerPort();
-        int clientPort = port;
-        int udpPort = 50002 + brokerId;
-        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
-        voters.put(brokerId, new RaftPeerEndpoint(brokerId, host, port, clientPort));
-        RaftConfig raftConfig = new RaftConfig(
-                200,
-                400,
-                40,
-                port,
-                Paths.get("directory-raft-data", "n" + brokerId),
-                voters);
+    RegistrationLease registerBroker(DirectoryRegisterMessage message) {
+        Objects.requireNonNull(message, "message");
+        long epoch = registrationEpoch.incrementAndGet();
+        RegistrationLease lease = new RegistrationLease(
+                epoch,
+                message.getBrokerId(),
+                message.getBrokerHost(),
+                message.getBrokerPort());
+        BrokerRecord record = lease.toRecord(0, clock.getAsLong());
 
-        BrokerConfig config = new BrokerConfig(
-                brokerId,
-                host,
-                port,
-                clientPort,
-                udpPort,
-                raftConfig
-        );
+        synchronized (registryLock) {
+            brokerSlots.put(message.getBrokerId(), new BrokerSlot(epoch, record));
+            registryLock.notifyAll();
+        }
 
-        registeredBrokers.putIfAbsent(config, 0);
-        brokersById.put(brokerId, config);
-        lastHeartbeats.put(brokerId, System.currentTimeMillis());
-
-        System.out.println("Registered broker: id=" + brokerId + " "
-                + config.getBrokerHost() + ":" + config.getBrokerPort()
-                + ", clientCount=0");
-
-        return config;
+        System.out.println("Registered broker: id=" + record.brokerId() + " "
+                + record.host() + ":" + record.port() + ", clientCount=0, epoch=" + epoch);
+        return lease;
     }
 
-    /**
-     * Starts the reaper thread that periodically removes dead brokers based on heartbeat timeouts.
-     */
+    void recordHeartbeat(RegistrationLease lease) {
+        long now = clock.getAsLong();
+        synchronized (registryLock) {
+            BrokerSlot slot = brokerSlots.get(lease.brokerId());
+            if (slot == null || slot.epoch() != lease.epoch()) {
+                return;
+            }
+            int clientCount = slot.active() == null ? 0 : slot.active().clientCount();
+            brokerSlots.put(
+                    lease.brokerId(),
+                    new BrokerSlot(lease.epoch(), lease.toRecord(clientCount, now)));
+            registryLock.notifyAll();
+        }
+    }
+
+    private void deactivateLease(RegistrationLease lease) {
+        synchronized (registryLock) {
+            BrokerSlot slot = brokerSlots.get(lease.brokerId());
+            if (slot != null && slot.epoch() == lease.epoch()) {
+                brokerSlots.put(lease.brokerId(), new BrokerSlot(slot.epoch(), null));
+                registryLock.notifyAll();
+            }
+        }
+    }
+
+    private void updateClientCount(RegistrationLease lease, ClientCountUpdateMessage update) {
+        if (update.getBrokerId() != lease.brokerId()) {
+            return;
+        }
+        long now = clock.getAsLong();
+        synchronized (registryLock) {
+            BrokerSlot slot = brokerSlots.get(lease.brokerId());
+            if (slot == null || slot.epoch() != lease.epoch()) {
+                return;
+            }
+            brokerSlots.put(
+                    lease.brokerId(),
+                    new BrokerSlot(lease.epoch(), lease.toRecord(update.getClientCount(), now)));
+            registryLock.notifyAll();
+        }
+    }
+
     private void startReaperThread() {
-        Thread t = new Thread(() -> {
-            while (true) {
+        Thread thread = new Thread(() -> {
+            while (running) {
                 try {
-                    long now = System.currentTimeMillis();
-
-                    // Check all brokers by id
-                    for (Map.Entry<Integer, Long> entry : lastHeartbeats.entrySet()) {
-                        int brokerId = entry.getKey();
-                        ;
-                        long last = entry.getValue();
-
-                        if (now - last > HEARTBEAT_TIMEOUT_MS) {
-                            // Consider broker dead
-                            System.out.println("Broker " + brokerId + " considered DEAD (no heartbeat for " + (now - last) + " ms). Removing from directory.");
-
-                            lastHeartbeats.remove(brokerId);
-
-                            BrokerConfig cfg = brokersById.remove(brokerId);
-                            if (cfg != null) {
-                                registeredBrokers.remove(cfg);
-                            }
-                        }
-                    }
-
-                    Thread.sleep(REAPER_INTERVAL_MS);
+                    Thread.sleep(reaperIntervalMs);
+                    reapExpiredBrokers();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     break;
                 }
             }
         }, "Directory-Reaper");
-        t.setDaemon(true);
-        t.start();
+        thread.setDaemon(true);
+        reaperThread = thread;
+        thread.start();
     }
 
-    /**
-     * Chooses the best broker to assign to a client, preferring the broker with the fewest clients.
-     * If multiple brokers have the same client count, chooses the one with the lowest broker id.
-     *
-     * @return the selected BrokerConfig, or null if none available
-     */
-    private BrokerConfig chooseBestBroker() {
-        BrokerConfig best = null;
-        int bestCount = Integer.MAX_VALUE;
-        int bestId = Integer.MAX_VALUE;
-
-        for (Map.Entry<BrokerConfig, Integer> entry : registeredBrokers.entrySet()) {
-            BrokerConfig cfg = entry.getKey();
-            int count = entry.getValue();
-            int id = cfg.getBrokerId();
-
-            if (count < bestCount || (count == bestCount && id < bestId)) {
-                bestCount = count;
-                bestId = id;
-                best = cfg;
+    void reapExpiredBrokers() {
+        long now = clock.getAsLong();
+        synchronized (registryLock) {
+            for (Map.Entry<Integer, BrokerSlot> entry : brokerSlots.entrySet()) {
+                BrokerSlot slot = entry.getValue();
+                BrokerRecord record = slot.active();
+                if (record != null && now - record.lastHeartbeatMillis() > heartbeatTimeoutMs) {
+                    System.out.println("Broker " + record.brokerId()
+                            + " considered DEAD. Removing active endpoint from directory.");
+                    // Preserve the epoch tombstone. A late heartbeat from this same
+                    // connection may reactivate it, while an older generation can
+                    // never overwrite a newer registration.
+                    entry.setValue(new BrokerSlot(slot.epoch(), null));
+                    registryLock.notifyAll();
+                }
             }
         }
-
-        return best;
     }
 
-    /**
-     * Parses a comma-separated voters CSV (id@host:rpcPort[:clientPort],...) into a voter map.
-     * Moved from BrokerMain: the static cluster topology now lives on the Directory.
-     */
+    private BrokerRecord chooseBestBroker(Set<Integer> excludedBrokerIds) {
+        synchronized (registryLock) {
+            BrokerRecord best = null;
+            for (BrokerSlot slot : brokerSlots.values()) {
+                BrokerRecord candidate = slot.active();
+                if (candidate == null || excludedBrokerIds.contains(candidate.brokerId())) {
+                    continue;
+                }
+                if (best == null
+                        || candidate.clientCount() < best.clientCount()
+                        || (candidate.clientCount() == best.clientCount()
+                        && candidate.brokerId() < best.brokerId())) {
+                    best = candidate;
+                }
+            }
+            return best;
+        }
+    }
+
+    BrokerRecord brokerRecordForTesting(int brokerId) {
+        synchronized (registryLock) {
+            BrokerSlot slot = brokerSlots.get(brokerId);
+            return slot == null ? null : slot.active();
+        }
+    }
+
+    int activeBrokerCountForTesting() {
+        synchronized (registryLock) {
+            int count = 0;
+            for (BrokerSlot slot : brokerSlots.values()) {
+                if (slot.active() != null) {
+                    count++;
+                }
+            }
+            return count;
+        }
+    }
+
+    boolean awaitActiveBrokerForTesting(
+            int brokerId,
+            String expectedHost,
+            int expectedPort,
+            long timeout,
+            TimeUnit unit) throws InterruptedException {
+        long remainingNanos = unit.toNanos(timeout);
+        long deadline = System.nanoTime() + remainingNanos;
+        synchronized (registryLock) {
+            while (remainingNanos > 0L) {
+                BrokerSlot slot = brokerSlots.get(brokerId);
+                BrokerRecord record = slot == null ? null : slot.active();
+                if (record != null
+                        && expectedHost.equals(record.host())
+                        && expectedPort == record.port()) {
+                    return true;
+                }
+                TimeUnit.NANOSECONDS.timedWait(registryLock, remainingNanos);
+                remainingNanos = deadline - System.nanoTime();
+            }
+            return false;
+        }
+    }
+
+    int getBoundBrokerPortForTesting() {
+        ServerSocket socket = brokerListenerSocket;
+        return socket == null ? -1 : socket.getLocalPort();
+    }
+
+    int getBoundClientPortForTesting() {
+        ServerSocket socket = clientListenerSocket;
+        return socket == null ? -1 : socket.getLocalPort();
+    }
+
+    boolean awaitBrokerListenerReady(long timeout, TimeUnit unit) throws InterruptedException {
+        return brokerListenerReady.await(timeout, unit);
+    }
+
+    boolean awaitClientListenerReady(long timeout, TimeUnit unit) throws InterruptedException {
+        return clientListenerReady.await(timeout, unit);
+    }
+
+    boolean isReaperAliveForTesting() {
+        Thread thread = reaperThread;
+        return thread != null && thread.isAlive();
+    }
+
+    int activeConnectionCountForTesting() {
+        return activeConnections.size();
+    }
+
+    private void closeActiveConnections() {
+        for (Socket socket : new ArrayList<>(activeConnections)) {
+            try {
+                socket.setSoLinger(true, 0);
+            } catch (SocketException ignored) {
+            }
+            closeQuietly(socket);
+        }
+    }
+
+    private static void joinThreadsBounded(Iterable<Thread> threads, long timeoutMillis) {
+        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        for (Thread thread : threads) {
+            if (thread == null || thread == Thread.currentThread()) {
+                continue;
+            }
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0L) {
+                return;
+            }
+            try {
+                TimeUnit.NANOSECONDS.timedJoin(thread, remaining);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+    }
+
+    private static void closeQuietly(ServerSocket socket) {
+        if (socket == null) {
+            return;
+        }
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static void closeQuietly(Socket socket) {
+        if (socket == null) {
+            return;
+        }
+        try {
+            socket.close();
+        } catch (IOException ignored) {
+        }
+    }
+
     private static Map<Integer, RaftPeerEndpoint> parseVoters(String csv) {
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
         for (String token : csv.split(",")) {
             String trimmed = token.trim();
-            if (trimmed.isEmpty()) continue;
+            if (trimmed.isEmpty()) {
+                continue;
+            }
 
             int at = trimmed.indexOf('@');
             if (at <= 0) {
@@ -398,9 +704,7 @@ public class DirectoryService {
             }
 
             int id = Integer.parseInt(trimmed.substring(0, at));
-            String endpoint = trimmed.substring(at + 1);
-            String[] parts = endpoint.split(":");
-
+            String[] parts = trimmed.substring(at + 1).split(":");
             if (parts.length != 2 && parts.length != 3) {
                 throw new IllegalArgumentException("Bad voter token: '" + trimmed
                         + "' (expected id@host:rpcPort[:clientPort])");
@@ -408,12 +712,29 @@ public class DirectoryService {
 
             String host = parts[0];
             int rpcPort = Integer.parseInt(parts[1]);
-            int clientPort = (parts.length == 3)
-                    ? Integer.parseInt(parts[2])
-                    : 50000 + id;
-
+            int clientPort = parts.length == 3 ? Integer.parseInt(parts[2]) : 50000 + id;
             voters.put(id, new RaftPeerEndpoint(id, host, rpcPort, clientPort));
         }
         return voters;
+    }
+
+    private record BrokerSlot(long epoch, BrokerRecord active) {
+    }
+
+    record RegistrationLease(long epoch, int brokerId, String host, int port) {
+        BrokerRecord toRecord(int clientCount, long timestamp) {
+            return new BrokerRecord(brokerId, host, port, clientCount, timestamp);
+        }
+    }
+
+    record BrokerRecord(
+            int brokerId,
+            String host,
+            int port,
+            int clientCount,
+            long lastHeartbeatMillis) {
+        BrokerRecord withClientCount(int newClientCount, long timestamp) {
+            return new BrokerRecord(brokerId, host, port, newClientCount, timestamp);
+        }
     }
 }

@@ -14,11 +14,13 @@ import it.polimi.ds.chat.ordering.api.OrderingServiceCallback;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 import java.io.IOException;
 import java.util.HashSet;
@@ -51,10 +53,17 @@ public final class RaftOrderingService implements OrderingService {
     private DefaultRaftClock raftClock;
 
     private volatile boolean running;
+    // Invalidates manager callbacks that escaped their old run before stop().
+    private long lifecycleGeneration;
 
     private static final long PROPOSE_COMMIT_TIMEOUT_MS = 5_000L;
 
     private final ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits =
+            new ConcurrentHashMap<>();
+
+    // A JOIN boundary is complete only once this replica has applied it, not
+    // merely when the leader has reported the entry committed.
+    private final ConcurrentHashMap<String, PendingLocalBarrier> pendingLocalBarriers =
             new ConcurrentHashMap<>();
 
     // Guards the check-and-register sequence for retry idempotency.
@@ -84,6 +93,7 @@ public final class RaftOrderingService implements OrderingService {
         if (running) {
             return;
         }
+        long runGeneration = ++lifecycleGeneration;
 
         // 1. Persistence + recovery of (term, vote).
         persistence = new FileRaftPersistence(raftConfig.getStorageDir());
@@ -149,6 +159,11 @@ public final class RaftOrderingService implements OrderingService {
             if (pending != null) {
                 pending.complete(false);
             }
+
+            PendingLocalBarrier localBarrier = pendingLocalBarriers.remove(key);
+            if (localBarrier != null) {
+                localBarrier.completion.complete(false);
+            }
         });
 
         // 4. TCP client and outbound Raft transport.
@@ -162,11 +177,23 @@ public final class RaftOrderingService implements OrderingService {
         Set<Integer> allVoterIds = new HashSet<>(raftConfig.getVoters().keySet());
 
         // 7. Election observers: forward replication events to the election manager.
-        RaftLeaderActivityObserver leaderActivityObserver =
-                (term, leaderId) -> electionManager.onValidLeaderActivityObserved(term, leaderId);
+        // Each replication manager retains observers tied to its own election
+        // manager. Dereferencing the mutable service field here would let an RPC
+        // from a stopped run mutate a replacement run after stop()+start().
+        AtomicReference<RaftElectionManager> runElectionManager = new AtomicReference<>();
+        RaftLeaderActivityObserver leaderActivityObserver = (term, leaderId) -> {
+            RaftElectionManager manager = runElectionManager.get();
+            if (manager != null) {
+                manager.onValidLeaderActivityObserved(term, leaderId);
+            }
+        };
 
-        RaftHigherTermObserver higherTermObserver =
-                term -> electionManager.onHigherTermObserved(term);
+        RaftHigherTermObserver higherTermObserver = term -> {
+            RaftElectionManager manager = runElectionManager.get();
+            if (manager != null) {
+                manager.onHigherTermObserved(term);
+            }
+        };
 
         // 8. Replication manager — also acts as the election listener.
         replicationManager = new RaftReplicationManager(
@@ -179,32 +206,55 @@ public final class RaftOrderingService implements OrderingService {
                 leaderActivityObserver,
                 higherTermObserver
         );
+        RaftReplicationManager runReplicationManager = replicationManager;
 
         RaftElectionListener electionListener = new RaftElectionListener() {
             @Override
             public void onLeaderElected(int leaderId, long term) {
-                replicationManager.onLeaderElected(leaderId, term);
-                if (leaderId == localNodeId) {
-                    replicationManager.appendCommandAsLeader(null);
+                synchronized (RaftOrderingService.this) {
+                    if (!isActiveRunLocked(runGeneration, runReplicationManager)) {
+                        return;
+                    }
+                    runReplicationManager.onLeaderElected(leaderId, term);
+                    if (leaderId == localNodeId) {
+                        runReplicationManager.appendCommandAsLeader(null);
+                    }
+                    notifyLeaderChanged(leaderId, term);
                 }
-                notifyLeaderChanged(leaderId, term);
             }
 
             @Override
             public void onSteppedDown(long newTerm, int knownLeaderId) {
-                replicationManager.onSteppedDown(newTerm, knownLeaderId);
-                failAllPendingCommits();
+                synchronized (RaftOrderingService.this) {
+                    if (!isActiveRunLocked(runGeneration, runReplicationManager)) {
+                        return;
+                    }
+                    runReplicationManager.onSteppedDown(newTerm, knownLeaderId);
+                    failAllPendingCommits();
+                }
             }
 
             @Override
             public void onLeaderObserved(int leaderId, long term) {
-                replicationManager.onLeaderObserved(leaderId, term);
-                notifyLeaderChanged(leaderId, term);
+                synchronized (RaftOrderingService.this) {
+                    if (!isActiveRunLocked(runGeneration, runReplicationManager)) {
+                        return;
+                    }
+                    runReplicationManager.onLeaderObserved(leaderId, term);
+                    notifyLeaderChanged(leaderId, term);
+                }
             }
 
             @Override
             public void onHeartbeatRoundDue(long term) {
-                replicationManager.onHeartbeatRoundDue(term);
+                synchronized (RaftOrderingService.this) {
+                    if (!isActiveRunLocked(runGeneration, runReplicationManager)) {
+                        return;
+                    }
+                }
+                // The replication manager has its own running/term checks. Do not
+                // hold the service lifecycle monitor across peer network I/O.
+                runReplicationManager.onHeartbeatRoundDue(term);
             }
         };
 
@@ -221,6 +271,7 @@ public final class RaftOrderingService implements OrderingService {
                 raftClock,
                 electionListener
         );
+        runElectionManager.set(electionManager);
 
         // 10. Wire Raft transport response handlers.
         raftTransport.attachHandlers(
@@ -245,15 +296,15 @@ public final class RaftOrderingService implements OrderingService {
         // 12. Start in dependency order.
         try {
             rpcServer.start();
-        } catch (IOException e) {
-            throw new RuntimeException("Failed to start RaftRpcServer on port "
-                    + raftConfig.getRpcPort(), e);
+            raftTransport.start();
+            replicationManager.start();
+            electionManager.start();
+            running = true;
+        } catch (IOException | RuntimeException e) {
+            cleanupStartedComponents();
+            throw new RuntimeException("Failed to start Raft ordering service on node "
+                    + localNodeId + " (rpcPort=" + raftConfig.getRpcPort() + ")", e);
         }
-        raftTransport.start();
-        replicationManager.start();
-        electionManager.start();
-
-        running = true;
         System.out.println("[RaftOrderingService] started, nodeId=" + localNodeId
                 + ", voters=" + raftConfig.getVoters().keySet()
                 + ", rpcPort=" + raftConfig.getRpcPort()
@@ -276,16 +327,15 @@ public final class RaftOrderingService implements OrderingService {
             return;
         }
         running = false;
+        lifecycleGeneration++;
 
         pendingCommits.forEach((id, future) -> future.complete(false));
         pendingCommits.clear();
+        pendingLocalBarriers.forEach((id, barrier) -> barrier.completion.complete(false));
+        pendingLocalBarriers.clear();
         committedProposalKeys.clear();
 
-        if (electionManager   != null) electionManager.stop();
-        if (replicationManager != null) replicationManager.stop();
-        if (raftTransport         != null) raftTransport.stop();
-        if (rpcServer         != null) rpcServer.stop();
-        if (raftClock         != null) raftClock.shutdown();
+        cleanupStartedComponents();
 
         System.out.println("[RaftOrderingService] stopped");
     }
@@ -300,6 +350,57 @@ public final class RaftOrderingService implements OrderingService {
         }
 
         return appendAndWaitForCommit(request);
+    }
+
+    @Override
+    public boolean establishDeliveryBoundary(String boundaryId) {
+        return establishDeliveryBoundary(boundaryId, () -> { });
+    }
+
+    @Override
+    public boolean establishDeliveryBoundary(String boundaryId, Runnable onApplied) {
+        Objects.requireNonNull(boundaryId, "boundaryId");
+        Objects.requireNonNull(onApplied, "onApplied");
+        if (boundaryId.isBlank() || !running) {
+            return false;
+        }
+
+        ChatReqMessage request = ChatReqMessage.deliveryBarrier(
+                "join-barrier:" + boundaryId,
+                localNodeId
+        );
+        String key = proposalKey(request);
+        PendingLocalBarrier localBarrier = new PendingLocalBarrier(onApplied);
+        PendingLocalBarrier existing = pendingLocalBarriers.putIfAbsent(key, localBarrier);
+        if (existing != null) {
+            localBarrier = existing;
+        }
+
+        synchronized (idempotencyLock) {
+            if (committedProposalKeys.contains(key)) {
+                localBarrier.activate();
+            }
+        }
+
+        if (!localBarrier.completion.isDone() && !propose(request)) {
+            pendingLocalBarriers.remove(key, localBarrier);
+            localBarrier.completion.complete(false);
+            return false;
+        }
+
+        try {
+            return localBarrier.completion.get(
+                    PROPOSE_COMMIT_TIMEOUT_MS,
+                    TimeUnit.MILLISECONDS
+            );
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (ExecutionException | TimeoutException e) {
+            return false;
+        } finally {
+            pendingLocalBarriers.remove(key, localBarrier);
+        }
     }
 
     private boolean appendAndWaitForCommit(ChatReqMessage request) {
@@ -322,7 +423,12 @@ public final class RaftOrderingService implements OrderingService {
 
         if (owner) {
             ChatCommand command;
-            if (request.hasClientIdentity()) {
+            if (request.isDeliveryBarrier()) {
+                command = ChatCommand.deliveryBarrier(
+                        request.getLocalMsgId(),
+                        request.getBrokerId()
+                );
+            } else if (request.hasClientIdentity()) {
                 command = new ChatCommand(
                         request.getLocalMsgId(),
                         request.getBrokerId(),
@@ -464,11 +570,15 @@ public final class RaftOrderingService implements OrderingService {
 
         String key = proposalKey(entry.getCommand());
         CompletableFuture<Boolean> pending;
+        PendingLocalBarrier localBarrier;
         boolean firstApplication;
 
         synchronized (idempotencyLock) {
             firstApplication = committedProposalKeys.add(key);
             pending = pendingCommits.remove(key);
+            localBarrier = entry.getCommand().isDeliveryBarrier()
+                    ? pendingLocalBarriers.get(key)
+                    : null;
         }
 
         if (firstApplication) {
@@ -477,6 +587,9 @@ public final class RaftOrderingService implements OrderingService {
 
         if (pending != null) {
             pending.complete(true);
+        }
+        if (localBarrier != null) {
+            localBarrier.activate();
         }
     }
 
@@ -509,6 +622,38 @@ public final class RaftOrderingService implements OrderingService {
         }
     }
 
+    private boolean isActiveRunLocked(
+            long expectedGeneration,
+            RaftReplicationManager expectedReplicationManager
+    ) {
+        return running
+                && lifecycleGeneration == expectedGeneration
+                && replicationManager == expectedReplicationManager;
+    }
+
+    /**
+     * Rolls back runtime components in reverse dependency order. This method is
+     * deliberately independent from {@link #running}: startup may fail before
+     * the service reaches its externally visible running state.
+     */
+    private void cleanupStartedComponents() {
+        if (electionManager != null) {
+            electionManager.stop();
+        }
+        if (replicationManager != null) {
+            replicationManager.stop();
+        }
+        if (raftTransport != null) {
+            raftTransport.stop();
+        }
+        if (rpcServer != null) {
+            rpcServer.stop();
+        }
+        if (raftClock != null) {
+            raftClock.shutdown();
+        }
+    }
+
     private static String proposalKey(ChatReqMessage request) {
         if (request.hasClientIdentity()) {
             return "client:" + request.getClientId() + ":" + request.getClientSeq();
@@ -521,5 +666,26 @@ public final class RaftOrderingService implements OrderingService {
             return "client:" + command.getClientId() + ":" + command.getClientSeq();
         }
         return "local:" + command.getLocalMsgId();
+    }
+
+    private static final class PendingLocalBarrier {
+        private final CompletableFuture<Boolean> completion = new CompletableFuture<>();
+        private final Runnable onApplied;
+
+        private PendingLocalBarrier(Runnable onApplied) {
+            this.onApplied = onApplied;
+        }
+
+        private void activate() {
+            if (completion.isDone()) {
+                return;
+            }
+            try {
+                onApplied.run();
+                completion.complete(true);
+            } catch (RuntimeException e) {
+                completion.completeExceptionally(e);
+            }
+        }
     }
 }

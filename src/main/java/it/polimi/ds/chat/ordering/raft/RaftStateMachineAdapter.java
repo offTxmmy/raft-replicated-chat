@@ -34,7 +34,7 @@ public final class RaftStateMachineAdapter implements Consumer<RaftLogEntry> {
     public void accept(RaftLogEntry entry) {
         ChatCommand cmd = entry.getCommand();
 
-        if (cmd == null) {
+        if (cmd == null || cmd.isDeliveryBarrier()) {
             // Internal Raft entry (for example a leader no-op):
             // it occupies a Raft log index but it is not a chat message,
             // therefore it must not consume an application sequence number.

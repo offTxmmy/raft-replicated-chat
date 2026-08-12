@@ -1,174 +1,218 @@
 package it.polimi.ds.chat.client.messaging;
 
+import it.polimi.ds.chat.client.connection.ClientObjectWriter;
+
 import java.io.IOException;
 import java.io.ObjectOutputStream;
-import java.util.Map;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 
 /**
- * Handles sending user messages to the server and retransmitting messages that have not yet been
- * acknowledged (ACKed).
- * Maintains a pending message queue and manages retransmission based on ACK timeouts.
+ * Sends client chat messages using a FIFO, single-in-flight discipline.
+ *
+ * <p>Only the queue head may be written or retried. A commit ACK for that head
+ * removes it and enables the next message. Since the broker emits that ACK only
+ * after the proposal is committed/applied, a later client sequence can never
+ * overtake an earlier one during retry, failover or reconnect.</p>
  */
 public class ClientMessageSender implements Runnable {
 
-    /**
-     * Output stream verso il broker corrente.
-     * Può cambiare nel tempo in caso di riconnessione a un nuovo broker.
-     */
-    private volatile ObjectOutputStream out;
+    private static final long RETRY_POLL_MS = 100L;
 
+    private final Object stateLock = new Object();
     private final String clientId;
     private final long ackTimeoutMs;
-    private final Map<Long, ClientPendingMessage> pendingMessages = new ConcurrentHashMap<>();
+    private final LongSupplier currentTimeMillis;
+    private final Deque<ClientPendingMessage> pendingMessages = new ArrayDeque<>();
+    private final AtomicLong seqCounter = new AtomicLong(0L);
 
-    // Monotonic per-client sequence number used as message id (replaces wall-clock timestamp).
-    private final AtomicLong seqCounter = new AtomicLong(0);
-
+    private ClientObjectWriter writer;
     private volatile boolean running = true;
 
-    /**
-     * Constructs a ClientMessageSender.
-     *
-     * @param out          the ObjectOutputStream to send messages to the server
-     * @param ackTimeoutMs the timeout in milliseconds to wait for an ACK before retransmitting
-     */
     public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs) {
         this(out, ackTimeoutMs, UUID.randomUUID().toString());
     }
 
-    public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs, String clientId) {
-        this.out = out;
+    public ClientMessageSender(ObjectOutputStream out,
+                               long ackTimeoutMs,
+                               String clientId) {
+        this(
+                new ClientObjectWriter(Objects.requireNonNull(out, "out")),
+                ackTimeoutMs,
+                clientId,
+                System::currentTimeMillis
+        );
+    }
+
+    /** Creates a disconnected sender; a connection generation is attached later. */
+    public ClientMessageSender(long ackTimeoutMs, String clientId) {
+        this(null, ackTimeoutMs, clientId, System::currentTimeMillis);
+    }
+
+    ClientMessageSender(ClientObjectWriter writer,
+                        long ackTimeoutMs,
+                        String clientId,
+                        LongSupplier currentTimeMillis) {
+        if (ackTimeoutMs <= 0L) {
+            throw new IllegalArgumentException("ackTimeoutMs must be positive");
+        }
+        this.writer = writer;
         this.ackTimeoutMs = ackTimeoutMs;
-        this.clientId = clientId;
+        this.clientId = Objects.requireNonNull(clientId, "clientId");
+        this.currentTimeMillis = Objects.requireNonNull(
+                currentTimeMillis,
+                "currentTimeMillis"
+        );
     }
 
     /**
-     * Updates the ObjectOutputStream used to send messages.
-     * <p>
-     * Questo metodo viene chiamato dopo una riconnessione a un nuovo broker.
-     * I messaggi pendenti rimangono nella mappa e saranno ritrasmessi usando il nuovo stream.
-     *
-     * @param newOut the new ObjectOutputStream to use
+     * Atomically switches the sender to the writer of a new connection
+     * generation and immediately retransmits the current head, if any.
      */
-    public synchronized void updateOutputStream(ObjectOutputStream newOut) {
-        System.out.println("[SEND] Aggiornato ObjectOutputStream verso nuovo broker.");
-        this.out = newOut;
+    public void attachWriter(ClientObjectWriter newWriter) throws IOException {
+        Objects.requireNonNull(newWriter, "newWriter");
+        synchronized (stateLock) {
+            writer = newWriter;
+            sendHeadIfEligibleLocked(true);
+            stateLock.notifyAll();
+        }
     }
 
-    /**
-     * Sends a user message to the server, assigning a client sequence and adding it to the pending queue.
-     *
-     * @param text the message text to send
-     */
+    /** Clears the writer only when the failed generation is still attached. */
+    public void detachWriter(ClientObjectWriter expectedWriter) {
+        synchronized (stateLock) {
+            if (writer == expectedWriter) {
+                writer = null;
+            }
+            stateLock.notifyAll();
+        }
+    }
+
+    /** Assigns a sequence and queues a user message. Only the head is sent. */
     public void sendUserMessage(String text) {
-        long clientSeq = seqCounter.incrementAndGet();
-        String wireLine = buildMsgWire(clientSeq, text);
-
-        ClientPendingMessage pm = new ClientPendingMessage(clientSeq, wireLine);
-        pendingMessages.put(clientSeq, pm);
-
-        ObjectOutputStream currentOut = this.out;
-        if (currentOut == null) {
-            System.err.println("[SEND] Impossibile inviare: stream nullo (nessun broker connesso).");
-            return;
-        }
-
-        try {
-            currentOut.writeObject(wireLine);
-            currentOut.flush();
-        } catch (IOException e) {
-            System.err.println("[SEND] Errore invio messaggio: " + e.getMessage());
+        synchronized (stateLock) {
+            long clientSeq = seqCounter.incrementAndGet();
+            ClientPendingMessage pending = new ClientPendingMessage(
+                    clientSeq,
+                    buildMsgWire(clientSeq, text)
+            );
+            pendingMessages.addLast(pending);
+            if (pendingMessages.peekFirst() == pending) {
+                try {
+                    sendHeadIfEligibleLocked(false);
+                } catch (IOException e) {
+                    System.err.println("[SEND] Failed to send message: "
+                            + e.getMessage());
+                }
+            }
+            stateLock.notifyAll();
         }
     }
 
-    /**
-     * Builds the wire format line for the server.
-     * Format: "MSG &lt;clientId&gt; &lt;clientSeq&gt; &lt;text&gt;"
-     *
-     * @param clientSeq the message sequence for this client process
-     * @param text      the message text
-     * @return the formatted wire line
-     */
     private String buildMsgWire(long clientSeq, String text) {
         return "MSG " + clientId + " " + clientSeq + " " + text;
     }
 
     /**
-     * Called by the MessageReceiver when a valid ACK is received.
-     * Removes the acknowledged message from the pending queue.
-     *
-     * @param clientId the id of the acknowledged client
-     * @param clientSeq the sequence of the acknowledged message
+     * Accepts only an ACK for this sender's current queue head. Duplicate,
+     * obsolete and out-of-order ACKs cannot skip a pending message.
      */
-    public void handleAck(String clientId, long clientSeq) {
-        if (!this.clientId.equals(clientId)) {
-            System.out.println("[ACK] Ignorato ACK per clientId diverso: " + clientId);
+    public void handleAck(String acknowledgedClientId, long clientSeq) {
+        if (!clientId.equals(acknowledgedClientId)) {
             return;
         }
 
-        ClientPendingMessage removed = pendingMessages.remove(clientSeq);
-        if (removed == null) {
-            System.out.println("[ACK] Ricevuto ACK per clientSeq sconosciuto: " + clientSeq);
+        synchronized (stateLock) {
+            ClientPendingMessage head = pendingMessages.peekFirst();
+            if (head == null || head.getClientSeq() != clientSeq) {
+                return;
+            }
+
+            pendingMessages.removeFirst();
+            try {
+                sendHeadIfEligibleLocked(false);
+            } catch (IOException e) {
+                System.err.println("[SEND] Failed to send next FIFO message: "
+                        + e.getMessage());
+            }
+            stateLock.notifyAll();
         }
-        // Se removed != null, il messaggio è stato confermato e rimosso dai pendenti.
     }
 
-    /**
-     * Legacy ACK handler kept for tests or older protocol paths.
-     */
     public void handleAck(long clientSeq) {
         handleAck(clientId, clientSeq);
     }
 
-    /**
-     * Shuts down the sender thread.
-     */
     public void shutdown() {
         running = false;
+        synchronized (stateLock) {
+            stateLock.notifyAll();
+        }
     }
 
-    /**
-     * Main loop for retransmitting pending messages if ACKs are not received within the timeout.
-     * Retransmits messages and manages the pending queue.
-     */
     @Override
     public void run() {
-        try {
-            while (running) {
-                long now = System.currentTimeMillis();
-
-                for (ClientPendingMessage pm : pendingMessages.values()) {
-                    long elapsed = now - pm.getLastSendTime();
-                    if (elapsed >= ackTimeoutMs) {
-                        ObjectOutputStream currentOut = this.out;
-                        if (currentOut == null) {
-                            System.err.println("[RETRY] Impossibile ritrasmettere: stream nullo.");
-                            continue;
-                        }
-
-                        try {
-                            currentOut.writeObject(pm.getWireLine());
-                            currentOut.flush();
-                            pm.updateLastSendTime();
-                            System.out.println("[RETRY] Ritrasmesso messaggio con clientSeq " + pm.getClientSeq());
-                        } catch (IOException e) {
-                            System.err.println("[RETRY] Errore ritrasmissione: " + e.getMessage());
-                        }
-                    }
+        while (running) {
+            synchronized (stateLock) {
+                if (!running) {
+                    return;
                 }
 
                 try {
-                    Thread.sleep(100); // intervallo di polling
+                    sendHeadIfEligibleLocked(false);
+                } catch (IOException e) {
+                    System.err.println("[RETRY] Failed to retransmit FIFO head: "
+                            + e.getMessage());
+                }
+
+                try {
+                    stateLock.wait(RETRY_POLL_MS);
                 } catch (InterruptedException e) {
                     running = false;
                     Thread.currentThread().interrupt();
                 }
             }
-        } catch (Exception e) {
-            System.err.println("[SEND] Errore nel thread sender: " + e.getMessage());
         }
+    }
+
+    /** Deterministic retry tick used by component tests. */
+    void retryExpiredHead() throws IOException {
+        synchronized (stateLock) {
+            sendHeadIfEligibleLocked(false);
+        }
+    }
+
+    int pendingCount() {
+        synchronized (stateLock) {
+            return pendingMessages.size();
+        }
+    }
+
+    Long pendingHeadSequence() {
+        synchronized (stateLock) {
+            ClientPendingMessage head = pendingMessages.peekFirst();
+            return head == null ? null : head.getClientSeq();
+        }
+    }
+
+    private void sendHeadIfEligibleLocked(boolean force) throws IOException {
+        ClientPendingMessage head = pendingMessages.peekFirst();
+        if (head == null || writer == null) {
+            return;
+        }
+
+        long now = currentTimeMillis.getAsLong();
+        boolean retryDue = head.hasBeenSent()
+                && now - head.getLastSendTime() >= ackTimeoutMs;
+        if (!force && head.hasBeenSent() && !retryDue) {
+            return;
+        }
+
+        writer.send(head.getWireLine());
+        head.markSent(now);
     }
 }

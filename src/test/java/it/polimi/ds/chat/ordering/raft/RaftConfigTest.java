@@ -146,8 +146,27 @@ class RaftConfigTest {
         assertEquals(50000, cfg.getBrokerPort());
         assertEquals(50000, cfg.getClientPort());
         assertEquals(50002, cfg.getUdpPort());
+        assertEquals("localhost", cfg.getDirectoryHost());
+        assertEquals(60000, cfg.getDirectoryPort());
         assertEquals(2, cfg.getRaftConfig().getQuorumSize());
         assertTrue(cfg.getRaftConfig().getVoters().containsKey(0));
+    }
+
+    @Test
+    void brokerConfigCarriesRemoteDirectoryEndpoint(@TempDir Path dir) {
+        RaftConfig raft = new RaftConfig(150, 300, 30, 7000, dir, threeVoters());
+        BrokerConfig cfg = new BrokerConfig(
+                0,
+                "127.0.0.1",
+                50000,
+                50000,
+                50002,
+                raft,
+                "192.0.2.50",
+                62000);
+
+        assertEquals("192.0.2.50", cfg.getDirectoryHost());
+        assertEquals(62000, cfg.getDirectoryPort());
     }
 
     @Test
