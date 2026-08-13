@@ -17,19 +17,34 @@ public class ChatDeliverMessage extends BrokerMessage {
     private final int brokerId;
     private final String username;
     private final String clientId;
+    private final long clientSeq;
+    private final boolean hasClientIdentity;
     private final String text;
     private final VectorClock vectorClock;
 
     public ChatDeliverMessage(long seq, int brokerId, String username, String text, VectorClock vectorClock) {
-        this(seq, brokerId, username, null, text, vectorClock);
+        this(seq, brokerId, username, null, 0L, text, vectorClock, false);
     }
 
     public ChatDeliverMessage(long seq, int brokerId, String username, String clientId, String text,
             VectorClock vectorClock) {
+        this(seq, brokerId, username, clientId, 0L, text, vectorClock, false);
+    }
+
+    public ChatDeliverMessage(long seq, int brokerId, String username, String clientId,
+            long clientSeq, String text, VectorClock vectorClock) {
+        this(seq, brokerId, username, clientId, clientSeq, text, vectorClock, true);
+    }
+
+    private ChatDeliverMessage(long seq, int brokerId, String username, String clientId,
+            long clientSeq, String text, VectorClock vectorClock,
+            boolean hasClientIdentity) {
         this.seq = seq;
         this.brokerId = brokerId;
         this.username = username;
         this.clientId = clientId;
+        this.clientSeq = clientSeq;
+        this.hasClientIdentity = hasClientIdentity;
         this.text = text;
         this.vectorClock = vectorClock;
     }
@@ -48,6 +63,14 @@ public class ChatDeliverMessage extends BrokerMessage {
 
     public String getClientId() {
         return clientId;
+    }
+
+    public long getClientSeq() {
+        return clientSeq;
+    }
+
+    public boolean hasClientIdentity() {
+        return hasClientIdentity;
     }
 
     public String getText() {

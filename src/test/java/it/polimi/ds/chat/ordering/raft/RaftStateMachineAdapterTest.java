@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RaftStateMachineAdapterTest {
 
@@ -43,6 +44,9 @@ class RaftStateMachineAdapterTest {
 
         assertEquals(1L, delivered.getSeq());
         assertEquals("hello", delivered.getText());
+        assertTrue(delivered.hasClientIdentity());
+        assertEquals("client-1", delivered.getClientId());
+        assertEquals(1L, delivered.getClientSeq());
     }
 
     @Test

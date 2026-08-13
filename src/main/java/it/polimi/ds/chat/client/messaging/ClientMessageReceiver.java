@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.function.BooleanSupplier;
 
 /** Receives broker responses for exactly one connection generation. */
@@ -24,7 +25,10 @@ public class ClientMessageReceiver implements Runnable {
     private final String clientId;
     private final ClientHeartbeatManager heartbeatManager;
     private final BooleanSupplier generationActive;
+    private final InboundDispatcher inboundDispatcher;
     private final ConnectionFailureHandler failureHandler;
+    private final Runnable beforeDispatch;
+    private final Consumer<String> chatOutput;
     private final AtomicBoolean failureNotified = new AtomicBoolean(false);
 
     private volatile boolean running = true;
@@ -40,7 +44,13 @@ public class ClientMessageReceiver implements Runnable {
                 clientId,
                 heartbeatManager,
                 () -> true,
-                null
+                dispatch -> {
+                    dispatch.run();
+                    return true;
+                },
+                null,
+                () -> { },
+                System.out::println
         );
     }
 
@@ -55,7 +65,10 @@ public class ClientMessageReceiver implements Runnable {
                 clientId,
                 heartbeatManager,
                 generation::isActive,
-                failureHandler
+                generation::dispatchInboundIfActive,
+                failureHandler,
+                () -> { },
+                System.out::println
         );
     }
 
@@ -64,7 +77,10 @@ public class ClientMessageReceiver implements Runnable {
                           String clientId,
                           ClientHeartbeatManager heartbeatManager,
                           BooleanSupplier generationActive,
-                          ConnectionFailureHandler failureHandler) {
+                          InboundDispatcher inboundDispatcher,
+                          ConnectionFailureHandler failureHandler,
+                          Runnable beforeDispatch,
+                          Consumer<String> chatOutput) {
         this.input = Objects.requireNonNull(input, "input");
         this.sender = Objects.requireNonNull(sender, "sender");
         this.clientId = Objects.requireNonNull(clientId, "clientId");
@@ -73,7 +89,16 @@ public class ClientMessageReceiver implements Runnable {
                 generationActive,
                 "generationActive"
         );
+        this.inboundDispatcher = Objects.requireNonNull(
+                inboundDispatcher,
+                "inboundDispatcher"
+        );
         this.failureHandler = failureHandler;
+        this.beforeDispatch = Objects.requireNonNull(
+                beforeDispatch,
+                "beforeDispatch"
+        );
+        this.chatOutput = Objects.requireNonNull(chatOutput, "chatOutput");
     }
 
     /** Stops processing; the generation owner closes the socket to unblock read. */
@@ -98,7 +123,8 @@ public class ClientMessageReceiver implements Runnable {
                 if (!running || !generationActive.getAsBoolean()) {
                     return;
                 }
-                handleObject(object);
+                beforeDispatch.run();
+                inboundDispatcher.dispatch(() -> handleObject(object));
             }
         } catch (IOException | ClassNotFoundException e) {
             if (running && generationActive.getAsBoolean()) {
@@ -130,7 +156,7 @@ public class ClientMessageReceiver implements Runnable {
         }
 
         if (!ClientAckMessages.isAck(line)) {
-            System.out.println(line);
+            chatOutput.accept(line);
             return;
         }
 
@@ -150,5 +176,10 @@ public class ClientMessageReceiver implements Runnable {
                 && failureNotified.compareAndSet(false, true)) {
             failureHandler.onConnectionFailure();
         }
+    }
+
+    @FunctionalInterface
+    interface InboundDispatcher {
+        boolean dispatch(Runnable action);
     }
 }

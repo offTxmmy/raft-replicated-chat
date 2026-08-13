@@ -1,9 +1,9 @@
 # Raft LAN broadcast: design e stato di validazione
 
 Analisi originale: **2026-08-11**, commit
-`c77dbb981a3db837c50ef17bf9bd279278c04998`. Stato verificato il **2026-08-12** su
-`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
-nel working tree per review.
+`c77dbb981a3db837c50ef17bf9bd279278c04998`. Stato aggiornato il **2026-08-13**.
+Baseline precedente agli ultimi fix mirati:
+`b5bf3857ea85be8f8d1758261cc428b0c5fba09b` (`master`).
 
 Questo documento spiega la scelta del trasporto. Non e' un tracker: azioni e gate
 sono in [`PRE_GROUP_MANUAL_TESTING_TODO.md`](PRE_GROUP_MANUAL_TESTING_TODO.md).
@@ -148,11 +148,11 @@ broker sui notebook e riduce questa ambiguita'.
 
 ## 8. Evidenza automatica disponibile
 
-Il 2026-08-12:
+Il 2026-08-13:
 
 ```text
 mvn clean test
-Tests run: 274, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 290, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 

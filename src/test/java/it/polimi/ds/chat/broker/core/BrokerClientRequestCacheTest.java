@@ -5,6 +5,7 @@ import it.polimi.ds.chat.ordering.api.OrderingService;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.client.ClientMessage;
+import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayDeque;
@@ -84,6 +85,58 @@ class BrokerClientRequestCacheTest {
         assertSame(ordering.proposals.get(0), ordering.proposals.get(2));
         assertNotSame(ordering.proposals.get(0), ordering.proposals.get(1));
         assertEquals(0, broker.cachedClientRequestCountForTesting());
+    }
+
+    @Test
+    void lateAppliedProposalCleansUncertainCacheWithoutASecondRetry() {
+        ScriptedOrderingService ordering = new ScriptedOrderingService(
+                false, false, false);
+        Broker broker = brokerWith(ordering);
+        ClientMessage first = new ClientMessage(
+                "alice", "client-a", 1L, "first");
+        ClientMessage second = new ClientMessage(
+                "alice", "client-a", 2L, "second");
+
+        assertFalse(broker.onClientMessage(first));
+        ChatReqMessage original = ordering.proposals.get(0);
+        assertEquals(1, broker.cachedClientRequestCountForTesting());
+        assertEquals(1, broker.getSendVectorClock().getTimeStamp(1));
+
+        // Until apply makes the outcome definitive, a retry must preserve the
+        // original local id and vector timestamp.
+        assertFalse(broker.onClientMessage(first));
+        assertSame(original, ordering.proposals.get(1));
+        assertEquals(1, broker.getSendVectorClock().getTimeStamp(1));
+        assertEquals(1, broker.cachedClientRequestCountForTesting());
+
+        assertFalse(broker.onClientMessage(second));
+        assertEquals(2, broker.cachedClientRequestCountForTesting());
+
+        broker.handleOrderedMessage(new ChatDeliverMessage(
+                1L,
+                original.getBrokerId(),
+                original.getUsername(),
+                original.getClientId(),
+                original.getClientSeq(),
+                original.getText(),
+                new VectorClock(original.getVectorClock())
+        ));
+
+        assertEquals(1, broker.cachedClientRequestCountForTesting(),
+                "late apply must clean only its completed proposal");
+
+        // Duplicate apply notification is harmless and cannot affect another
+        // proposal's still-uncertain metadata.
+        broker.handleOrderedMessage(new ChatDeliverMessage(
+                1L,
+                original.getBrokerId(),
+                original.getUsername(),
+                original.getClientId(),
+                original.getClientSeq(),
+                original.getText(),
+                new VectorClock(original.getVectorClock())
+        ));
+        assertEquals(1, broker.cachedClientRequestCountForTesting());
     }
 
     private static Broker brokerWith(OrderingService orderingService) {

@@ -21,6 +21,7 @@ public final class ClientConnectionGeneration implements AutoCloseable {
     private final ObjectInputStream input;
     private final ClientObjectWriter writer;
     private final AtomicBoolean closed = new AtomicBoolean(false);
+    private volatile Object inboundDispatchLock = new Object();
 
     ClientConnectionGeneration(long id,
                                String host,
@@ -58,6 +59,40 @@ public final class ClientConnectionGeneration implements AutoCloseable {
 
     public boolean isActive() {
         return !closed.get() && writer.isActive() && !socket.isClosed();
+    }
+
+    /**
+     * Dispatches one inbound event only if this generation is still active.
+     *
+     * <p>The lock is shared by all generations of the owning connection. The
+     * active check and the complete dispatch are therefore one linearized
+     * operation with respect to dispatch from replacement generations. Closing
+     * a generation only flips its atomic state and never waits for this gate:</p>
+     *
+     * <ul>
+     *   <li>if close wins before the check, the stale event is discarded;</li>
+     *   <li>if dispatch wins, a newer generation waits until it completes.</li>
+     * </ul>
+     *
+     * @return {@code true} if the event was accepted and dispatched
+     */
+    public boolean dispatchInboundIfActive(Runnable dispatch) {
+        Objects.requireNonNull(dispatch, "dispatch");
+        synchronized (inboundDispatchLock) {
+            if (!isActive()) {
+                return false;
+            }
+            dispatch.run();
+            return true;
+        }
+    }
+
+    /** Installs the connection-wide gate before this generation is published. */
+    void useInboundDispatchLock(Object inboundDispatchLock) {
+        this.inboundDispatchLock = Objects.requireNonNull(
+                inboundDispatchLock,
+                "inboundDispatchLock"
+        );
     }
 
     /**

@@ -25,6 +25,11 @@ public class ClientConnection {
     protected volatile int port;
 
     private final Object lifecycleLock = new Object();
+    // Serializes inbound dispatch across every generation owned by this
+    // connection. Generations still use their own streams and workers, but a
+    // replacement cannot make a message visible while an older generation is
+    // completing an already accepted inbound event.
+    private final Object inboundDispatchLock = new Object();
     private final AtomicLong nextGenerationId = new AtomicLong(0L);
     private final AtomicBoolean acceptingGenerations = new AtomicBoolean(true);
     private volatile ClientConnectionGeneration currentGeneration;
@@ -46,6 +51,7 @@ public class ClientConnection {
     protected final ClientConnectionGeneration openTo(String newHost, int newPort)
             throws IOException {
         ClientConnectionGeneration candidate = createGeneration(newHost, newPort);
+        candidate.useInboundDispatchLock(inboundDispatchLock);
 
         synchronized (lifecycleLock) {
             if (!acceptingGenerations.get()) {

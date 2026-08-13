@@ -1,16 +1,16 @@
 # Project Delivery Audit — stato pre-consegna
 
-Aggiornamento canonico: **2026-08-12**
-Commit di partenza e current `HEAD`: `ff5062d5f3be90485b65dfddf77e6fe31c029d45`;
-le correzioni mirate descritte in questo aggiornamento sono nel working tree per review.
-Branch: `master` (`origin/master`, ahead 0 / behind 0)
+Aggiornamento canonico: **2026-08-13**
+Baseline precedente agli ultimi fix mirati:
+`b5bf3857ea85be8f8d1758261cc428b0c5fba09b` (`master`).
 Ambiente: Windows 11 amd64, Oracle JDK 23.0.2, Apache Maven 3.9.15
 
 ## Stato corrente
 
-**Verdetto finale di consegna: NOT READY.** Il software e' code-ready rispetto ai
-finding implementabili: `CODE-01..10` e `CODE-12..17` sono `VERIFIED`; non restano
-P0/P1 software noti aperti. La consegna finale resta bloccata da:
+**Verdetto software: SOFTWARE READY — MANUAL LAN VALIDATION REQUIRED.**
+`CODE-01..10`, `CODE-12..17` e i finding finali software `F-01..03` sono
+`VERIFIED`; non restano P0/P1 software noti aperti. La consegna finale resta
+condizionata da:
 
 1. `CODE-11`, correttamente `BLOCKED_BY_DECISION`, per l'interpretazione docente del
    payload persistente nel log tecnico Raft;
@@ -27,8 +27,11 @@ P0/P1 software noti aperti. La consegna finale resta bloccata da:
 | CODE-11 | BLOCKED_BY_DECISION | cache retry applicativa rimossa dopo commit; resta il log Raft persistente con payload, senza API/history/replay client-visible |
 | CODE-12..13 | VERIFIED | fan-out bounded non bloccante; readiness, re-registration e record Directory atomici |
 | CODE-14..17 | VERIFIED | replica monotona, timer generation-safe, lifecycle transazionale, vector clock per ready message |
+| F-01 | VERIFIED | dispatch inbound linearizzato fra connection generation; race stale receiver coperta deterministicamente |
+| F-02 | VERIFIED | apply committed rimuove anche la cache di una proposal scaduta e mai ritentata localmente |
+| F-03 | VERIFIED | bootstrap Broker/Directory bounded: connect 1000 ms, handshake/response 2000 ms |
 
-La verifica automatica finale e' `mvn clean test`: **283 test, 0 failure, 0
+La verifica automatica finale e' `mvn clean test`: **290 test, 0 failure, 0
 error, 0 skipped**. Include un test applicativo con Directory, tre broker
 `LOCAL_TCP`, socket client reali, forwarding da follower, no-history, ACK, no echo,
 leader failure, rielezione e continuita' delle sequenze. I sei test legacy JUnit 4
@@ -60,8 +63,9 @@ e root cause storiche, non un backlog parallelo.
 > di recovery/retention e' richiesto per una replicated state machine Raft?
 
 La cache applicativa `cachedClientRequests` conserva la stessa request e i relativi
-metadati vector-clock durante retry falliti/non confermati, ma elimina atomicamente
-l'entry dopo la conferma definitiva di commit. La retention ancora aperta in
+metadati vector-clock durante retry falliti/non confermati, ma elimina l'entry sia
+dopo la conferma sincrona sia quando la command committed viene applicata localmente,
+incluso il caso di commit tardivo dopo timeout. La retention ancora aperta in
 `CODE-11` riguarda quindi il payload nel log tecnico Raft; non esistono API di
 history, offline inbox o replay verso i client.
 

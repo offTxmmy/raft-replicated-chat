@@ -10,6 +10,7 @@ import it.polimi.ds.chat.protocol.directory.GetClusterResponseMessage;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -34,6 +35,9 @@ import java.util.Map;
  * RPC via TCP unicast so multiple brokers can run on one host.
  */
 public class BrokerMain {
+
+    private static final int DIRECTORY_CONNECT_TIMEOUT_MS = 1_000;
+    private static final int DIRECTORY_RESPONSE_TIMEOUT_MS = 2_000;
 
     public static void main(String[] args) {
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: RAFT BROKER---");
@@ -161,28 +165,57 @@ public class BrokerMain {
             int nodeId,
             String directoryHost,
             int directoryPort) throws IOException {
+        return fetchVotersFromDirectory(
+                nodeId,
+                directoryHost,
+                directoryPort,
+                DIRECTORY_CONNECT_TIMEOUT_MS,
+                DIRECTORY_RESPONSE_TIMEOUT_MS
+        );
+    }
+
+    static Map<Integer, RaftPeerEndpoint> fetchVotersFromDirectory(
+            int nodeId,
+            String directoryHost,
+            int directoryPort,
+            int connectTimeoutMs,
+            int responseTimeoutMs) throws IOException {
+        if (connectTimeoutMs <= 0 || responseTimeoutMs <= 0) {
+            throw new IllegalArgumentException("Directory timeouts must be positive");
+        }
         System.out.println("Fetching cluster voters from Directory Service at "
                 + directoryHost + ":" + directoryPort + " for nodeId=" + nodeId + "...");
 
-        try (Socket socket = new Socket(directoryHost, directoryPort);
-             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream())) {
+        try (Socket socket = new Socket()) {
+            socket.connect(
+                    new InetSocketAddress(directoryHost, directoryPort),
+                    connectTimeoutMs
+            );
+            socket.setSoTimeout(responseTimeoutMs);
 
-            out.writeObject(new GetClusterRequestMessage(nodeId));
-            out.flush();
+            try (ObjectOutputStream out =
+                         new ObjectOutputStream(socket.getOutputStream())) {
 
-            try (ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
-                Object obj = in.readObject();
-                if (!(obj instanceof GetClusterResponseMessage resp)) {
-                    throw new IOException("Unexpected response from Directory Service: " + obj);
+                out.writeObject(new GetClusterRequestMessage(nodeId));
+                out.flush();
+
+                try (ObjectInputStream in =
+                             new ObjectInputStream(socket.getInputStream())) {
+                    Object obj = in.readObject();
+                    if (!(obj instanceof GetClusterResponseMessage resp)) {
+                        throw new IOException("Unexpected response from Directory Service: " + obj);
+                    }
+
+                    if (!resp.isOk() || resp.getVoters() == null
+                            || resp.getVoters().isEmpty()) {
+                        throw new IOException("Directory Service returned no cluster info for nodeId="
+                                + nodeId + " (resp=" + resp + ")");
+                    }
+
+                    System.out.println("Received voters from Directory Service: "
+                            + resp.getVoters().keySet());
+                    return resp.getVoters();
                 }
-
-                if (!resp.isOk() || resp.getVoters() == null || resp.getVoters().isEmpty()) {
-                    throw new IOException("Directory Service returned no cluster info for nodeId=" + nodeId
-                            + " (resp=" + resp + ")");
-                }
-
-                System.out.println("Received voters from Directory Service: " + resp.getVoters().keySet());
-                return resp.getVoters();
             }
         } catch (ClassNotFoundException e) {
             throw new IOException("Invalid cluster response from Directory Service", e);

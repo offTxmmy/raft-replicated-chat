@@ -1,8 +1,8 @@
 # Repository compliance baseline
 
-Aggiornata con verifica del **2026-08-12**, current `HEAD`
-`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
-nel working tree per review.
+Aggiornata con verifica del **2026-08-13**.
+Baseline precedente agli ultimi fix mirati:
+`b5bf3857ea85be8f8d1758261cc428b0c5fba09b` (`master`).
 
 Questo documento non sostituisce la consegna ufficiale. La gerarchia usata e':
 
@@ -204,8 +204,9 @@ lo scenario dimostrativo `TEST-07/MAN-04` con catena causale e invii concorrenti
 
 Il codice persiste term, voto, log con payload e commit progress. La cache applicativa
 di retry riusa request/vector clock finche' il commit non e' confermato e rimuove
-l'entry dopo `propose == true`; non costituisce piu' retention indefinita delle
-proposal concluse. Questa e' una feature
+l'entry dopo `propose == true` oppure al successivo apply locale della command
+committed. Anche un commit tardivo dopo timeout conclude quindi la retention
+applicativa. Questa e' una feature
 implementata, non automaticamente una garanzia richiesta. Lo scope corrente di
 consegna deve essere descritto come **crash-stop** finche' `OPT-01..04` non sono
 promossi e verificati. Un nodo crashato non deve essere riavviato con la stessa
@@ -228,13 +229,13 @@ no-history; l'interpretazione dello storage tecnico resta
 | P2 cross-broker client | Implementato e testato same-host | E2E socket reale con client su follower differenti e forwarding al leader. |
 | P3 stesso ordine | Implementato e testato same-host | Sequence densa, Raft total order, stream solo chat; E2E prima/dopo rielezione. |
 | P4 causalita' | Implementato e testato same-host | FIFO single-in-flight estende program order; l'E2E socket prova `m1 -> ricezione -> m2`, due osservatori e invii concorrenti nello stesso total order. `MAN-04` resta la ripetizione multi-process/LAN. |
-| P5 no storage/connected-only | Connected-only verificato; decisione storage aperta | Cache retry applicativa eliminata dopo commit, JOIN fence e nessun replay; `CODE-11` resta sul log tecnico ed e' bloccato dal docente. |
-| F1 failure client/broker/link | Implementato nello scope crash-stop scelto | Leader failure E2E e multi-process locale, retry/dedup, reconnect generation-safe e Directory restart; follower/link e LAN fisica restano manuali. |
+| P5 no storage/connected-only | Connected-only verificato; decisione storage aperta | Cache retry applicativa eliminata anche dopo late commit, JOIN fence e nessun replay; `CODE-11` resta sul log tecnico ed e' bloccato dal docente. |
+| F1 failure client/broker/link | Implementato nello scope crash-stop scelto | Leader failure E2E e multi-process locale, retry/dedup, dispatch inbound generation-safe e Directory restart; follower/link e LAN fisica restano manuali. |
 | F2 no partition/Byzantine | Correttamente fuori scope | Non va presentato come feature mancante. |
 
-Verdetto: **NOT READY per la consegna finale, code-ready per review**. Non restano
-P0/P1 software implementabili noti; mancano la decisione `CODE-11`, la prova fisica
-`LAN-01/LAN-02` e gli ultimi scenari/runbook manuali del tracker.
+Verdetto: **SOFTWARE READY — MANUAL LAN VALIDATION REQUIRED**. Non restano P0/P1
+software implementabili noti; rimangono la decisione `CODE-11`, la prova fisica
+`LAN-01/LAN-02` e gli scenari/runbook manuali del tracker.
 
 ## 8. Evidenza test verificata
 
@@ -242,7 +243,7 @@ Ambiente: Windows 11, Oracle JDK 23.0.2, Maven 3.9.15.
 
 ```text
 mvn clean test
-Tests run: 274, Failures: 0, Errors: 0, Skipped: 0
+Tests run: 290, Failures: 0, Errors: 0, Skipped: 0
 BUILD SUCCESS
 ```
 

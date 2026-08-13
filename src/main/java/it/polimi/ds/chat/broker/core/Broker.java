@@ -551,6 +551,16 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param chatDeliver message delivered by the ordering service (contains global seq)
      */
     public void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
+        if (chatDeliver.hasClientIdentity()) {
+            // A state-machine delivery is definitive proof that this logical
+            // proposal committed. This also cleans an uncertain attempt whose
+            // synchronous propose() call timed out and was never retried here.
+            cachedClientRequests.remove(clientProposalKey(
+                    chatDeliver.getClientId(),
+                    chatDeliver.getClientSeq()
+            ));
+        }
+
         long incomingSeq = chatDeliver.getSeq();
         long expectedSeq = holdBackQueue.getExpectedSeq();
 
@@ -588,7 +598,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * creates a local message id, and stores the resulting proposal in a local cache.
      * Retries with the same client id and sequence reuse the cached request so the
      * vector clock is not incremented again. The entry is retained across failed
-     * attempts and removed only after the ordering service confirms commitment.
+     * attempts and removed after either synchronous commit confirmation or the
+     * corresponding committed command is applied locally.
      *
      * @param username sender username
      * @param clientId stable client process id

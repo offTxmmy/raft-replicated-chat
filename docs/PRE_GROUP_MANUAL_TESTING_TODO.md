@@ -1,12 +1,11 @@
 # Tracker canonico pre-consegna
 
-Audit aggiornato: **2026-08-12**
+Audit aggiornato: **2026-08-13**
 
-Commit di partenza e current `HEAD` ispezionato:
-`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
-nel working tree per review.
+Baseline precedente agli ultimi fix mirati:
+`b5bf3857ea85be8f8d1758261cc428b0c5fba09b` (`master`).
 
-Verdetto corrente: **NOT READY**
+Verdetto corrente: **SOFTWARE READY — MANUAL LAN VALIDATION REQUIRED**
 
 Questo e' il ledger dettagliato del tracker canonico esposto da
 `PROJECT_DELIVERY_AUDIT.md`. Gli altri documenti sono baseline normative,
@@ -34,7 +33,9 @@ su due notebook non e' `VERIFIED`.
 - Baseline pre-modifica su `ff5062d`: `mvn clean test` ha eseguito **274 test**, 0
   failure, 0 error, 0 skipped. Il working tree iniziale conteneva soltanto
   `?? raft-data/`, preesistente e intenzionalmente non toccato.
-- Suite finale: `mvn clean test` esegue **283 test**, 0 failure, 0 error, 0 skipped.
+- Suite finale: `mvn clean test` esegue **290 test**, 0 failure, 0 error, 0 skipped.
+- I finding finali `F-01..03` sono verificati: dispatch inbound serializzato fra
+  generation, cleanup della cache su late commit e bootstrap Broker/Directory bounded.
 - I sei test JUnit 4 prima esclusi sono migrati a Jupiter e vengono ora scoperti dalla
   normale suite Maven; la dipendenza JUnit 4 compile-scope e' stata rimossa.
 - Il nuovo `ReplicatedChatApplicationIntegrationTest` attraversa il vero percorso
@@ -287,8 +288,9 @@ su due notebook non e' `VERIFIED`.
   history API, offline inbox o replay volontario; il JOIN fence impedisce anche la
   history accidentale durante il catch-up. `cachedClientRequests` mantiene request e
   vector clock soltanto per retry falliti/non confermati e rimuove l'entry dopo la
-  conferma definitiva di commit. La retention applicativa delle proposal concluse e'
-  quindi chiusa; resta quella del log tecnico. Rimuovere il payload senza un modello
+  conferma sincrona oppure quando la command committed viene applicata localmente.
+  Anche il late commit senza retry viene ripulito; resta la retention del log tecnico.
+  Rimuovere il payload senza un modello
   alternativo romperebbe Raft/recovery e non viene fatto senza decisione esterna.
 - **Domanda docente:** “Nel requisito *brokers do not store messages*, e' ammesso che
   il log tecnico persistente di Raft contenga temporaneamente il payload completo per
@@ -668,11 +670,11 @@ su due notebook non e' `VERIFIED`.
 - **Categoria:** REQUIRED BY SPECIFICATION
 - **Priorita':** P1
 - **Area/file:** firewall/AP/porte/config
-- **Problema:** UDP e IP pubblicizzati sono stati provati solo localmente; CODE-10
-  impedisce oggi il runbook single-Directory corretto.
+- **Problema:** UDP e IP pubblicizzati sono stati provati solo localmente; CODE-10 e'
+  chiuso in codice, ma il runbook single-Directory non e' ancora verificato cross-host.
 - **Impatto:** broadcast filtrato da firewall/AP isolation o endpoint errati possono
   impedire election/heartbeat durante la demo.
-- **Azione:** dopo CODE-10, scrivere comandi esatti senza argomenti inventati; stesso
+- **Azione:** usare i comandi esatti con lo stesso
   voter CSV, `clusterId` e porta UDP comune. Aprire TCP Directory `60000/60001`, RPC
   e client port; aprire UDP Raft. Non dipendere dalla discovery ausiliaria.
 - **Verifica:** capture/log prova RequestVote ed heartbeat UDP fra notebook; payload

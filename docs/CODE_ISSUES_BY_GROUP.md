@@ -2,19 +2,18 @@
 
 Failure analysis originale: **2026-08-11**, commit
 `c77dbb981a3db837c50ef17bf9bd279278c04998`. Verifica aggiornata:
-**2026-08-12**, current `HEAD`
-`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
-nel working tree per review.
+**2026-08-13**. Baseline precedente agli ultimi fix mirati:
+`b5bf3857ea85be8f8d1758261cc428b0c5fba09b` (`master`).
 
 Questo documento conserva evidenze, execution trace e ragionamento tecnico. Non e'
 un secondo backlog: priorita', stato, azione e verifica ufficiali sono esclusivamente
 nel tracker canonico [`PRE_GROUP_MANUAL_TESTING_TODO.md`](PRE_GROUP_MANUAL_TESTING_TODO.md).
 
 > **Stato corrente:** le failure trace sotto restano utili come root cause storiche,
-> ma `CODE-01..10` e `CODE-12..17` sono stati corretti e verificati. `CODE-11` resta
-> `BLOCKED_BY_DECISION`: il log tecnico Raft conserva payload per replica/recovery,
-> mentre la cache retry applicativa elimina le proposal dopo commit e non esistono
-> history API o replay client-visible. Nessun altro CODE e' aperto.
+> ma `CODE-01..10`, `CODE-12..17` e i finding finali `F-01..03` sono stati corretti
+> e verificati. `CODE-11` resta `BLOCKED_BY_DECISION`: il log tecnico Raft conserva
+> payload per replica/recovery, mentre la cache retry applicativa elimina le proposal
+> anche dopo late commit e non esistono history API o replay client-visible.
 
 ## 1. Percorso production ricostruito
 
@@ -182,7 +181,7 @@ Il fatto verificato e' duplice:
 
 - non esistono history API, offline inbox o replay intenzionale;
 - `cachedClientRequests` conserva request/vector clock durante retry falliti o non
-  confermati, ma elimina l'entry dopo la conferma definitiva di commit;
+  confermati, ma elimina l'entry dopo conferma sincrona o apply di un late commit;
 - `FileRaftPersistence` conserva il `ChatCommand`, incluso il testo, nel log tecnico.
 
 La specifica ufficiale non chiarisce nel repository se lo storage interno necessario
@@ -278,20 +277,8 @@ Le raccomandazioni dei documenti precedenti sono state ri-verificate:
 
 ## 8. Copertura test reale
 
-`mvn test` esegue 186 test verdi. Sei metodi JUnit 4 in
-`VectorClockTest`, `VectorClockIntegrationTest` e
-`VectorClockMultiBrokerIntegrationTest` non sono scoperti; l'esecuzione diretta e'
-`OK (6 tests)`. Anche dopo la loro inclusione, i due test chiamati integration
-iniettano delivery in-memory e non attraversano socket/Raft/client.
-
-Non esistono test completi per:
-
-- Directory -> ClientMain -> Broker -> Raft -> HBQ -> ClientMain;
-- prima chat dopo no-op e chat dopo rielezione;
-- leader crash con maggioranza viva e client attivi;
-- causal chain, concorrenza e FIFO sotto retry reali;
-- connected-only/no-history;
-- stream writer concorrenti, reconnect e Directory lifecycle;
-- due notebook e broadcast LAN fisico.
-
-I test mancanti e il loro stato sono `TEST-01..08` nel tracker canonico.
+`mvn clean test` esegue 290 test verdi. La suite include i casi Jupiter prima
+esclusi, test deterministici per dispatch stale fra generation, late-commit cleanup e
+timeout di connect/handshake/response Broker->Directory, oltre al percorso applicativo
+con Directory, tre broker, Raft, HBQ e socket client reali. Restano manual-only la
+distribuzione multi-process fra due notebook, firewall/AP e broadcast HYBRID fisico.
