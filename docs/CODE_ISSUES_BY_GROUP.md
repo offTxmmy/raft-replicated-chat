@@ -3,8 +3,8 @@
 Failure analysis originale: **2026-08-11**, commit
 `c77dbb981a3db837c50ef17bf9bd279278c04998`. Verifica aggiornata:
 **2026-08-12**, current `HEAD`
-`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832` con modifiche non committate nel
-working tree.
+`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
+nel working tree per review.
 
 Questo documento conserva evidenze, execution trace e ragionamento tecnico. Non e'
 un secondo backlog: priorita', stato, azione e verifica ufficiali sono esclusivamente
@@ -13,7 +13,8 @@ nel tracker canonico [`PRE_GROUP_MANUAL_TESTING_TODO.md`](PRE_GROUP_MANUAL_TESTI
 > **Stato corrente:** le failure trace sotto restano utili come root cause storiche,
 > ma `CODE-01..10` e `CODE-12..17` sono stati corretti e verificati. `CODE-11` resta
 > `BLOCKED_BY_DECISION`: il log tecnico Raft conserva payload per replica/recovery,
-> senza history API o replay client-visible. Nessun altro CODE e' aperto.
+> mentre la cache retry applicativa elimina le proposal dopo commit e non esistono
+> history API o replay client-visible. Nessun altro CODE e' aperto.
 
 ## 1. Percorso production ricostruito
 
@@ -180,12 +181,16 @@ endpoint unico e propagarlo a tutto il broker lifecycle.
 Il fatto verificato e' duplice:
 
 - non esistono history API, offline inbox o replay intenzionale;
+- `cachedClientRequests` conserva request/vector clock durante retry falliti o non
+  confermati, ma elimina l'entry dopo la conferma definitiva di commit;
 - `FileRaftPersistence` conserva il `ChatCommand`, incluso il testo, nel log tecnico.
 
 La specifica ufficiale non chiarisce nel repository se lo storage interno necessario
 a un Raft restart-capable sia ammesso. Non si deve trasformare l'assenza di history in
 una concessione implicita: serve una decisione del docente o uno scope crash-stop
-coerente. Il tracker mantiene CODE-11 come decisione P1, non come P0 automatico.
+coerente. La cache applicativa non trattiene piu' indefinitamente le proposal concluse;
+la decisione residua riguarda il log tecnico Raft. Il tracker mantiene CODE-11 come
+decisione P1, non come P0 automatico.
 
 ## 4. Finding P2 e limiti di robustezza
 

@@ -3,7 +3,8 @@
 Audit aggiornato: **2026-08-12**
 
 Commit di partenza e current `HEAD` ispezionato:
-`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832`
+`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
+nel working tree per review.
 
 Verdetto corrente: **NOT READY**
 
@@ -30,12 +31,10 @@ su due notebook non e' `VERIFIED`.
 
 ## Evidenza corrente
 
-- Baseline pre-modifica su `e639cf7`: `mvn clean test` ha eseguito **209 test** con
-  **1 failure temporale** in
-  `RaftOrderingServiceIntegrationTest.retryAfterLeaderChangeShouldNotDuplicateExistingProposal`;
-  il rerun isolato e' passato. Il working tree iniziale conteneva soltanto
+- Baseline pre-modifica su `ff5062d`: `mvn clean test` ha eseguito **274 test**, 0
+  failure, 0 error, 0 skipped. Il working tree iniziale conteneva soltanto
   `?? raft-data/`, preesistente e intenzionalmente non toccato.
-- Suite finale: `mvn clean test` esegue **274 test**, 0 failure, 0 error, 0 skipped.
+- Suite finale: `mvn clean test` esegue **283 test**, 0 failure, 0 error, 0 skipped.
 - I sei test JUnit 4 prima esclusi sono migrati a Jupiter e vengono ora scoperti dalla
   normale suite Maven; la dipendenza JUnit 4 compile-scope e' stata rimossa.
 - Il nuovo `ReplicatedChatApplicationIntegrationTest` attraversa il vero percorso
@@ -286,7 +285,10 @@ su due notebook non e' `VERIFIED`.
 - **Analisi 2026-08-12:** `FileRaftPersistence` conserva il `ChatCommand` completo
   per log matching, replica e recovery della replicated state machine. Non esistono
   history API, offline inbox o replay volontario; il JOIN fence impedisce anche la
-  history accidentale durante il catch-up. Rimuovere il payload senza un modello
+  history accidentale durante il catch-up. `cachedClientRequests` mantiene request e
+  vector clock soltanto per retry falliti/non confermati e rimuove l'entry dopo la
+  conferma definitiva di commit. La retention applicativa delle proposal concluse e'
+  quindi chiusa; resta quella del log tecnico. Rimuovere il payload senza un modello
   alternativo romperebbe Raft/recovery e non viene fatto senza decisione esterna.
 - **Domanda docente:** “Nel requisito *brokers do not store messages*, e' ammesso che
   il log tecnico persistente di Raft contenga temporaneamente il payload completo per
@@ -773,10 +775,11 @@ obbligatorie.
 
 - **Categoria:** OPTIONAL / PRODUCTION HARDENING
 - **Priorita':** P3
-- **Area/file:** log, cache broker/dedup, executor/socket
-- **Problema:** log, key cache, object-stream handle table e alcuni pool crescono senza
-  bound; AppendEntries invia l'intero suffisso e il commit progress puo' essere
-  fsyncato piu' volte per avanzamento.
+- **Area/file:** log, cache dedup Raft, executor/socket
+- **Problema:** log, dedup key cache, object-stream handle table e alcuni pool crescono
+  senza bound; la cache retry applicativa e' invece rimossa dopo commit e conserva
+  solo proposal fallite/non confermate. AppendEntries invia l'intero suffisso e il
+  commit progress puo' essere fsyncato piu' volte per avanzamento.
 - **Impatto:** memoria, storage e catch-up non scalano su esecuzioni lunghe.
 - **Azione:** limiti, `ObjectOutputStream.reset`/codec idoneo, batching, snapshot,
   InstallSnapshot e retention coerente con P5; misurare prima di ottimizzare fsync.

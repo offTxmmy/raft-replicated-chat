@@ -23,7 +23,8 @@ public interface OrderingService {
     * to all registered callbacks once committed.
     *
     * @param request The chat request message to be ordered
-    * @return true if the proposal was accepted by this ordering service, false otherwise
+    * @return true only after the proposal is definitively committed; false if it
+    *         was rejected, failed, or timed out before commitment was confirmed
     */
     boolean propose(ChatReqMessage request);
 

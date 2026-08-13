@@ -3,6 +3,7 @@ package it.polimi.ds.chat.client;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -129,6 +130,45 @@ class ClientReconnectManagerTest {
         assertTrue(secondAttemptSeen.await(1L, TimeUnit.SECONDS));
         assertTrue(manager.awaitIdle(1_000L));
         assertEquals(2, attempts.get());
+        manager.shutdown();
+    }
+
+    @Test
+    void directoryTimeoutIsRetriedByTheExistingReconnectWorker() throws Exception {
+        AtomicInteger attempts = new AtomicInteger();
+        CountDownLatch firstAttempt = new CountDownLatch(1);
+        CountDownLatch secondAttempt = new CountDownLatch(1);
+        BlockingQueue<Thread> workerThreads = new LinkedBlockingQueue<>();
+        ControlledWaiter waiter = new ControlledWaiter();
+        ClientReconnectManager manager = new ClientReconnectManager(
+                () -> {
+                    workerThreads.add(Thread.currentThread());
+                    int attempt = attempts.incrementAndGet();
+                    if (attempt == 1) {
+                        firstAttempt.countDown();
+                        throw new SocketTimeoutException("Directory did not respond");
+                    }
+                    secondAttempt.countDown();
+                },
+                10L,
+                20L,
+                waiter
+        );
+
+        assertTrue(manager.requestReconnect());
+        assertTrue(firstAttempt.await(1L, TimeUnit.SECONDS));
+        ControlledWaiter.WaitCall backoff = waiter.next();
+        assertEquals(10L, backoff.delayMillis);
+        backoff.release.countDown();
+
+        assertTrue(secondAttempt.await(1L, TimeUnit.SECONDS));
+        assertTrue(manager.awaitIdle(1_000L));
+        assertEquals(2, attempts.get());
+        Thread firstWorker = workerThreads.poll(1L, TimeUnit.SECONDS);
+        Thread secondWorker = workerThreads.poll(1L, TimeUnit.SECONDS);
+        assertNotNull(firstWorker);
+        assertEquals(firstWorker, secondWorker,
+                "a Directory timeout must not create a second reconnect worker");
         manager.shutdown();
     }
 

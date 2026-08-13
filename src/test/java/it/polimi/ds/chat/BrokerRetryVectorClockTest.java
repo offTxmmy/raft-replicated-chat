@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
@@ -24,11 +25,20 @@ public class BrokerRetryVectorClockTest {
 
     private static final class CapturingOrderingService implements OrderingService {
         private final List<ChatReqMessage> proposals = new ArrayList<>();
+        private final boolean accepted;
+
+        private CapturingOrderingService() {
+            this(true);
+        }
+
+        private CapturingOrderingService(boolean accepted) {
+            this.accepted = accepted;
+        }
 
         @Override
         public boolean propose(ChatReqMessage request) {
             proposals.add(request);
-            return true;
+            return accepted;
         }
 
         @Override
@@ -115,18 +125,18 @@ public class BrokerRetryVectorClockTest {
     }
 
     @Test
-    public void retryWithSameTimestampReusesTheSameChatRequest() {
+    public void retriesBeforeSuccessReuseTheSameChatRequest() {
         // The broker should treat retries for the same logical client message as one proposal.
         // This keeps the send vector clock stable and prevents duplicate causal increments.
         TestBroker broker = new TestBroker(TestConfigs.raftBrokerConfig(1, 5000));
-        CapturingOrderingService orderingService = new CapturingOrderingService();
+        CapturingOrderingService orderingService = new CapturingOrderingService(false);
         broker.setOrderingService(orderingService);
 
         long timestamp = 123456789L;
         ClientMessage message = new ClientMessage("alice", "hello", timestamp);
 
-        broker.onClientMessage(message);
-        broker.onClientMessage(message);
+        assertFalse(broker.onClientMessage(message));
+        assertFalse(broker.onClientMessage(message));
 
         assertEquals(2, orderingService.proposals.size());
         assertSame(orderingService.proposals.get(0), orderingService.proposals.get(1));

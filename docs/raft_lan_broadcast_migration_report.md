@@ -2,8 +2,8 @@
 
 Analisi originale: **2026-08-11**, commit
 `c77dbb981a3db837c50ef17bf9bd279278c04998`. Stato verificato il **2026-08-12** su
-`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832` con le modifiche non committate del
-tracker pre-consegna.
+`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
+nel working tree per review.
 
 Questo documento spiega la scelta del trasporto. Non e' un tracker: azioni e gate
 sono in [`PRE_GROUP_MANUAL_TESTING_TODO.md`](PRE_GROUP_MANUAL_TESTING_TODO.md).

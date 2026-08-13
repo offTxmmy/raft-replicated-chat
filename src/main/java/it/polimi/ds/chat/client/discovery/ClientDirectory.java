@@ -6,6 +6,7 @@ import it.polimi.ds.chat.protocol.directory.GetBrokerResponseMessage;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
+import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.Collections;
 import java.util.Set;
@@ -15,8 +16,14 @@ import java.util.Set;
  */
 public class ClientDirectory {
 
+    // A Directory lookup is one bounded attempt. ClientReconnectManager owns retry.
+    private static final int CONNECT_TIMEOUT_MS = 1_000;
+    private static final int RESPONSE_TIMEOUT_MS = 2_000;
+
     private final String directoryHost;
     private final int directoryPort;
+    private final int connectTimeoutMs;
+    private final int responseTimeoutMs;
 
     /**
      * Constructs a ClientDirectory with the specified directory host and port.
@@ -25,8 +32,25 @@ public class ClientDirectory {
      * @param directoryPort the port of the Directory Service
      */
     public ClientDirectory(String directoryHost, int directoryPort) {
+        this(
+                directoryHost,
+                directoryPort,
+                CONNECT_TIMEOUT_MS,
+                RESPONSE_TIMEOUT_MS
+        );
+    }
+
+    ClientDirectory(String directoryHost,
+                    int directoryPort,
+                    int connectTimeoutMs,
+                    int responseTimeoutMs) {
+        if (connectTimeoutMs <= 0 || responseTimeoutMs <= 0) {
+            throw new IllegalArgumentException("Directory timeouts must be positive");
+        }
         this.directoryHost = directoryHost;
         this.directoryPort = directoryPort;
+        this.connectTimeoutMs = connectTimeoutMs;
+        this.responseTimeoutMs = responseTimeoutMs;
     }
 
     /**
@@ -46,10 +70,16 @@ public class ClientDirectory {
         //System.out.println("[DEBUG] DirectoryClient.getBestBroker() - inizio");
         //System.out.println("[DEBUG] Mi collego alla directory " + directoryHost + ":" + directoryPort);
 
-        try (Socket socket = new Socket(directoryHost, directoryPort)) {
+        try (Socket socket = new Socket()) {
+            socket.connect(
+                    new InetSocketAddress(directoryHost, directoryPort),
+                    connectTimeoutMs
+            );
+            socket.setSoTimeout(responseTimeoutMs);
             //System.out.println("[DEBUG] Socket verso directory aperta");
 
             ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
+            out.flush();
             //System.out.println("[DEBUG] ObjectOutputStream verso directory creato");
 
             ObjectInputStream in = new ObjectInputStream(socket.getInputStream());

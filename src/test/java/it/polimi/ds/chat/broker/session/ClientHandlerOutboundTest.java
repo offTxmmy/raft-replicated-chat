@@ -5,6 +5,7 @@ import it.polimi.ds.chat.broker.core.Broker;
 import it.polimi.ds.chat.ordering.api.OrderingService;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
+import it.polimi.ds.chat.protocol.client.ClientAckMessages;
 import it.polimi.ds.chat.protocol.client.ClientJoinMessage;
 import it.polimi.ds.chat.protocol.client.ClientQuitMessage;
 import org.junit.jupiter.api.Test;
@@ -28,6 +29,8 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -122,6 +125,43 @@ class ClientHandlerOutboundTest {
         assertEquals(0, broker.chatDeliveryCount.get(),
                 "JOIN/LEAVE are session control, not globally ordered chat MSG records");
         assertTrue(handler.isSessionClosed());
+    }
+
+    @Test
+    void retryCleanupPreservesCommitAcksAndClientProgramOrder() throws Exception {
+        Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000));
+        ScriptedOrderingService orderingService =
+                new ScriptedOrderingService(false, true, true);
+        broker.setOrderingService(orderingService);
+        ClientHandler handler = new ClientHandler(new Socket(), broker);
+        RecordingObjectOutputStream output = new RecordingObjectOutputStream(3);
+        handler.startOutboundWorker(output);
+
+        handler.handleCommand(ClientJoinMessage.joinCommand("alice", "client-a"));
+        handler.handleCommand("MSG client-a 1 first");
+        handler.handleCommand("MSG client-a 1 first");
+        handler.handleCommand("MSG client-a 2 second");
+
+        assertTrue(output.allWritten.await(1, TimeUnit.SECONDS));
+        assertEquals(
+                List.of(
+                        "Welcome alice",
+                        ClientAckMessages.buildAck("client-a", 1L),
+                        ClientAckMessages.buildAck("client-a", 2L)),
+                output.objects);
+        assertEquals(
+                List.of(1L, 1L, 2L),
+                orderingService.proposals.stream()
+                        .map(ChatReqMessage::getClientSeq)
+                        .toList());
+        assertSame(
+                orderingService.proposals.get(0),
+                orderingService.proposals.get(1));
+        assertNotSame(
+                orderingService.proposals.get(1),
+                orderingService.proposals.get(2));
+
+        handler.closeSession();
     }
 
     private static class RecordingObjectOutputStream extends ObjectOutputStream {
@@ -230,6 +270,23 @@ class ClientHandlerOutboundTest {
         @Override
         public int getLeaderId() {
             return 1;
+        }
+    }
+
+    private static final class ScriptedOrderingService
+            extends ImmediateOrderingService {
+        private final List<Boolean> outcomes;
+        private final List<ChatReqMessage> proposals = new ArrayList<>();
+        private int nextOutcome;
+
+        private ScriptedOrderingService(Boolean... outcomes) {
+            this.outcomes = List.of(outcomes);
+        }
+
+        @Override
+        public boolean propose(ChatReqMessage request) {
+            proposals.add(request);
+            return outcomes.get(nextOutcome++);
         }
     }
 

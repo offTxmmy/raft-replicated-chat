@@ -527,7 +527,14 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Propose to ordering service.
         boolean accepted = orderingService.propose(chatReq);
 
-        if (!accepted) {
+        if (accepted) {
+            // OrderingService true is a definitive commit confirmation. Remove
+            // only the exact cached instance used by this attempt: a delayed
+            // concurrent confirmation must not evict a newer retry entry.
+            cachedClientRequests.remove(
+                    clientProposalKey(message.getClientId(), message.getClientSeq()),
+                    chatReq);
+        } else {
             System.err.println("[Broker " + brokerId + "] Proposal rejected for "
                     + message.getUsername()
                     + ". Known leader = " + orderingService.getLeaderId());
@@ -580,7 +587,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * The first request for a stable client id/sequence increments the broker send vector clock,
      * creates a local message id, and stores the resulting proposal in a local cache.
      * Retries with the same client id and sequence reuse the cached request so the
-     * vector clock is not incremented again.
+     * vector clock is not incremented again. The entry is retained across failed
+     * attempts and removed only after the ordering service confirms commitment.
      *
      * @param username sender username
      * @param clientId stable client process id
@@ -606,6 +614,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     private static String clientProposalKey(String clientId, long clientSeq) {
         return clientId + ":" + clientSeq;
+    }
+
+    int cachedClientRequestCountForTesting() {
+        return cachedClientRequests.size();
     }
 
     /** Starts one reconnecting Directory session owner for this broker. */

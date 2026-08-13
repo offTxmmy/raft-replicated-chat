@@ -1,8 +1,8 @@
 # Repository compliance baseline
 
 Aggiornata con verifica del **2026-08-12**, current `HEAD`
-`e639cf7c8e20b400555b5f4ec096cc9c5ccfb832` e working tree candidato non
-committato.
+`ff5062d5f3be90485b65dfddf77e6fe31c029d45`; le correzioni mirate correnti sono
+nel working tree per review.
 
 Questo documento non sostituisce la consegna ufficiale. La gerarchia usata e':
 
@@ -202,15 +202,19 @@ lo scenario dimostrativo `TEST-07/MAN-04` con catena causale e invii concorrenti
 
 ## 6. Storage e scope di recovery
 
-Il codice persiste term, voto, log con payload e commit progress. Questa e' una feature
+Il codice persiste term, voto, log con payload e commit progress. La cache applicativa
+di retry riusa request/vector clock finche' il commit non e' confermato e rimuove
+l'entry dopo `propose == true`; non costituisce piu' retention indefinita delle
+proposal concluse. Questa e' una feature
 implementata, non automaticamente una garanzia richiesta. Lo scope corrente di
 consegna deve essere descritto come **crash-stop** finche' `OPT-01..04` non sono
 promossi e verificati. Un nodo crashato non deve essere riavviato con la stessa
 identita' nella stessa esecuzione se si fa affidamento su questo scope.
 
-Separatamente, P5 resta aperto: il docente deve confermare se il log tecnico interno
-persistente e non esposto ai client sia ammesso. La parte connected-only e' chiusa dal
-JOIN fence e dai test no-history; l'interpretazione dello storage tecnico resta
+Separatamente, P5 resta aperto: il docente deve confermare se il log tecnico interno,
+persistente e non esposto ai client, sia ammesso. La retention residua riguarda
+soltanto tale log. La parte connected-only e' chiusa dal JOIN fence e dai test
+no-history; l'interpretazione dello storage tecnico resta
 `CODE-11 BLOCKED_BY_DECISION`.
 
 ## 7. Matrice di conformita' corrente
@@ -224,7 +228,7 @@ JOIN fence e dai test no-history; l'interpretazione dello storage tecnico resta
 | P2 cross-broker client | Implementato e testato same-host | E2E socket reale con client su follower differenti e forwarding al leader. |
 | P3 stesso ordine | Implementato e testato same-host | Sequence densa, Raft total order, stream solo chat; E2E prima/dopo rielezione. |
 | P4 causalita' | Implementato e testato same-host | FIFO single-in-flight estende program order; l'E2E socket prova `m1 -> ricezione -> m2`, due osservatori e invii concorrenti nello stesso total order. `MAN-04` resta la ripetizione multi-process/LAN. |
-| P5 no storage/connected-only | Connected-only verificato; decisione storage aperta | JOIN fence e nessun replay; `CODE-11` sul log tecnico e' bloccato dal docente. |
+| P5 no storage/connected-only | Connected-only verificato; decisione storage aperta | Cache retry applicativa eliminata dopo commit, JOIN fence e nessun replay; `CODE-11` resta sul log tecnico ed e' bloccato dal docente. |
 | F1 failure client/broker/link | Implementato nello scope crash-stop scelto | Leader failure E2E e multi-process locale, retry/dedup, reconnect generation-safe e Directory restart; follower/link e LAN fisica restano manuali. |
 | F2 no partition/Byzantine | Correttamente fuori scope | Non va presentato come feature mancante. |
 

@@ -1,7 +1,8 @@
 # Project Delivery Audit — stato pre-consegna
 
 Aggiornamento canonico: **2026-08-12**
-Commit di partenza e current `HEAD`: `e639cf7c8e20b400555b5f4ec096cc9c5ccfb832`
+Commit di partenza e current `HEAD`: `ff5062d5f3be90485b65dfddf77e6fe31c029d45`;
+le correzioni mirate descritte in questo aggiornamento sono nel working tree per review.
 Branch: `master` (`origin/master`, ahead 0 / behind 0)
 Ambiente: Windows 11 amd64, Oracle JDK 23.0.2, Apache Maven 3.9.15
 
@@ -23,11 +24,11 @@ P0/P1 software noti aperti. La consegna finale resta bloccata da:
 | CODE-05..06 | VERIFIED | FIFO single-in-flight e writer unico per connection generation |
 | CODE-07..08 | VERIFIED | JOIN fence Raft locale/atomico; JOIN/LEAVE fuori dallo stream `MSG` |
 | CODE-09..10 | VERIFIED | bootstrap/reconnect eventuali generation-safe, rotazione broker; Directory configurabile end-to-end |
-| CODE-11 | BLOCKED_BY_DECISION | log Raft persistente con payload, ma nessuna API/history/replay client-visible |
+| CODE-11 | BLOCKED_BY_DECISION | cache retry applicativa rimossa dopo commit; resta il log Raft persistente con payload, senza API/history/replay client-visible |
 | CODE-12..13 | VERIFIED | fan-out bounded non bloccante; readiness, re-registration e record Directory atomici |
 | CODE-14..17 | VERIFIED | replica monotona, timer generation-safe, lifecycle transazionale, vector clock per ready message |
 
-La verifica automatica finale e' `mvn clean test`: **274 test, 0 failure, 0
+La verifica automatica finale e' `mvn clean test`: **283 test, 0 failure, 0
 error, 0 skipped**. Include un test applicativo con Directory, tre broker
 `LOCAL_TCP`, socket client reali, forwarding da follower, no-history, ACK, no echo,
 leader failure, rielezione e continuita' delle sequenze. I sei test legacy JUnit 4
@@ -57,6 +58,12 @@ e root cause storiche, non un backlog parallelo.
 > replica, commit e recovery, pur non esistendo alcuna API di history/replay e pur
 > non inviando mai ai client messaggi precedenti al loro JOIN? Se no, quale modello
 > di recovery/retention e' richiesto per una replicated state machine Raft?
+
+La cache applicativa `cachedClientRequests` conserva la stessa request e i relativi
+metadati vector-clock durante retry falliti/non confermati, ma elimina atomicamente
+l'entry dopo la conferma definitiva di commit. La retention ancora aperta in
+`CODE-11` riguarda quindi il payload nel log tecnico Raft; non esistono API di
+history, offline inbox o replay verso i client.
 
 ---
 
@@ -482,10 +489,10 @@ I finding sono ordinati per severità e poi per area. Le osservazioni puramente 
 - **Problema/impatto:** length prefix enorme porta a `readNBytes(len)` e possibile OOM; bit rot non rilevato; nessun magic/schema/versione; `ATOMIC_MOVE` senza fallback.
 - **Fix/test:** max record, CRC, header/versione, validazione index/term/progress; file con length `Integer.MAX_VALUE` deve fallire bounded.
 
-#### DS-MEDIUM-002 — Stato, log e cache crescono senza bound/compaction
+#### DS-MEDIUM-002 — Log e stato dedup crescono senza bound/compaction
 
-- **File:** `Broker.java:80-82,430-443`, `RaftOrderingService.java:56-61`, `ClientMessageSender.java:25`, `RaftLog.java:21`.
-- **Impatto:** log, dedup keys, cached requests e pending client crescono per l'intera vita; una perdita di quorum amplifica il fenomeno.
+- **File:** `RaftOrderingService.java`, `ClientMessageSender.java`, `RaftLog.java`.
+- **Impatto:** log, dedup keys e pending client possono crescere su esecuzioni lunghe; la cache retry del broker viene ora eliminata dopo commit e conserva soltanto proposal fallite/non confermate ancora utili al retry. Una perdita di quorum amplifica lo stato pending.
 - **Fix/test:** snapshot/compaction, retention dedup coerente, TTL/cap e backpressure; soak test con heap/disk stabili.
 
 #### DS-MEDIUM-003 — Commit progress persiste più volte sul percorso critico
@@ -977,7 +984,7 @@ Output: `JUnit version 4.13.1`, sei punti, `OK (6 tests)` in 0.055 s.
 
 | Priorità | Problema | Fix consigliato | File coinvolti | Complessità | Obbligatorio prima della consegna |
 |---|---|---|---|---|---|
-| P2.1 | Log/cache unbounded | snapshot, InstallSnapshot, retention | Raft/persistence | L | No per demo breve |
+| P2.1 | Log/dedup state unbounded | snapshot, InstallSnapshot, retention | Raft/persistence | L | No per demo breve |
 | P2.2 | Performance fsync | group commit e progress write singola | commit/persistence | M | No |
 | P2.3 | Discovery ausiliaria | porta comune o rimozione feature | discovery/config | S | No se dichiarata inutilizzata |
 | P2.4 | Build riproducibile | outputTimestamp/manifest stabile | pom | S | No |
