@@ -521,6 +521,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
      */
     private synchronized ChatReqMessage buildChatReq(String username, String clientId, long clientSeq, String text) {
         String proposalKey = clientProposalKey(clientId, clientSeq);
+
         return cachedClientRequests.computeIfAbsent(proposalKey, key -> {
             vectorClock.increment(brokerId);
             String localMsgId = brokerId + "-" + (++localMsgCounter);
