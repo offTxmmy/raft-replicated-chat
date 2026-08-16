@@ -3,7 +3,6 @@ package it.polimi.ds.chat.client.messaging;
 import it.polimi.ds.chat.client.connection.ClientObjectWriter;
 import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
 
-import java.io.ObjectOutputStream;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -28,18 +27,6 @@ public class ClientHeartbeatManager implements Runnable {
 
     public interface HeartbeatFailureHandler {
         void onHeartbeatFailure();
-    }
-
-    /** Legacy constructor retained for callers that own a standalone stream. */
-    public ClientHeartbeatManager(ObjectOutputStream out,
-                                  HeartbeatFailureHandler failureHandler) {
-        this(
-                new ClientObjectWriter(Objects.requireNonNull(out, "out")),
-                () -> true,
-                failureHandler,
-                HEARTBEAT_INTERVAL_MS,
-                MAX_MISSED_HEARTBEATS
-        );
     }
 
     public ClientHeartbeatManager(ClientObjectWriter writer,

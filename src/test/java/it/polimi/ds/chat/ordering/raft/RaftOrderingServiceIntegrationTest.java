@@ -1493,7 +1493,6 @@ class RaftOrderingServiceIntegrationTest {
                 nodeId,
                 "127.0.0.1",
                 50000 + nodeId,
-                50000 + nodeId,
                 raft);
 
         return new RaftOrderingService(cfg);

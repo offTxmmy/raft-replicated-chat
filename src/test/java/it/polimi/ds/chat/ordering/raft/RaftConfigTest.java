@@ -136,13 +136,11 @@ class RaftConfigTest {
                 0,
                 "127.0.0.1",
                 50000,
-                50000,
                 raft);
 
         assertNotNull(cfg.getRaftConfig());
         assertEquals(0, cfg.getBrokerId());
         assertEquals("127.0.0.1", cfg.getBrokerHost());
-        assertEquals(50000, cfg.getBrokerPort());
         assertEquals(50000, cfg.getClientPort());
         assertEquals("localhost", cfg.getDirectoryHost());
         assertEquals(60000, cfg.getDirectoryPort());
@@ -156,7 +154,6 @@ class RaftConfigTest {
         BrokerConfig cfg = new BrokerConfig(
                 0,
                 "127.0.0.1",
-                50000,
                 50000,
                 raft,
                 "192.0.2.50",
@@ -188,7 +185,6 @@ class RaftConfigTest {
         assertThrows(NullPointerException.class, () -> new BrokerConfig(
                 0,
                 "127.0.0.1",
-                50000,
                 50000,
                 null));
     }

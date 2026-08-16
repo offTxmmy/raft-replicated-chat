@@ -139,14 +139,6 @@ final class ClientRuntime {
         return reconnectManager.isReconnecting();
     }
 
-    Long currentGenerationId() {
-        synchronized (lifecycleLock) {
-            return currentSession == null
-                    ? null
-                    : currentSession.generation.getId();
-        }
-    }
-
     private void installGeneration(ClientConnectionGeneration generation)
             throws IOException {
         SessionRuntime session = null;

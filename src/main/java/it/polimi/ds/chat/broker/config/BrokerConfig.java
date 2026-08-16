@@ -14,7 +14,6 @@ public class BrokerConfig {
 
     private final int brokerId;
     private final String brokerHost;
-    private final int brokerPort;
     private final int clientPort;
     private final RaftConfig raftConfig;
     private final String directoryHost;
@@ -22,13 +21,11 @@ public class BrokerConfig {
 
     public BrokerConfig(int brokerId,
                         String brokerHost,
-                        int brokerPort,
                         int clientPort,
                         RaftConfig raftConfig) {
         this(
                 brokerId,
                 brokerHost,
-                brokerPort,
                 clientPort,
                 raftConfig,
                 DEFAULT_DIRECTORY_HOST,
@@ -37,14 +34,12 @@ public class BrokerConfig {
 
     public BrokerConfig(int brokerId,
                         String brokerHost,
-                        int brokerPort,
                         int clientPort,
                         RaftConfig raftConfig,
                         String directoryHost,
                         int directoryPort) {
         this.brokerId = brokerId;
         this.brokerHost = Objects.requireNonNull(brokerHost, "brokerHost");
-        this.brokerPort = validatePort(brokerPort, "brokerPort");
         this.clientPort = validatePort(clientPort, "clientPort");
         this.raftConfig = Objects.requireNonNull(raftConfig, "raftConfig");
         this.directoryHost = requireNonBlank(directoryHost, "directoryHost");
@@ -57,10 +52,6 @@ public class BrokerConfig {
 
     public String getBrokerHost() {
         return brokerHost;
-    }
-
-    public int getBrokerPort() {
-        return brokerPort;
     }
 
     public int getClientPort() {
@@ -92,23 +83,5 @@ public class BrokerConfig {
             throw new IllegalArgumentException(fieldName + " out of range: " + port);
         }
         return port;
-    }
-
-    @Override
-    public boolean equals(Object o) {
-        if (this == o) return true;
-        if (!(o instanceof BrokerConfig that)) return false;
-
-        return brokerId == that.brokerId
-                && brokerPort == that.brokerPort
-                && brokerHost.equals(that.brokerHost);
-    }
-
-    @Override
-    public int hashCode() {
-        int result = brokerId;
-        result = 31 * result + brokerHost.hashCode();
-        result = 31 * result + brokerPort;
-        return result;
     }
 }

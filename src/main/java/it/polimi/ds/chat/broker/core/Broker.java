@@ -50,8 +50,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Static configuration for this broker (ports, host, Raft settings, etc.)
     private final BrokerConfig config;
 
-    // Runtime brokerId (may differ from initial config value for followers)
-    private int brokerId;
+    // Static broker identifier established during bootstrap.
+    private final int brokerId;
 
     // Vector clock for tracking causal dependencies when sending messages
     private final VectorClock vectorClock = new VectorClock();
@@ -78,9 +78,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Cache of client proposals keyed by stable client id + client sequence.
     // Retries must reuse the same ChatReqMessage so the vector clock advances once.
     private final Map<String, ChatReqMessage> cachedClientRequests = new ConcurrentHashMap<>();
-
-    // Latch to synchronize startup with ID assignment
-    private final CountDownLatch brokerIdLatch = new CountDownLatch(1);
 
     // Monotonic per-broker sequence number used as id for directory heartbeats.
     private final transient AtomicLong directoryHeartbeatSeq = new AtomicLong(0);
@@ -110,51 +107,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
         raftService.setCallback(this);
         raftService.onDeliver(this::handleOrderedMessage);
         this.orderingService = raftService;
-        brokerIdLatch.countDown();
     }
 
     // =========================================================================
     // OrderingServiceCallback implementation
     // =========================================================================
-
-    /**
-     * Callback invoked when the ordering service assigns a broker ID to this instance.
-     *
-     * Updates the internal brokerId and synchronizes the delivery sequence.
-     *
-     * @param newBrokerId the broker id assigned by the ordering service
-     */
-    @Override
-    public void onBrokerIdAssigned(int newBrokerId, long currentSeq) {
-        System.out.println("[Broker] Broker ID updated from " + this.brokerId + " to " + newBrokerId);
-        System.out.println("[Broker] Syncing sequence number to " + currentSeq);
-
-        this.brokerId = newBrokerId;
-        this.holdBackQueue.syncToSequence(currentSeq);
-
-        // Signal that thet ID is assigned, allowing start() to proceed
-        brokerIdLatch.countDown();
-    }
-
-    /**
-     * Callback invoked when the connection to the ordering service is lost.
-     *
-     * This method should perform any required cleanup or reconnection logic (currently logs an error).
-     */
-    @Override
-    public void onConnectionLost() {
-        System.err.println("[Broker] Connection to ordering service lost!");
-    }
-
-    /**
-     * Callback invoked when the connection to the ordering service is established.
-     *
-     * Can be used to notify the operator or trigger follow-up actions.
-     */
-    @Override
-    public void onConnectionEstablished() {
-        System.out.println("[Broker] Connected to ordering service");
-    }
 
     @Override
     public void onLeaderChanged(int newLeaderId, long term) {
@@ -180,7 +137,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     }
 
     /**
-     * Get the broker identifier assigned to this broker instance.
+     * Get the statically configured broker identifier.
      *
      * @return current broker id
      */
@@ -221,11 +178,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
             // Raft must be ready before clients can submit commands.
             orderingService.start();
 
-            boolean assigned = brokerIdLatch.await(10, TimeUnit.SECONDS);
-            if (!assigned) {
-                throw new IOException("Failed to initialize broker id within timeout.");
-            }
-
             // Bind the client listener before publishing the endpoint. Once the
             // ServerSocket is bound, the OS accept backlog is already active even
             // though this thread has not entered accept() yet.
@@ -255,10 +207,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
                     break;
                 }
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            stop();
-            throw new IOException("Interrupted while waiting for broker id initialization.", e);
         } catch (IOException | RuntimeException e) {
             stop();
             throw e;

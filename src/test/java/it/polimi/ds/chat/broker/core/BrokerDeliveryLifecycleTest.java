@@ -113,7 +113,6 @@ class BrokerDeliveryLifecycleTest {
             BrokerConfig config = new BrokerConfig(
                     0,
                     "127.0.0.1",
-                    clientPort + 1,
                     clientPort,
                     raft,
                     "127.0.0.1",

@@ -47,7 +47,7 @@ class RaftTransportSelectionTest {
                 RaftConfig.DEFAULT_CLUSTER_ID,
                 storageDir,
                 voters());
-        BrokerConfig broker = new BrokerConfig(0, "127.0.0.1", 50000, 50000, raft);
+        BrokerConfig broker = new BrokerConfig(0, "127.0.0.1", 50000, raft);
         return new RaftOrderingService(broker);
     }
 

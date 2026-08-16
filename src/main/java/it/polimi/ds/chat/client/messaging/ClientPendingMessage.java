@@ -34,13 +34,6 @@ public class ClientPendingMessage {
     }
 
     /**
-     * Legacy name kept for older call sites.
-     */
-    public long getTimestamp() {
-        return clientSeq;
-    }
-
-    /**
      * Returns the wire format line of the message.
      *
      * @return the wire line as sent on the socket
@@ -56,13 +49,6 @@ public class ClientPendingMessage {
      */
     public long getLastSendTime() {
         return lastSendTime;
-    }
-
-    /**
-     * Updates the last send time to the current system time.
-     */
-    public void updateLastSendTime() {
-        markSent(System.currentTimeMillis());
     }
 
     public void markSent(long sendTime) {

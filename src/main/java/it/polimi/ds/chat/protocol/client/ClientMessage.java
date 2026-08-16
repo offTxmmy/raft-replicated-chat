@@ -31,19 +31,8 @@ public class ClientMessage implements Serializable {
         return clientSeq;
     }
 
-    /**
-     * Legacy name kept for older call sites; semantically this is now clientSeq.
-     */
-    public long getTimestamp() {
-        return clientSeq;
-    }
-
     public String getText() {
         return text;
-    }
-
-    public static String msgCommand(String text) {
-        return "MSG " + text;
     }
 
     public static boolean isMsg(String line) {

@@ -3,11 +3,9 @@ package it.polimi.ds.chat.client.messaging;
 import it.polimi.ds.chat.client.connection.ClientObjectWriter;
 
 import java.io.IOException;
-import java.io.ObjectOutputStream;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.Objects;
-import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
@@ -32,21 +30,6 @@ public class ClientMessageSender implements Runnable {
 
     private ClientObjectWriter writer;
     private volatile boolean running = true;
-
-    public ClientMessageSender(ObjectOutputStream out, long ackTimeoutMs) {
-        this(out, ackTimeoutMs, UUID.randomUUID().toString());
-    }
-
-    public ClientMessageSender(ObjectOutputStream out,
-                               long ackTimeoutMs,
-                               String clientId) {
-        this(
-                new ClientObjectWriter(Objects.requireNonNull(out, "out")),
-                ackTimeoutMs,
-                clientId,
-                System::currentTimeMillis
-        );
-    }
 
     /** Creates a disconnected sender; a connection generation is attached later. */
     public ClientMessageSender(long ackTimeoutMs, String clientId) {
@@ -141,10 +124,6 @@ public class ClientMessageSender implements Runnable {
             }
             stateLock.notifyAll();
         }
-    }
-
-    public void handleAck(long clientSeq) {
-        handleAck(clientId, clientSeq);
     }
 
     public void shutdown() {

@@ -2,29 +2,9 @@ package it.polimi.ds.chat.ordering.api;
 
 /**
  * Callback interface for ordering service events.
- * Used to notify the Broker of important ordering-service events.
+ * Used to notify the Broker when the observed Raft leader changes.
  */
 public interface OrderingServiceCallback {
-
-    /**
-     * Called when the ordering service assigns a new broker ID.
-     * Raft brokers use static IDs, so this callback is retained only for
-     * backward-compatible test hooks.
-     *
-     * @param brokerId The assigned broker ID
-     */
-    void onBrokerIdAssigned(int brokerId, long currentSeq);
-
-    /**
-     * Called when connection to the ordering service is lost.
-     */
-    void onConnectionLost();
-
-    /**
-     * Called when connection to the ordering service is established.
-     */
-    void onConnectionEstablished();
-
     /**
      * Called when the ordering service observes a leader change.
      *

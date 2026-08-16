@@ -379,7 +379,6 @@ class ReplicatedChatApplicationIntegrationTest {
                             nodeId,
                             LOOPBACK,
                             clientPorts[nodeId],
-                            clientPorts[nodeId],
                             raftConfig,
                             LOOPBACK,
                             directoryBrokerPort));

@@ -33,27 +33,6 @@ public class ClientMessageReceiver implements Runnable {
 
     private volatile boolean running = true;
 
-    /** Legacy constructor retained for a standalone input stream. */
-    public ClientMessageReceiver(ObjectInputStream input,
-                                 ClientMessageSender sender,
-                                 String clientId,
-                                 ClientHeartbeatManager heartbeatManager) {
-        this(
-                input,
-                sender,
-                clientId,
-                heartbeatManager,
-                () -> true,
-                dispatch -> {
-                    dispatch.run();
-                    return true;
-                },
-                null,
-                () -> { },
-                System.out::println
-        );
-    }
-
     public ClientMessageReceiver(ClientConnectionGeneration generation,
                                  ClientMessageSender sender,
                                  String clientId,
@@ -104,15 +83,6 @@ public class ClientMessageReceiver implements Runnable {
     /** Stops processing; the generation owner closes the socket to unblock read. */
     public void stop() {
         running = false;
-    }
-
-    /** Legacy shutdown also closes the directly owned input stream. */
-    public void shutdown() {
-        stop();
-        try {
-            input.close();
-        } catch (IOException ignored) {
-        }
     }
 
     @Override

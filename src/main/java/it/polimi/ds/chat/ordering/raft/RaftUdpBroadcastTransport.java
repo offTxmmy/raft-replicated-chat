@@ -410,7 +410,4 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
         }
     }
 
-    boolean isRunningForTesting() {
-        return running;
-    }
 }

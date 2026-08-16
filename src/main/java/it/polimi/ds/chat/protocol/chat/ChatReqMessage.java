@@ -88,14 +88,6 @@ public class ChatReqMessage extends BrokerMessage {
         return vectorClock;
     }
 
-    public long getClientTimestamp() {
-        return clientSeq;
-    }
-
-    public boolean hasClientTimestamp() {
-        return hasClientIdentity;
-    }
-
     public boolean hasClientIdentity() {
         return hasClientIdentity;
     }

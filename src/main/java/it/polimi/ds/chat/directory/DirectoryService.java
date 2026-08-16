@@ -435,24 +435,6 @@ public class DirectoryService {
         out.flush();
     }
 
-    /**
-     * Backwards-compatible direct count update. Network handlers use the
-     * generation-aware overload below so an obsolete connection cannot mutate a
-     * replacement record.
-     */
-    public void updateClientCount(ClientCountUpdateMessage update) {
-        synchronized (registryLock) {
-            BrokerSlot slot = brokerSlots.get(update.getBrokerId());
-            if (slot == null || slot.active() == null) {
-                return;
-            }
-            BrokerRecord current = slot.active();
-            BrokerRecord replacement = current.withClientCount(update.getClientCount(), clock.getAsLong());
-            brokerSlots.put(update.getBrokerId(), new BrokerSlot(slot.epoch(), replacement));
-            registryLock.notifyAll();
-        }
-    }
-
     RegistrationLease registerBroker(DirectoryRegisterMessage message) {
         Objects.requireNonNull(message, "message");
         long epoch = registrationEpoch.incrementAndGet();

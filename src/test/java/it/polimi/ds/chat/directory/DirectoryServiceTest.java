@@ -138,7 +138,7 @@ class DirectoryServiceTest {
     }
 
     @Test
-    void brokerPublishesAndBindsConfiguredClientPortNotLegacyBrokerPort(
+    void brokerPublishesAndBindsConfiguredClientPort(
             @TempDir Path tempDir) throws Exception {
         DirectoryService directory = new DirectoryService(Map.of());
         runningService = directory;
@@ -146,11 +146,8 @@ class DirectoryServiceTest {
         int directoryBrokerPort = directory.getBoundBrokerPortForTesting();
 
         int clientPort;
-        int legacyBrokerPort;
-        try (ServerSocket clientReservation = new ServerSocket(0);
-             ServerSocket legacyReservation = new ServerSocket(0)) {
+        try (ServerSocket clientReservation = new ServerSocket(0)) {
             clientPort = clientReservation.getLocalPort();
-            legacyBrokerPort = legacyReservation.getLocalPort();
         }
 
         RaftConfig raft = new RaftConfig(
@@ -164,7 +161,6 @@ class DirectoryServiceTest {
         BrokerConfig config = new BrokerConfig(
                 1,
                 "127.0.0.1",
-                legacyBrokerPort,
                 clientPort,
                 raft,
                 "127.0.0.1",
@@ -186,9 +182,6 @@ class DirectoryServiceTest {
                     1, "127.0.0.1", clientPort, 5, TimeUnit.SECONDS));
             try (Socket connected = new Socket("127.0.0.1", clientPort)) {
                 assertTrue(connected.isConnected());
-            }
-            try (ServerSocket reboundLegacy = new ServerSocket(legacyBrokerPort)) {
-                assertEquals(legacyBrokerPort, reboundLegacy.getLocalPort());
             }
         } finally {
             broker.stop();
@@ -306,7 +299,6 @@ class DirectoryServiceTest {
         BrokerConfig config = new BrokerConfig(
                 1,
                 "127.0.0.1",
-                clientPort == 65535 ? clientPort - 1 : clientPort + 1,
                 clientPort,
                 raft,
                 "127.0.0.1",

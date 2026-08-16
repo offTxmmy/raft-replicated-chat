@@ -200,14 +200,6 @@ public class RaftNode {
     }
 
     /**
-     * Clears leader knowledge without changing term or vote.
-     * Useful when the leader is suspected dead but no higher term has been observed yet.
-     */
-    public synchronized void clearKnownLeader() {
-        leaderId = NO_LEADER;
-    }
-
-    /**
      * Handles an incoming RequestVote RPC according to Raft voting rules.
      * Decision flow:
      * 1. Reject stale terms.
