@@ -137,7 +137,6 @@ class RaftConfigTest {
                 "127.0.0.1",
                 50000,
                 50000,
-                50002,
                 raft);
 
         assertNotNull(cfg.getRaftConfig());
@@ -145,7 +144,6 @@ class RaftConfigTest {
         assertEquals("127.0.0.1", cfg.getBrokerHost());
         assertEquals(50000, cfg.getBrokerPort());
         assertEquals(50000, cfg.getClientPort());
-        assertEquals(50002, cfg.getUdpPort());
         assertEquals("localhost", cfg.getDirectoryHost());
         assertEquals(60000, cfg.getDirectoryPort());
         assertEquals(2, cfg.getRaftConfig().getQuorumSize());
@@ -160,7 +158,6 @@ class RaftConfigTest {
                 "127.0.0.1",
                 50000,
                 50000,
-                50002,
                 raft,
                 "192.0.2.50",
                 62000);
@@ -193,7 +190,6 @@ class RaftConfigTest {
                 "127.0.0.1",
                 50000,
                 50000,
-                50002,
                 null));
     }
 }

@@ -540,9 +540,9 @@ su due notebook non e' `VERIFIED`.
 
 - **Categoria:** OPTIONAL / PRODUCTION HARDENING
 - **Priorita':** P3
-- **Area/file:** `PeerRegistryTest`, allocazione porte, test RPC
-- **Problema:** una callback non e' asserita; alcune porte sono scelte con
-  open-close-rebind o assumendo che la porta 1 sia libera.
+- **Area/file:** allocazione porte, test RPC
+- **Problema:** alcune porte sono scelte con open-close-rebind o assumendo che la
+  porta 1 sia libera.
 - **Impatto:** piccola possibilita' di falso verde o flakiness ambientale.
 - **Azione:** asserzioni reali e port reservation gestita dal test harness.
 - **Verifica:** suite ripetuta su Windows/Linux senza failure intermittenti.
@@ -759,18 +759,6 @@ obbligatorie.
   dalla consegna.
 - **Azione:** arresto fail-stop o rollback formalmente sicuro; test con fake storage.
 - **Verifica:** nessun RPC success viene esposto dopo persistence failure.
-- **Stato:** OPTIONAL
-
-## OPT-05 - Correggere o rimuovere la discovery ausiliaria
-
-- **Categoria:** OPTIONAL / PRODUCTION HARDENING
-- **Priorita':** P3
-- **Area/file:** `LanDiscoveryService`, `PeerRegistry`
-- **Problema:** ogni broker ascolta e trasmette su `50002 + nodeId`; peer con id diversi
-  non ricevono gli HELLO. Gli annunci sono solo iniziali.
-- **Impatto:** registry ausiliario incompleto; Raft e quorum non dipendono da esso.
-- **Azione:** porta comune e annunci periodici oppure rimozione/documentazione esplicita.
-- **Verifica:** peer late-joining convergono senza alterare il voter set statico.
 - **Stato:** OPTIONAL
 
 ## OPT-06 - Bounded resources, snapshot e retention

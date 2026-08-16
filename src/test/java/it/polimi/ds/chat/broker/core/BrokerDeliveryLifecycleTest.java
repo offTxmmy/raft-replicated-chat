@@ -115,7 +115,6 @@ class BrokerDeliveryLifecycleTest {
                     "127.0.0.1",
                     clientPort + 1,
                     clientPort,
-                    50002,
                     raft,
                     "127.0.0.1",
                     62000);

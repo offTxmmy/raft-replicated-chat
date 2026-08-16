@@ -1,10 +1,7 @@
 package it.polimi.ds.chat.broker.core;
 
 import it.polimi.ds.chat.broker.config.BrokerConfig;
-import it.polimi.ds.chat.broker.discovery.PeerRegistry;
 import it.polimi.ds.chat.broker.session.ClientHandler;
-import it.polimi.ds.chat.discovery.LanDiscoveryService;
-import it.polimi.ds.chat.protocol.broker.*;
 import it.polimi.ds.chat.protocol.chat.*;
 import it.polimi.ds.chat.protocol.client.*;
 import it.polimi.ds.chat.protocol.directory.*;
@@ -50,9 +47,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     private final transient Object directoryLock = new Object();
     private transient volatile Thread directoryThread;
 
-    // Peer registry for broker-to-broker discovery
-    private transient PeerRegistry peerRegistry;
-
     // Static configuration for this broker (ports, host, Raft settings, etc.)
     private final BrokerConfig config;
 
@@ -78,9 +72,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Ordering service for message ordering (decoupled from networking)
     private transient OrderingService orderingService;
 
-    // Peer discovery over LAN using UDP broadcast
-    private transient LanDiscoveryService lanDiscoveryService;
-
     // Local per-broker message counter to build unique localMsgId values.
     private long localMsgCounter = 0;
 
@@ -105,14 +96,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
      */
     public Broker(BrokerConfig config) {
         this.config = config;
-        this.brokerId = config.getBrokerId(); // 0 for leader, -1 for followers at startup
+        this.brokerId = config.getBrokerId();
 
-        // Initialize OrderingService
         initializeOrderingService();
-
-        // Initialize PeerRegistry (LAN discovery only)
-        this.peerRegistry = new PeerRegistry(brokerId);
-        this.lanDiscoveryService = new LanDiscoveryService(config, peerRegistry);
     }
 
     /**
@@ -134,7 +120,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     /**
      * Callback invoked when the ordering service assigns a broker ID to this instance.
      *
-     * Updates internal brokerId, logs the change, and reinitializes the PeerRegistry with the new id.
+     * Updates the internal brokerId and synchronizes the delivery sequence.
      *
      * @param newBrokerId the broker id assigned by the ordering service
      */
@@ -145,15 +131,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
         this.brokerId = newBrokerId;
         this.holdBackQueue.syncToSequence(currentSeq);
-
-        // Update peer registry with new broker ID
-        if (this.peerRegistry != null) {
-            this.peerRegistry = new PeerRegistry(newBrokerId);
-        }
-
-        if (this.lanDiscoveryService != null) {
-            this.lanDiscoveryService.setBrokerId(newBrokerId);
-        }
 
         // Signal that thet ID is assigned, allowing start() to proceed
         brokerIdLatch.countDown();
@@ -225,13 +202,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
         this.orderingService = orderingService;
     }
 
-    /**
-     * Get the peer registry for broker-to-broker discovery.
-     */
-    public PeerRegistry getPeerRegistry() {
-        return peerRegistry;
-    }
-
     // =========================================================================
     // Broker lifecycle
     // =========================================================================
@@ -241,7 +211,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * - Start the Raft ordering service
      * - Open TCP listener for clients
      * - Connect to directory service
-     * - Start peer discovery
      *
      * This method blocks in a loop accepting client connections.
      *
@@ -267,7 +236,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
             // Complete the remaining local startup before registration. These
             // operations either succeed or are explicitly best-effort; a failure
             // before this point is rolled back without ever publishing the broker.
-            startPeerDiscovery();
             startDirectoryRegistrationLoop();
 
             System.out.println("Broker " + brokerId + " listening for clients on port "
@@ -322,10 +290,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
             heartbeat.interrupt();
         }
         closeDirectoryConnection();
-
-        if (lanDiscoveryService != null) {
-            lanDiscoveryService.stop();
-        }
 
         List<ClientHandler> sessionSnapshot;
         List<Thread> threadSnapshot;
@@ -785,41 +749,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // handlers merely mark the latest count dirty, keeping Raft fan-out free
         // from unrelated Directory I/O.
         directoryClientCountDirty.set(true);
-    }
-
-    /**
-     * Start the peer discovery mechanism.
-     * Registers for peer list updates and logs changes.
-     */
-    private void startPeerDiscovery() {
-        if (peerRegistry == null) {
-            System.err.println("[Broker] PeerRegistry not initialized");
-            return;
-        }
-
-        // Register listener for peer changes
-        peerRegistry.addPeerChangeListener(peers -> {
-            System.out.println("[Broker " + brokerId + "] Peer list updated: " + peers.size() + " peers");
-            for (PeerInfo peer : peers) {
-                System.out.println("  - " + peer);
-            }
-        });
-
-        // Only LAN discovery is used
-        if (lanDiscoveryService != null) {
-            try {
-                lanDiscoveryService.start();
-                for (int i = 0; i < 3; i++) {
-                    lanDiscoveryService.announcePresence();
-                    try {
-                        Thread.sleep(200);
-                    } catch (InterruptedException e) {}
-                }
-            } catch (SocketException e) {
-                System.err.println("[Broker " + brokerId + "] Failed to start LAN discovery: " + e.getMessage());
-            }
-        }
-        System.out.println("[Broker " + brokerId + "] Peer discovery started (LAN broadcast only)");
     }
 
 }

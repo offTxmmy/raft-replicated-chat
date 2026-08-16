@@ -18,7 +18,6 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.net.DatagramSocket;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -381,7 +380,6 @@ class ReplicatedChatApplicationIntegrationTest {
                             LOOPBACK,
                             clientPorts[nodeId],
                             clientPorts[nodeId],
-                            freeUdpPort(),
                             raftConfig,
                             LOOPBACK,
                             directoryBrokerPort));
@@ -798,12 +796,6 @@ class ReplicatedChatApplicationIntegrationTest {
             Thread.sleep(25L);
         }
         return condition.getAsBoolean();
-    }
-
-    private static int freeUdpPort() throws IOException {
-        try (DatagramSocket socket = new DatagramSocket(0, InetAddress.getByName(LOOPBACK))) {
-            return socket.getLocalPort();
-        }
     }
 
     /** Keeps all selected TCP ports bound until the component that owns them starts. */

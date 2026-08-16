@@ -91,22 +91,16 @@ Broadcast e membership sono concetti separati. Il voter set configurato determin
 - il denominatore della maggioranza;
 - gli endpoint TCP per replica/forwarding.
 
-La discovery e la reachability non aggiungono/rimuovono voter. Un broker non viene
-escluso dal quorum perche' non risponde e un HELLO discovery non crea membership.
-Dynamic membership e joint consensus restano fuori scope.
+La reachability runtime non aggiunge o rimuove voter. Un broker non viene escluso
+dal quorum perche' non risponde. Dynamic membership e joint consensus restano fuori
+scope.
 
-## 6. Limiti correnti di discovery
+## 6. Separazione della configurazione UDP
 
-La discovery ausiliaria non e' una prova di broadcast Raft e oggi non scopre
-correttamente peer con id diversi:
-
-- `BrokerMain` assegna `udpPort = 50002 + nodeId`;
-- ogni `LanDiscoveryService` ascolta e trasmette sulla propria porta;
-- un HELLO di node 0 a 50002 non raggiunge node 1 in ascolto su 50003;
-- gli annunci avvengono soltanto poche volte all'avvio, penalizzando peer tardivi.
-
-Poiche' Raft usa una porta broadcast comune separata e voter statici, questo difetto e'
-`OPT-05`, non un blocker del consenso. La demo non deve dipendere dal PeerRegistry.
+Non esiste piu' una seconda porta UDP per-node nel `BrokerConfig`. L'unica
+configurazione UDP broker-to-broker e' quella del transport Raft: porta broadcast
+comune al cluster, `clusterId` e limite del payload sono tutti contenuti in
+`RaftConfig`. Il voter set statico resta indipendente dalla reachability runtime.
 
 ## 7. Deployment corrente
 

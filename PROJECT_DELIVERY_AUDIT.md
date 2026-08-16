@@ -158,7 +158,6 @@ La specifica ufficiale dell'insegnamento non è presente. `docs/PROJECT_SPECIFIC
 | `FileRaftPersistence` | `state.bin`, `commit.bin` e `log.bin` | tail parziale non riparata |
 | `RaftRpcClient/Server` | RPC TCP one-shot | cached pool non limitati, Java serialization |
 | `RaftUdpBroadcastTransport` | vote request e heartbeat vuoti | UDP comune al cluster |
-| `LanDiscoveryService/PeerRegistry` | discovery ausiliaria | non integrata nel consenso e, di fatto, non scopre peer con porte diverse |
 
 ```mermaid
 flowchart LR
@@ -512,17 +511,10 @@ I finding sono ordinati per severità e poi per area. Le osservazioni puramente 
 - **Impatto:** le handle table di Java serialization crescono su sessioni infinite, soprattutto con heartbeat ogni secondo.
 - **Fix/test:** framing alternativo o `reset()` coordinato periodico; soak con heap retained-size.
 
-#### DS-MEDIUM-005 — Discovery LAN presente ma incapace di scoprire peer
+#### DS-MEDIUM-006 — Receiver UDP Raft fragile a runtime exception
 
-- **File:** `BrokerMain.java:87-93`, `LanDiscoveryService.java:49-66,142-182`.
-- **Scenario:** nodo 0 ascolta/trasmette su 50002, nodo 1 su 50003, ecc.; ogni HELLO va solo alla porta del mittente.
-- **Impatto:** `PeerRegistry` rimane vuoto. Non rompe il quorum perché la feature è dichiarata ausiliaria, ma è codice presente non funzionante.
-- **Fix/test:** discovery port comune; due servizi devono comparire reciprocamente.
-
-#### DS-MEDIUM-006 — Receiver UDP/discovery fragili a runtime exception
-
-- **File:** `RaftUdpBroadcastTransport.java:209-227`, `LanDiscoveryService.java:49-60,85-136`.
-- **Problema:** catch incompleti permettono a payload semanticamente invalidi/`NumberFormatException` di terminare l'unico listener; discovery imposta `running=true` prima del bind e non lo ripristina su failure.
+- **File:** `RaftUdpBroadcastTransport.java:209-227`.
+- **Problema:** catch incompleti possono permettere a payload semanticamente invalidi di terminare l'unico listener.
 - **Fix/test:** boundary catch+validazione per datagramma, supervisor e startup transazionale; un datagramma invalido non deve impedire il successivo valido.
 
 #### DS-MEDIUM-007 — Cache dedup UDP O(N) per ogni pacchetto
@@ -589,7 +581,7 @@ I finding sono ordinati per severità e poi per area. Le osservazioni puramente 
 
 #### DS-MEDIUM-016 — API/config presenti ma non integrate
 
-- **Evidenze:** `OrderingServiceCallback.onBrokerIdAssigned/onConnectionEstablished/onConnectionLost` non sono chiamate; `GetPeerList*` non ha call site; `BrokerConfig.getClientPort` non è usato; `RaftPeerEndpoint.clientPort` non guida il listener; `ClientConnection` espone un `PrintWriter` sullo stesso stream di `ObjectOutputStream` (`ClientConnection.java:40-63`).
+- **Evidenze:** `OrderingServiceCallback.onBrokerIdAssigned/onConnectionEstablished/onConnectionLost` non sono chiamate; `BrokerConfig.getClientPort` non è usato; `RaftPeerEndpoint.clientPort` non guida il listener; `ClientConnection` espone un `PrintWriter` sullo stesso stream di `ObjectOutputStream` (`ClientConnection.java:40-63`).
 - **Impatto:** feature apparenti ma non operative e forte rischio di errori in future modifiche.
 - **Fix/test:** rimuovere/deprecare oppure integrare con contract test; un solo framing per socket.
 

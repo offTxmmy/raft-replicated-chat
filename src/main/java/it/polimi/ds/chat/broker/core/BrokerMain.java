@@ -119,7 +119,6 @@ public class BrokerMain {
                 brokerHost,
                 clientPort,
                 clientPort,
-                50002 + nodeId,
                 raftConfig,
                 directoryEndpoint.host(),
                 directoryEndpoint.port());

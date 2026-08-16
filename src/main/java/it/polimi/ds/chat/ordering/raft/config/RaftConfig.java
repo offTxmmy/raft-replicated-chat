@@ -13,7 +13,7 @@ import java.util.TreeMap;
  * <p>The {@link #getVoters() voter map} is the <strong>source of truth</strong>
  * for cluster membership and quorum (Contract A). It must include every voting
  * broker — including the local one — and must be identical on every node of
- * the same cluster. Discovery / {@code PeerRegistry} must NOT alter it.
+ * the same cluster. Runtime reachability information must NOT alter it.
  *
  * <p>Timeouts follow the standard Raft convention:
  * <ul>

@@ -55,14 +55,12 @@ se il gruppo le sceglie e le dichiara.
   persistence e dedup delle proposal.
 - **ClientMain:** consulta Directory, mantiene una connessione broker, invia JOIN/chat,
   gestisce ACK, heartbeat, retry e reconnect.
-- **LanDiscoveryService/PeerRegistry:** discovery ausiliaria; non modifica membership o
-  quorum ed e' attualmente inefficace fra porte per-node differenti.
 
 ### 2.2 Membership
 
 Il design usa **membership Raft statica**. Il voter set arriva dalla Directory al
 bootstrap e viene copiato in `RaftConfig`; quorum e maggioranza non dipendono dalla
-reachability o dal PeerRegistry. Questa scelta e' coerente con il progetto: dynamic
+reachability runtime. Questa scelta e' coerente con il progetto: dynamic
 membership non e' un requisito.
 
 ### 2.3 Matrice dei trasporti
@@ -76,7 +74,6 @@ membership non e' un requisito.
 | `AppendEntries` response | UDP unicast | Piccola risposta per il leader; deve essere trattata come potenzialmente duplicata/riordinata. |
 | Forward client proposal | TCP unicast | Richiesta sincrona follower-leader con risposta. |
 | Client-broker e client-Directory | TCP | Endpoint point-to-point, anche fuori LAN. |
-| Discovery ausiliaria | UDP broadcast | Non necessaria al consenso e non va usata come prova di membership. |
 
 La scelta ibrida e' coerente con il chiarimento del professore: scegliere il mezzo in
 base al pattern del messaggio e spiegare garanzie/traffico, non usare broadcast per

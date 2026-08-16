@@ -34,7 +34,6 @@ public final class TestConfigs {
                     "localhost",
                     clientPort,
                     clientPort,
-                    50002 + brokerId,
                     raftConfig);
         } catch (IOException e) {
             throw new RuntimeException("Failed to create test Raft config", e);

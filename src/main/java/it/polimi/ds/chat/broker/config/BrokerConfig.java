@@ -16,7 +16,6 @@ public class BrokerConfig {
     private final String brokerHost;
     private final int brokerPort;
     private final int clientPort;
-    private final int udpPort;
     private final RaftConfig raftConfig;
     private final String directoryHost;
     private final int directoryPort;
@@ -25,14 +24,12 @@ public class BrokerConfig {
                         String brokerHost,
                         int brokerPort,
                         int clientPort,
-                        int udpPort,
                         RaftConfig raftConfig) {
         this(
                 brokerId,
                 brokerHost,
                 brokerPort,
                 clientPort,
-                udpPort,
                 raftConfig,
                 DEFAULT_DIRECTORY_HOST,
                 DEFAULT_DIRECTORY_PORT);
@@ -42,7 +39,6 @@ public class BrokerConfig {
                         String brokerHost,
                         int brokerPort,
                         int clientPort,
-                        int udpPort,
                         RaftConfig raftConfig,
                         String directoryHost,
                         int directoryPort) {
@@ -50,7 +46,6 @@ public class BrokerConfig {
         this.brokerHost = Objects.requireNonNull(brokerHost, "brokerHost");
         this.brokerPort = validatePort(brokerPort, "brokerPort");
         this.clientPort = validatePort(clientPort, "clientPort");
-        this.udpPort = validatePort(udpPort, "udpPort");
         this.raftConfig = Objects.requireNonNull(raftConfig, "raftConfig");
         this.directoryHost = requireNonBlank(directoryHost, "directoryHost");
         this.directoryPort = validatePort(directoryPort, "directoryPort");
@@ -70,10 +65,6 @@ public class BrokerConfig {
 
     public int getClientPort() {
         return clientPort;
-    }
-
-    public int getUdpPort() {
-        return udpPort;
     }
 
     public RaftConfig getRaftConfig() {

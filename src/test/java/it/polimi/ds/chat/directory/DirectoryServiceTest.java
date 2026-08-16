@@ -166,7 +166,6 @@ class DirectoryServiceTest {
                 "127.0.0.1",
                 legacyBrokerPort,
                 clientPort,
-                clientPort,
                 raft,
                 "127.0.0.1",
                 directoryBrokerPort);
@@ -308,7 +307,6 @@ class DirectoryServiceTest {
                 1,
                 "127.0.0.1",
                 clientPort == 65535 ? clientPort - 1 : clientPort + 1,
-                clientPort,
                 clientPort,
                 raft,
                 "127.0.0.1",
