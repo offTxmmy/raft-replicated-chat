@@ -7,7 +7,9 @@ works between physical machines.
 
 This runbook is the missing cross-host test layer. It uses the production
 `HYBRID` transport and the existing `DirectoryService`, `BrokerMain`, and
-`ClientMain` entry points.
+`ClientMain` entry points. Follow the sections in order: the JUnit suite proves
+the software locally, while this procedure proves the real interfaces,
+firewalls, routing, and UDP broadcast between machines.
 
 ## 1. Topology
 
@@ -29,13 +31,33 @@ UDP port, and cluster ID on every machine:
 0@192.168.1.10:7000:51000,1@192.168.1.11:7001:51001,2@192.168.1.12:7002:51002
 ```
 
-Build the same commit and JDK major version on all three machines:
+## 2. Prepare the machines
+
+Install the same JDK major version, Maven, and Git on the desktop, laptop, and
+Ubuntu server. Checkout the same commit on every machine:
 
 ```text
+git clone <repository-url>
+cd DS-Project2025-2026
+git checkout <commit-or-branch>
 mvn clean package -DskipTests
 ```
 
-On Ubuntu, make the launcher executable once after checkout:
+On Windows, find the LAN address with:
+
+```powershell
+ipconfig
+```
+
+On Ubuntu, use:
+
+```bash
+hostname -I
+```
+
+Replace every `192.168.1.x` value in this document with the actual addresses.
+Do not use `localhost` or `127.0.0.1` in the voter CSV. On Ubuntu, make the
+launcher executable once after checkout:
 
 ```bash
 chmod +x scripts/lan/start-lan-node.sh
@@ -44,7 +66,7 @@ chmod +x scripts/lan/start-lan-node.sh
 Before starting Java, verify reachability. On Windows use
 `Test-NetConnection HOST -Port PORT`; on Ubuntu use `nc -vz HOST PORT`.
 
-## 2. Firewall
+## 3. Firewall and network
 
 Allow inbound traffic on every relevant host:
 
@@ -60,7 +82,54 @@ Disable AP/client isolation for the test network. Do not use `localhost` or
 `127.0.0.1` in the voter CSV. The Directory host must be reachable from every
 broker and client.
 
-## 3. Start the processes
+On Windows, run PowerShell as Administrator on the desktop and laptop:
+
+```powershell
+New-NetFirewallRule -DisplayName "DS Raft TCP" `
+  -Direction Inbound -Protocol TCP `
+  -LocalPort 60000,60001,7000,7001,7002,51000,51001,51002 `
+  -Action Allow
+
+New-NetFirewallRule -DisplayName "DS Raft UDP" `
+  -Direction Inbound -Protocol UDP -LocalPort 7100 -Action Allow
+```
+
+On Ubuntu:
+
+```bash
+sudo ufw allow 60000/tcp
+sudo ufw allow 60001/tcp
+sudo ufw allow 7002/tcp
+sudo ufw allow 51002/tcp
+sudo ufw allow 7100/udp
+sudo ufw reload
+sudo ufw status
+```
+
+The wireless access point must not enable client/AP isolation. If the network
+has multiple interfaces or a VPN, use the physical LAN address and later confirm
+that UDP traffic is visible on the expected interface.
+
+Before starting brokers, test TCP reachability. From the laptop:
+
+```powershell
+Test-NetConnection 192.168.1.10 -Port 60000
+Test-NetConnection 192.168.1.10 -Port 7000
+```
+
+From Ubuntu:
+
+```bash
+nc -vz 192.168.1.10 60000
+nc -vz 192.168.1.10 7000
+nc -vz 192.168.1.11 7001
+```
+
+The checks for broker and client ports can be repeated after those processes
+start. A failed TCP check is a network or firewall problem, not a Raft election
+problem.
+
+## 4. Start the processes
 
 Run the Directory on the desktop. Windows:
 
@@ -102,13 +171,22 @@ an interactive console; enter a distinct username, then type chat text:
 ./scripts/lan/start-lan-node.sh --role client --directory-host 192.168.1.10
 ```
 
-## 4. Test scenarios and pass criteria
+Use distinct usernames such as `alice`, `bob`, and `charlie`. Keep one terminal
+per process open so that election, registration, ACK, and delivery output remains
+visible. Save the output of each process to a separate file or capture it with
+the terminal logging facilities of the operating system.
+
+## 5. Test scenarios and pass criteria
 
 Run the normal automated suite first:
 
 ```text
 mvn clean test
 ```
+
+The command must finish successfully with zero failures and zero errors before
+the physical LAN run is considered meaningful. This command is run once on any
+machine with the source checkout; it does not replace the cross-host test.
 
 Then execute these scenarios manually while saving each process output to a
 separate log file:
@@ -126,12 +204,46 @@ separate log file:
    received across hosts on UDP `7100`; log-bearing AppendEntries and forwarded
    proposals must succeed over the configured TCP RPC ports.
 
+On Ubuntu, observe the broadcast while the brokers are running:
+
+```bash
+sudo tcpdump -ni any udp port 7100
+```
+
+The expected result is traffic for RequestVote and empty heartbeats. AppendEntries
+containing log entries and forwarded proposals are expected on TCP, not UDP.
+
+For a leader-failure test, identify the leader from the broker output and stop
+only that broker with `Ctrl+C` on Windows or `kill <pid>` on Ubuntu. Wait for the
+remaining two brokers to elect a leader, reconnect the affected client, and send
+another message. Do not stop two brokers at once: a three-node Raft cluster needs
+two live voters for a quorum.
+
 Record the date, commit hash, host/IP topology, voter CSV, cluster ID, firewall
 rules, process logs, and (for the broadcast proof) a short packet capture or
 equivalent OS/network log. A same-host `LOCAL_TCP` run is useful regression
 evidence but cannot mark the LAN test passed.
 
-## 5. Result interpretation
+## 6. Cleanup and troubleshooting
+
+After the scenarios, close the clients, then brokers, then the Directory. Remove
+the temporary `raft-data` directories before repeating a fresh-cluster election:
+
+```text
+rm -rf raft-data
+```
+
+On Windows, use `Remove-Item -Recurse -Force raft-data`. Do not delete it when
+specifically testing restart recovery.
+
+If a broker cannot start, check that its RPC and client ports are unused and that
+its voter CSV entry matches its `nodeId`. If the Directory is unreachable, check
+TCP `60000` and that every broker uses the desktop LAN IP. If there is no leader,
+check TCP RPC connectivity between all broker pairs, UDP `7100`, the cluster ID,
+and firewall/AP isolation. If clients do not connect, check TCP `60001` and the
+broker client ports advertised in the voter CSV.
+
+## 7. Result interpretation
 
 This procedure complements, rather than replaces, JUnit. JUnit covers deterministic
 logic and same-process socket integration; this runbook covers real interfaces,
