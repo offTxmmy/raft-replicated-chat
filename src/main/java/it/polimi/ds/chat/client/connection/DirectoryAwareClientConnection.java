@@ -86,7 +86,7 @@ public class DirectoryAwareClientConnection extends ClientConnection {
         }
 
         if (brokerInfo == null) {
-            throw new IOException("No broker is currently available");
+            throw new NoBrokerAvailableException();
         }
 
         Endpoint endpoint = new Endpoint(
@@ -176,5 +176,21 @@ public class DirectoryAwareClientConnection extends ClientConnection {
 
     public int getDirectoryPort() {
         return directoryPort;
+    }
+
+    /** Returns whether the Directory currently advertises at least one broker. */
+    public boolean isBrokerAvailable() throws IOException {
+        try {
+            return brokerLookup.getBestBroker(Set.of()) != null;
+        } catch (ClassNotFoundException e) {
+            throw new IOException("Invalid Directory Service response", e);
+        }
+    }
+
+    /** Signals that Directory is reachable but has no live broker endpoint. */
+    public static final class NoBrokerAvailableException extends IOException {
+        public NoBrokerAvailableException() {
+            super("No broker is currently available");
+        }
     }
 }

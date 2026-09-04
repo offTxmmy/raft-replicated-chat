@@ -225,6 +225,36 @@ class ClientRuntimeIntegrationTest {
     }
 
     @Test
+    void reportsNoBrokerAvailableWhenDirectoryHasNoLiveBroker() throws Exception {
+        DirectoryService directory = new DirectoryService(Map.of());
+        directory.start(0, 0);
+        int directoryClientPort = boundPort(directory, "getBoundClientPortForTesting");
+        List<ClientStatus> statuses = new CopyOnWriteArrayList<>();
+        ClientRuntime runtime = new ClientRuntime(
+                new DirectoryAwareClientConnection("127.0.0.1", directoryClientPort),
+                new ClientMessageSender(60_000L, "offline-client"),
+                "alice",
+                "offline-client",
+                10L,
+                20L,
+                ignored -> { },
+                (status, detail) -> statuses.add(status)
+        );
+
+        try {
+            runtime.start();
+
+            assertTrue(awaitCondition(
+                    () -> statuses.contains(ClientStatus.NO_BROKER_AVAILABLE),
+                    2_000L));
+            assertTrue(statuses.contains(ClientStatus.CONNECTING));
+        } finally {
+            runtime.shutdown(false);
+            directory.stop();
+        }
+    }
+
+    @Test
     void staleAttemptThenLiveReconnectPreservesJoinAndPendingFifo()
             throws Exception {
         try (ScriptedBroker firstBroker = new ScriptedBroker();
@@ -397,6 +427,21 @@ class ClientRuntimeIntegrationTest {
             Thread.sleep(10L);
         }
         throw new AssertionError("Directory did not publish broker " + expectedBrokerId);
+    }
+
+    private static boolean awaitCondition(
+            java.util.function.BooleanSupplier condition,
+            long timeoutMillis
+    ) throws InterruptedException {
+        long deadline = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(timeoutMillis);
+        while (System.nanoTime() < deadline) {
+            if (condition.getAsBoolean()) {
+                return true;
+            }
+            Thread.sleep(10L);
+        }
+        return condition.getAsBoolean();
     }
 
     private record RegistrationConnection(Socket socket, ObjectOutputStream output)

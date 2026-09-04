@@ -176,6 +176,18 @@ per process open so that election, registration, ACK, and delivery output remain
 visible. Save the output of each process to a separate file or capture it with
 the terminal logging facilities of the operating system.
 
+The client prints lifecycle transitions such as:
+
+```text
+[CLIENT] status=CONNECTED (...)
+[CLIENT] status=RECONNECTING (...)
+[CLIENT] status=NO_BROKER_AVAILABLE (...)
+```
+
+`NO_BROKER_AVAILABLE` means that the Directory is reachable but currently has no
+live broker endpoint. The client keeps retrying automatically; it does not mean
+that the process has exited.
+
 ## 5. Test scenarios and pass criteria
 
 Run the normal automated suite first:
@@ -200,7 +212,13 @@ separate log file:
    that broker, wait for a new leader among the remaining two, reconnect the
    affected client, and send another message. The cluster must continue with no
    duplicate delivery.
-4. **Broadcast proof:** record that RequestVote and empty heartbeat traffic is
+4. **Follower catch-up:** with all three brokers synchronized, stop one follower
+  only. Keep the leader and the other follower alive, send one or more messages,
+  then restart the stopped follower with the same `nodeId`, ports, cluster ID,
+  voter CSV, and `raft-data/n<id>` directory. Verify that its log catches up over
+  TCP, that no client-visible history is replayed, and that a subsequent message
+  is delivered without a sequence gap.
+5. **Broadcast proof:** record that RequestVote and empty heartbeat traffic is
    received across hosts on UDP `7100`; log-bearing AppendEntries and forwarded
    proposals must succeed over the configured TCP RPC ports.
 

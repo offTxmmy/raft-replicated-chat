@@ -2,6 +2,7 @@ package it.polimi.ds.chat.client;
 
 import it.polimi.ds.chat.client.connection.ClientConnection;
 import it.polimi.ds.chat.client.connection.ClientConnectionGeneration;
+import it.polimi.ds.chat.client.connection.DirectoryAwareClientConnection;
 import it.polimi.ds.chat.client.messaging.ClientHeartbeatManager;
 import it.polimi.ds.chat.client.messaging.ClientMessageReceiver;
 import it.polimi.ds.chat.client.messaging.ClientMessageSender;
@@ -9,6 +10,8 @@ import it.polimi.ds.chat.protocol.client.ClientJoinMessage;
 import it.polimi.ds.chat.protocol.client.ClientQuitMessage;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.Socket;
 import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -31,12 +34,16 @@ final class ClientRuntime {
     private final ClientMessageSender sender;
     private final String username;
     private final String clientId;
+    private final ClientStatusListener statusListener;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final Object lifecycleLock = new Object();
     private final ClientReconnectManager reconnectManager;
+        private final java.util.concurrent.atomic.AtomicReference<ClientStatus> lastStatus =
+            new java.util.concurrent.atomic.AtomicReference<>();
 
     private SessionRuntime currentSession;
+        private volatile Thread availabilityMonitor;
 
     ClientRuntime(ClientConnection connection,
                   ClientMessageSender sender,
@@ -49,7 +56,8 @@ final class ClientRuntime {
                 clientId,
                 INITIAL_RECONNECT_BACKOFF_MS,
                 MAX_RECONNECT_BACKOFF_MS,
-                Thread::sleep
+                Thread::sleep,
+                (status, detail) -> { }
         );
     }
 
@@ -60,10 +68,31 @@ final class ClientRuntime {
                   long initialReconnectBackoffMs,
                   long maxReconnectBackoffMs,
                   ClientReconnectManager.BackoffWaiter backoffWaiter) {
+            this(
+                connection,
+                sender,
+                username,
+                clientId,
+                initialReconnectBackoffMs,
+                maxReconnectBackoffMs,
+                backoffWaiter,
+                (status, detail) -> { }
+            );
+            }
+
+            ClientRuntime(ClientConnection connection,
+                  ClientMessageSender sender,
+                  String username,
+                  String clientId,
+                  long initialReconnectBackoffMs,
+                  long maxReconnectBackoffMs,
+                  ClientReconnectManager.BackoffWaiter backoffWaiter,
+                  ClientStatusListener statusListener) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.sender = Objects.requireNonNull(sender, "sender");
         this.username = Objects.requireNonNull(username, "username");
         this.clientId = Objects.requireNonNull(clientId, "clientId");
+        this.statusListener = Objects.requireNonNull(statusListener, "statusListener");
         this.reconnectManager = new ClientReconnectManager(
                 this::reconnectOnce,
                 initialReconnectBackoffMs,
@@ -80,10 +109,12 @@ final class ClientRuntime {
         if (!started.compareAndSet(false, true)) {
             throw new IllegalStateException("Client runtime was already started");
         }
+        startAvailabilityMonitor();
 
         ClientConnectionGeneration generation =
                 connection.getCurrentGeneration();
         if (generation == null || !generation.isActive()) {
+            publishStatus(ClientStatus.CONNECTING, "looking for a broker");
             reconnectManager.requestReconnect();
             return;
         }
@@ -95,6 +126,7 @@ final class ClientRuntime {
             }
             connection.markEndpointFailed(generation);
             connection.closeGeneration(generation);
+            publishStatus(ClientStatus.RECONNECTING, e.getMessage());
             reconnectManager.requestReconnect();
         }
     }
@@ -103,6 +135,12 @@ final class ClientRuntime {
     void shutdown(boolean sendQuit) {
         if (!running.compareAndSet(true, false)) {
             return;
+        }
+
+        publishStatus(ClientStatus.STOPPED, "client stopped");
+        Thread monitor = availabilityMonitor;
+        if (monitor != null) {
+            monitor.interrupt();
         }
 
         reconnectManager.shutdown();
@@ -181,6 +219,8 @@ final class ClientRuntime {
             }
 
             session.startWorkers();
+                publishStatus(ClientStatus.CONNECTED,
+                    generation.getHost() + ":" + generation.getPort());
         } catch (IOException | RuntimeException e) {
             if (session != null) {
                 session.stopWorkers();
@@ -216,6 +256,9 @@ final class ClientRuntime {
 
         failedSession.stopWorkers();
         connection.markEndpointFailed(failedGeneration);
+        publishStatus(ClientStatus.RECONNECTING,
+            "connection lost: " + failedGeneration.getHost()
+                + ":" + failedGeneration.getPort());
         // deactivate + socket close interrupts a sender that may currently hold
         // its state lock while blocked in writer.send().
         connection.closeGeneration(failedGeneration);
@@ -261,7 +304,15 @@ final class ClientRuntime {
             throw new IOException("Client is shutting down");
         }
 
-        connection.open();
+        try {
+            connection.open();
+        } catch (DirectoryAwareClientConnection.NoBrokerAvailableException e) {
+            publishStatus(ClientStatus.NO_BROKER_AVAILABLE, e.getMessage());
+            throw e;
+        } catch (IOException e) {
+            publishStatus(ClientStatus.RECONNECTING, e.getMessage());
+            throw e;
+        }
         ClientConnectionGeneration generation =
                 connection.getCurrentGeneration();
         if (generation == null) {
@@ -278,9 +329,72 @@ final class ClientRuntime {
         } catch (IOException e) {
             if (running.get()) {
                 connection.markEndpointFailed(generation);
+                publishStatus(ClientStatus.RECONNECTING, e.getMessage());
             }
             connection.closeGeneration(generation);
             throw e;
+        }
+    }
+
+    private void publishStatus(ClientStatus status, String detail) {
+        if (lastStatus.getAndSet(status) == status) {
+            return;
+        }
+        try {
+            statusListener.onStatusChanged(status, detail == null ? "" : detail);
+        } catch (RuntimeException ignored) {
+            // Status reporting must never affect reconnect or shutdown.
+        }
+    }
+
+    private void startAvailabilityMonitor() {
+        if (!(connection instanceof DirectoryAwareClientConnection directoryConnection)) {
+            return;
+        }
+
+        Thread monitor = new Thread(() -> {
+            while (running.get()) {
+                try {
+                    SessionRuntime session = currentSession;
+                    if (session != null
+                            && session.generation.isActive()
+                            && !isEndpointReachable(session.generation.getHost(),
+                            session.generation.getPort())) {
+                        handleConnectionFailure(session.generation);
+                    }
+
+                    if (!directoryConnection.isBrokerAvailable()) {
+                        publishStatus(ClientStatus.NO_BROKER_AVAILABLE,
+                                "Directory has no live broker");
+                    } else if (currentSession != null) {
+                        publishStatus(ClientStatus.CONNECTED,
+                                currentSession.generation.getHost()
+                                        + ":" + currentSession.generation.getPort());
+                    }
+                    Thread.sleep(1_000L);
+                } catch (DirectoryAwareClientConnection.NoBrokerAvailableException e) {
+                    publishStatus(ClientStatus.NO_BROKER_AVAILABLE, e.getMessage());
+                } catch (IOException e) {
+                    if (currentSession == null) {
+                        publishStatus(ClientStatus.RECONNECTING, e.getMessage());
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }, "ClientAvailabilityMonitor");
+        monitor.setDaemon(true);
+        availabilityMonitor = monitor;
+        monitor.start();
+    }
+
+    private static boolean isEndpointReachable(String host, int port) {
+        try (Socket probe = new Socket()) {
+            probe.connect(new InetSocketAddress(host, port), 500);
+            return true;
+        } catch (IOException e) {
+            return false;
         }
     }
 

@@ -41,7 +41,12 @@ public class ClientMain {
                     connection,
                     sender,
                     username,
-                    clientId
+                    clientId,
+                    250L,
+                    2_000L,
+                    Thread::sleep,
+                    (status, detail) -> System.out.println(
+                        "[CLIENT] status=" + status + " (" + detail + ")")
             );
             runtime.start();
             System.out.println("[MAIN] Connecting to an available broker; "
