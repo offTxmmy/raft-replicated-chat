@@ -11,6 +11,7 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 import it.polimi.ds.chat.common.clock.VectorClock;
+import it.polimi.ds.chat.common.delivery.HoldBackQueue;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -275,6 +276,88 @@ class RaftOrderingServiceIntegrationTest {
                     .anyMatch(msg -> msg.getText().equals("after restart"));
             assertTrue(hasAfterRestart, "node " + i + " did not deliver restarted message");
         }
+    }
+
+    @Test
+    void restartedFollowerCatchesUpAndRestoresApplicationDeliveryState(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int[] ports = pickFreePorts(3);
+        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
+        for (int i = 0; i < 3; i++) {
+            voters.put(i, new RaftPeerEndpoint(i, "127.0.0.1", ports[i], 50000 + i));
+        }
+
+        Path[] storageDirs = new Path[3];
+        HoldBackQueue[] queues = new HoldBackQueue[3];
+        List<List<ChatDeliverMessage>> deliveries = new ArrayList<>();
+        nodes = new RaftOrderingService[3];
+
+        for (int i = 0; i < 3; i++) {
+            storageDirs[i] = baseDir.resolve("n" + i);
+            queues[i] = new HoldBackQueue();
+            List<ChatDeliverMessage> ready = new CopyOnWriteArrayList<>();
+            deliveries.add(ready);
+            nodes[i] = buildService(i, ports[i], voters, storageDirs[i]);
+            HoldBackQueue queue = queues[i];
+            nodes[i].onDeliver(message -> ready.addAll(queue.enqueue(message)));
+        }
+
+        for (RaftOrderingService node : nodes) {
+            node.start();
+        }
+
+        int leader = waitForSingleLeader();
+        assertTrue(nodes[leader].propose(new ChatReqMessage(
+                "before-follower-restart",
+                leader,
+                "alice",
+                "before follower restart",
+                new VectorClock()
+        )));
+        assertTrue(waitFor(
+                () -> deliveries.stream().allMatch(messages -> messages.size() == 1),
+                DELIVERY_DEADLINE_MS
+        ));
+
+        int restartedFollower = (leader + 1) % 3;
+        nodes[restartedFollower].stop();
+
+        assertTrue(nodes[leader].propose(new ChatReqMessage(
+                "while-follower-offline",
+                leader,
+                "alice",
+                "while follower offline",
+                new VectorClock()
+        )));
+        assertTrue(waitFor(
+                () -> deliveries.get(leader).size() == 2,
+                DELIVERY_DEADLINE_MS
+        ));
+
+        nodes[restartedFollower] = buildService(
+                restartedFollower,
+                ports[restartedFollower],
+                voters,
+                storageDirs[restartedFollower]
+        );
+        queues[restartedFollower] = new HoldBackQueue();
+        List<ChatDeliverMessage> restartedDeliveries = new CopyOnWriteArrayList<>();
+        HoldBackQueue restartedQueue = queues[restartedFollower];
+        nodes[restartedFollower].onDeliver(
+                message -> restartedDeliveries.addAll(restartedQueue.enqueue(message)));
+        nodes[restartedFollower].start();
+
+        assertTrue(waitFor(
+                () -> restartedDeliveries.size() == 2
+                        && restartedQueue.getExpectedSeq() == 3L
+                        && restartedQueue.getPendingCount() == 0,
+                DELIVERY_DEADLINE_MS
+        ), "restarted follower did not replay and catch up: " + restartedDeliveries);
+        assertEquals(
+                List.of("before follower restart", "while follower offline"),
+                restartedDeliveries.stream().map(ChatDeliverMessage::getText).toList()
+        );
     }
 
     @Test

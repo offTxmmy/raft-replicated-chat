@@ -137,6 +137,33 @@ class RaftStateMachineAdapterTest {
     }
 
     @Test
+    void replayedCommittedPrefixRestoresSequenceAndCausalState() {
+        List<ChatDeliverMessage> deliveredToClient = new ArrayList<>();
+        it.polimi.ds.chat.common.delivery.HoldBackQueue holdBackQueue =
+                new it.polimi.ds.chat.common.delivery.HoldBackQueue();
+        RaftStateMachineAdapter adapter = new RaftStateMachineAdapter(
+                message -> deliveredToClient.addAll(holdBackQueue.enqueue(message)));
+
+        VectorClock firstClock = new VectorClock();
+        firstClock.increment(1);
+        adapter.accept(new RaftLogEntry(1L, 1L, null));
+        adapter.accept(new RaftLogEntry(2L, 1L, new ChatCommand(
+                "msg-1", 1, "alice", "before restart", firstClock,
+                "client-1", 1L)));
+
+        VectorClock secondClock = new VectorClock(firstClock);
+        secondClock.increment(0);
+        adapter.accept(new RaftLogEntry(3L, 1L, new ChatCommand(
+                "msg-2", 0, "bob", "after catch-up", secondClock,
+                "client-1", 2L)));
+
+        assertEquals(List.of("before restart", "after catch-up"),
+                deliveredToClient.stream().map(ChatDeliverMessage::getText).toList());
+        assertEquals(3L, holdBackQueue.getExpectedSeq());
+        assertEquals(0, holdBackQueue.getPendingCount());
+    }
+
+    @Test
     void joinDeliveryBarrierIsAppliedInternallyWithoutConsumingChatSequence() {
         List<ChatDeliverMessage> deliveredMessages = new ArrayList<>();
         RaftStateMachineAdapter adapter = new RaftStateMachineAdapter(deliveredMessages::add);

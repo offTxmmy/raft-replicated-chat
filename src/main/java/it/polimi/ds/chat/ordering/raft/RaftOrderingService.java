@@ -132,6 +132,16 @@ public final class RaftOrderingService implements OrderingService {
         // 3. State machine: deliver committed entries as ChatDeliverMessage.
         RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
 
+        // Rebuild the local application state before exposing the broker. The
+        // persisted Raft indexes alone do not restore the dense chat sequence
+        // or the delivered vector clock held by the broker's delivery layer.
+        for (RaftLogEntry entry : persistedEntries) {
+            if (entry.getIndex() > restoredLastApplied) {
+                break;
+            }
+            applyHook.accept(entry);
+        }
+
         commitManager = new RaftCommitManager(
                 raftLog,
                 entry -> applyCommittedEntryOnce(entry, applyHook),

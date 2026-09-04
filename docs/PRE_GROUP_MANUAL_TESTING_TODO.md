@@ -417,6 +417,57 @@ su due notebook non e' `VERIFIED`.
   proposte. Unit/component test coprono prefissi buffered/ready.
 - **Stato:** VERIFIED
 
+## CODE-18 - Segnalare al client l'assenza di broker disponibili
+
+- **Categoria:** REQUIRED FOR CORRECTNESS
+- **Priorita':** P1
+- **Area/file:** `ClientRuntime`, `ClientMain`,
+  `DirectoryAwareClientConnection`, `ClientStatus`
+- **Problema:** quando tutti i broker diventano irraggiungibili, il client continua
+  il reconnect in background senza esporre uno stato offline all'utente. Inoltre una
+  socket TCP morta puo' non produrre immediatamente EOF/RST e ritardare il rilevamento.
+- **Impatto:** il client sembra bloccato anche se non esiste alcun endpoint utilizzabile;
+  l'utente non distingue una connessione attiva da un reconnect senza broker.
+- **Azione:** introdurre gli stati `CONNECTING`, `CONNECTED`, `RECONNECTING`,
+  `NO_BROKER_AVAILABLE` e `STOPPED`; interrogare periodicamente la Directory e
+  verificare l'endpoint TCP della generazione corrente, mantenendo il reconnect
+  automatico e cancellabile con `/quit`.
+- **Verifica:** il client deve notificare `RECONNECTING` dopo la perdita del broker e
+  `NO_BROKER_AVAILABLE` quando la Directory non pubblica endpoint vivi, senza terminare
+  il processo.
+- **Esito 2026-09-04:** problema riprodotto con Directory, tre broker e client in JVM
+  separate su loopback. Dopo il fix lo smoke produce `CONNECTED`, `RECONNECTING` e
+  `NO_BROKER_AVAILABLE`; il test `ClientRuntimeIntegrationTest` verifica inoltre la
+  risposta quando la Directory e' raggiungibile ma non ha broker attivi.
+- **Stato:** VERIFIED
+
+## CODE-19 - Ripristinare lo stato applicativo durante il follower catch-up
+
+- **Categoria:** REQUIRED FOR CORRECTNESS
+- **Priorita':** P1
+- **Area/file:** `RaftOrderingService`, `RaftStateMachineAdapter`,
+  `HoldBackQueue`, `RaftOrderingServiceIntegrationTest`
+- **Problema:** dopo il restart di un follower il log Raft persistito viene ricaricato,
+  ma la sequence applicativa, il vector clock e lo stato della `HoldBackQueue`
+  ripartono da zero. Le nuove entry possono quindi arrivare come `seq=2` mentre la
+  coda attende `seq=1`.
+- **Impatto:** il follower stampa `Gap detected`, mantiene messaggi in hold-back e
+  puo' bloccare la consegna applicativa anche se il log Raft viene correttamente
+  replicato.
+- **Azione:** prima di esporre il listener client, replayare silenziosamente il
+  prefisso del log fino a `restoredLastApplied`. Il replay ricostruisce la sequence
+  applicativa e il vector clock senza esporre history ai client; il catch-up successivo
+  riceve soltanto le entry mancanti.
+- **Verifica:** fermare un solo follower mantenendo leader e secondo follower attivi,
+  committare messaggi con quorum 2/3, riavviare il follower sullo stesso storage e
+  verificare log allineato, sequence contigua, coda vuota, nessun duplicato e nessun
+  replay client-visible.
+- **Esito 2026-09-04:** problema riprodotto con il log `restoredLogLastIndex=5` seguito
+  da `Gap detected! Received seq = 2, expected = 1`. Dopo il fix passano
+  `RaftStateMachineAdapterTest.replayedCommittedPrefixRestoresSequenceAndCausalState`
+  e `RaftOrderingServiceIntegrationTest.restartedFollowerCatchesUpAndRestoresApplicationDeliveryState`.
+- **Stato:** VERIFIED
+
 ---
 
 # 2. Missing or insufficient automated tests
