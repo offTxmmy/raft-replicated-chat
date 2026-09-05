@@ -27,8 +27,9 @@ import java.util.function.Consumer;
  * </ul>
  *
  * <p>On startup, callers may provide persisted commit progress. In that case
- * the manager resumes from the supplied state and applies only the missing
- * suffix in {@code (lastApplied, commitIndex]}.
+ * the caller must first reconstruct any volatile state represented by the
+ * already-applied prefix, while this manager applies only the missing suffix
+ * in {@code (lastApplied, commitIndex]}.
  */
 public class RaftCommitManager {
 

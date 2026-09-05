@@ -116,22 +116,28 @@ public final class RaftOrderingService implements OrderingService {
                 restoredCommitIndex
         );
 
-        // Only entries that were already applied before the restart are known to have
-        // passed through the application-level deduplication boundary.
+        // Rebuild every volatile application projection from the prefix that had
+        // already crossed the state-machine boundary before the crash. This runs
+        // before Raft networking (and, in Broker.start(), before the client
+        // listener), so callbacks reconstruct sequence/causal state without
+        // exposing persisted chat history to newly connected clients.
+        //
+        // Reusing applyCommittedEntryOnce is important: a duplicate client
+        // command that occupied two committed log positions was applied only
+        // once before the crash and must consume only one application sequence
+        // again during reconstruction.
+        committedProposalKeys.clear();
+        RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
         for (RaftLogEntry entry : persistedEntries) {
             if (entry.getIndex() > restoredLastApplied) {
                 break;
             }
 
-            ChatCommand cmd = entry.getCommand();
-            if (cmd != null) {
-                committedProposalKeys.add(proposalKey(cmd));
-            }
+            applyCommittedEntryOnce(entry, applyHook);
         }
 
-        // 3. State machine: deliver committed entries as ChatDeliverMessage.
-        RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
-
+        // 3. Resume normal application. The constructor applies exactly the
+        // committed-but-not-applied suffix (restoredLastApplied, restoredCommitIndex].
         commitManager = new RaftCommitManager(
                 raftLog,
                 entry -> applyCommittedEntryOnce(entry, applyHook),

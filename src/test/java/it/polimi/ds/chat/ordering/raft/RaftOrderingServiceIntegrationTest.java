@@ -11,6 +11,7 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 import it.polimi.ds.chat.common.clock.VectorClock;
+import it.polimi.ds.chat.common.delivery.HoldBackQueue;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -222,7 +223,13 @@ class RaftOrderingServiceIntegrationTest {
         assertTrue(firstLeader >= 0, "no leader elected before restart");
 
         ChatReqMessage firstReq = new ChatReqMessage(
-                "msg-before-restart", firstLeader, "alice", "before restart", new VectorClock());
+                "msg-before-restart",
+                firstLeader,
+                "alice",
+                "before restart",
+                new VectorClock(),
+                "restart-client",
+                1L);
 
         assertTrue(nodes[firstLeader].propose(firstReq), "first proposal should commit");
 
@@ -256,11 +263,38 @@ class RaftOrderingServiceIntegrationTest {
             n.start();
         }
 
+        for (int i = 0; i < 3; i++) {
+            assertEquals(1, secondRunDeliveries.get(i).size(),
+                    "node " + i + " did not reconstruct the applied chat prefix");
+            assertEquals(1L, secondRunDeliveries.get(i).get(0).getSeq());
+            assertEquals("before restart", secondRunDeliveries.get(i).get(0).getText());
+        }
+
         int secondLeader = waitForSingleLeader();
         assertTrue(secondLeader >= 0, "no leader elected after restart");
 
+        long logIndexBeforeRetry = nodes[secondLeader].getLastLogIndexForTesting();
+        ChatReqMessage committedRetry = new ChatReqMessage(
+                "retry-after-restart",
+                secondLeader,
+                "alice",
+                "must stay deduplicated",
+                new VectorClock(),
+                "restart-client",
+                1L);
+        assertTrue(nodes[secondLeader].propose(committedRetry),
+                "a retry committed before restart should receive a definitive ACK");
+        assertEquals(logIndexBeforeRetry, nodes[secondLeader].getLastLogIndexForTesting(),
+                "a committed pre-restart retry must not append another log entry");
+
         ChatReqMessage secondReq = new ChatReqMessage(
-                "msg-after-restart", secondLeader, "alice", "after restart", new VectorClock());
+                "msg-after-restart",
+                secondLeader,
+                "alice",
+                "after restart",
+                new VectorClock(),
+                "restart-client",
+                2L);
 
         assertTrue(nodes[secondLeader].propose(secondReq), "second proposal should commit");
 
@@ -271,10 +305,101 @@ class RaftOrderingServiceIntegrationTest {
         ), "second message not delivered after restart");
 
         for (int i = 0; i < 3; i++) {
-            boolean hasAfterRestart = secondRunDeliveries.get(i).stream()
-                    .anyMatch(msg -> msg.getText().equals("after restart"));
-            assertTrue(hasAfterRestart, "node " + i + " did not deliver restarted message");
+            List<ChatDeliverMessage> delivered = secondRunDeliveries.get(i);
+            assertEquals(2, delivered.size(),
+                    "node " + i + " replayed or delivered an unexpected chat");
+            assertEquals(2L, delivered.get(1).getSeq(),
+                    "node " + i + " did not continue the dense application sequence");
+            assertEquals("after restart", delivered.get(1).getText());
         }
+    }
+
+    @Test
+    void startupReconstructsAppliedPrefixThenAppliesOnlyCommittedMissingSuffix(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort = pickFreePorts(1)[0];
+        Path storageDir = baseDir.resolve("n0");
+        Files.createDirectories(storageDir);
+
+        FileRaftPersistence persistence = new FileRaftPersistence(storageDir);
+        persistence.persistTermAndVote(4L, null);
+
+        VectorClock firstClock = new VectorClock();
+        firstClock.increment(0);
+        VectorClock secondClock = new VectorClock(firstClock);
+        secondClock.increment(0);
+        VectorClock uncommittedClock = new VectorClock(secondClock);
+        uncommittedClock.increment(0);
+
+        persistence.appendLogEntry(new RaftLogEntry(1L, 1L, null));
+        persistence.appendLogEntry(new RaftLogEntry(
+                2L,
+                1L,
+                new ChatCommand(
+                        "committed-1", 0, "alice", "first",
+                        firstClock, "recovery-client", 1L)));
+        persistence.appendLogEntry(new RaftLogEntry(
+                3L,
+                2L,
+                ChatCommand.deliveryBarrier("join-barrier:old-session", 0)));
+        persistence.appendLogEntry(new RaftLogEntry(4L, 3L, null));
+        persistence.appendLogEntry(new RaftLogEntry(
+                5L,
+                3L,
+                new ChatCommand(
+                        "committed-2", 0, "alice", "second",
+                        secondClock, "recovery-client", 2L)));
+        persistence.appendLogEntry(new RaftLogEntry(
+                6L,
+                4L,
+                new ChatCommand(
+                        "uncommitted", 0, "alice", "must-not-apply",
+                        uncommittedClock, "recovery-client", 3L)));
+
+        // Indexes 1..3 crossed the application boundary before the crash.
+        // Indexes 4..5 are committed but not applied. Index 6 is not committed.
+        persistence.persistCommitProgress(5L, 3L);
+
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0, new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000));
+        RaftConfig raft = new RaftConfig(
+                10_000L,
+                12_000L,
+                1_000L,
+                rpcPort,
+                RaftTransportMode.LOCAL_TCP,
+                RaftConfig.DEFAULT_RAFT_BROADCAST_PORT,
+                RaftConfig.DEFAULT_UDP_MAX_PAYLOAD_BYTES,
+                RaftConfig.DEFAULT_CLUSTER_ID,
+                storageDir,
+                voters);
+        BrokerConfig cfg = new BrokerConfig(0, "127.0.0.1", 50000, raft);
+
+        nodes = new RaftOrderingService[]{new RaftOrderingService(cfg)};
+        HoldBackQueue queue = new HoldBackQueue();
+        List<ChatDeliverMessage> released = new CopyOnWriteArrayList<>();
+        nodes[0].onDeliver(message -> released.addAll(queue.enqueue(message)));
+
+        nodes[0].start();
+
+        assertEquals(List.of(1L, 2L),
+                released.stream().map(ChatDeliverMessage::getSeq).toList(),
+                "no-op and JOIN entries must not consume chat sequence numbers");
+        assertEquals(List.of("first", "second"),
+                released.stream().map(ChatDeliverMessage::getText).toList());
+        assertEquals(3L, queue.getExpectedSeq());
+        assertEquals(0, queue.getPendingCount());
+        assertEquals(2, queue.getDeliveredClock().getTimeStamp(0));
+
+        RaftPersistence.CommitProgress restored =
+                new FileRaftPersistence(storageDir).loadCommitProgress();
+        assertEquals(5L, restored.commitIndex());
+        assertEquals(5L, restored.lastApplied(),
+                "the committed-but-not-applied suffix must be applied exactly once");
+        assertTrue(released.stream().noneMatch(
+                message -> "must-not-apply".equals(message.getText())),
+                "an uncommitted log entry crossed the state-machine boundary");
     }
 
     @Test

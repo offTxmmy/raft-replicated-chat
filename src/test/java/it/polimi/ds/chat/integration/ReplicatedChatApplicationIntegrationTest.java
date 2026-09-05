@@ -212,6 +212,71 @@ class ReplicatedChatApplicationIntegrationTest {
         }
     }
 
+    @Test
+    void restartedFollowerRebuildsApplicationStateWithoutLeakingHistory(
+            @TempDir Path storageRoot) throws Exception {
+        try (ApplicationCluster cluster = ApplicationCluster.start(storageRoot)) {
+            int leader = cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
+            int senderBrokerId = (leader + 1) % 3;
+            int restartedBrokerId = (leader + 2) % 3;
+
+            try (WireClient sender = WireClient.connect(
+                    LOOPBACK,
+                    cluster.clientPort(senderBrokerId),
+                    "alice",
+                    "restart-alice");
+                 WireClient observer = WireClient.connect(
+                         LOOPBACK,
+                         cluster.clientPort(leader),
+                         "observer",
+                         "restart-observer")) {
+                sender.awaitWelcome();
+                observer.awaitWelcome();
+
+                sender.sendMessageAndAwaitAck(1L, "before-restart-1");
+                observer.awaitExactWireMessage("MSG 1 alice:before-restart-1");
+                sender.sendMessageAndAwaitAck(2L, "before-restart-2");
+                observer.awaitExactWireMessage("MSG 2 alice:before-restart-2");
+
+                assertTrue(awaitCondition(
+                        () -> cluster.broker(restartedBrokerId)
+                                .getVectorClock().getTimeStamp(senderBrokerId) == 2,
+                        MESSAGE_TIMEOUT),
+                        "the follower did not apply the prefix before it was stopped");
+
+                cluster.stopBroker(restartedBrokerId);
+
+                sender.sendMessageAndAwaitAck(3L, "committed-while-follower-down");
+                observer.awaitExactWireMessage("MSG 3 alice:committed-while-follower-down");
+
+                cluster.restartBroker(restartedBrokerId);
+                cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
+
+                assertTrue(awaitCondition(() -> {
+                    Broker restarted = cluster.broker(restartedBrokerId);
+                    return restarted.getVectorClock().getTimeStamp(senderBrokerId) == 3
+                            && restarted.getSendVectorClock().getTimeStamp(senderBrokerId) == 3;
+                }, MESSAGE_TIMEOUT),
+                        "the restarted follower did not rebuild and catch up its causal state");
+
+                try (WireClient newcomer = WireClient.connect(
+                        LOOPBACK,
+                        cluster.clientPort(restartedBrokerId),
+                        "newcomer",
+                        "restart-newcomer")) {
+                    newcomer.awaitWelcome();
+                    newcomer.assertNoInboundObject(ABSENCE_WINDOW,
+                            "persisted chat history leaked to a post-restart JOIN");
+
+                    newcomer.sendMessageAndAwaitAck(1L, "after-restart");
+                    observer.awaitExactWireMessage("MSG 4 newcomer:after-restart");
+                    newcomer.assertNoInboundObject(ABSENCE_WINDOW,
+                            "the post-restart sender received an echo or a replay");
+                }
+            }
+        }
+    }
+
     private static void sendConcurrently(WireClient first,
                                          long firstSequence,
                                          String firstText,
@@ -319,6 +384,7 @@ class ReplicatedChatApplicationIntegrationTest {
         private final DirectoryService directory;
         private final int directoryClientPort;
         private final int[] clientPorts;
+        private final BrokerConfig[] brokerConfigs;
         private final Broker[] brokers;
         private final Thread[] brokerThreads;
         private final List<Throwable> startupFailures = new CopyOnWriteArrayList<>();
@@ -328,12 +394,14 @@ class ReplicatedChatApplicationIntegrationTest {
                                    DirectoryService directory,
                                    int directoryClientPort,
                                    int[] clientPorts,
+                                   BrokerConfig[] brokerConfigs,
                                    Broker[] brokers,
                                    Thread[] brokerThreads) {
             this.reservations = reservations;
             this.directory = directory;
             this.directoryClientPort = directoryClientPort;
             this.clientPorts = clientPorts;
+            this.brokerConfigs = brokerConfigs;
             this.brokers = brokers;
             this.brokerThreads = brokerThreads;
         }
@@ -341,6 +409,7 @@ class ReplicatedChatApplicationIntegrationTest {
         static ApplicationCluster start(Path storageRoot) throws Exception {
             TcpPortReservations reservations = TcpPortReservations.reserve(8);
             DirectoryService directory = null;
+            BrokerConfig[] brokerConfigs = new BrokerConfig[3];
             Broker[] brokers = new Broker[3];
             Thread[] threads = new Thread[3];
             ApplicationCluster cluster = null;
@@ -375,13 +444,14 @@ class ReplicatedChatApplicationIntegrationTest {
                             "application-e2e-" + storageRoot.getFileName(),
                             nodeStorage,
                             voters);
-                    brokers[nodeId] = new Broker(new BrokerConfig(
+                    brokerConfigs[nodeId] = new BrokerConfig(
                             nodeId,
                             LOOPBACK,
                             clientPorts[nodeId],
                             raftConfig,
                             LOOPBACK,
-                            directoryBrokerPort));
+                            directoryBrokerPort);
+                    brokers[nodeId] = new Broker(brokerConfigs[nodeId]);
                 }
 
                 ApplicationCluster startedCluster = new ApplicationCluster(
@@ -389,6 +459,7 @@ class ReplicatedChatApplicationIntegrationTest {
                         directory,
                         directoryClientPort,
                         clientPorts,
+                        brokerConfigs,
                         brokers,
                         threads);
                 cluster = startedCluster;
@@ -536,6 +607,37 @@ class ReplicatedChatApplicationIntegrationTest {
                 thread.join(3_000L);
                 assertFalse(thread.isAlive(), "stopped broker thread did not terminate: " + nodeId);
             }
+        }
+
+        void restartBroker(int nodeId) throws Exception {
+            assertTrue(stoppedBrokers.remove(nodeId),
+                    "broker " + nodeId + " must be stopped before restart");
+
+            Broker replacement = new Broker(brokerConfigs[nodeId]);
+            brokers[nodeId] = replacement;
+            Thread thread = new Thread(() -> {
+                try {
+                    replacement.start();
+                } catch (Throwable failure) {
+                    startupFailures.add(failure);
+                }
+            }, "ApplicationE2E-Broker-Restart-" + nodeId);
+            thread.setDaemon(true);
+            brokerThreads[nodeId] = thread;
+            thread.start();
+
+            boolean listening = awaitCondition(() -> {
+                try (Socket probe = new Socket()) {
+                    probe.connect(new InetSocketAddress(
+                            LOOPBACK, clientPorts[nodeId]), 200);
+                    return true;
+                } catch (IOException ignored) {
+                    return false;
+                }
+            }, STARTUP_TIMEOUT);
+            assertNoStartupFailure();
+            assertTrue(listening,
+                    "restarted broker did not reopen its client listener: " + nodeId);
         }
 
         private void assertNoStartupFailure() {

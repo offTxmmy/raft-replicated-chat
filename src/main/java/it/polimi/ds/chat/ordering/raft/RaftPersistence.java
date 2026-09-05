@@ -23,8 +23,9 @@ import java.util.List;
 
  * <p>Persisting {@code commitIndex}/{@code lastApplied} is not a Raft election
  * requirement, but it provides deterministic restart behavior for the local
- * state machine: after a crash, the node can resume from the last applied
- * position instead of replaying from index 1.
+ * state machine: after a crash, the node can reconstruct the already-applied
+ * prefix silently, then execute only the committed-but-not-applied suffix as
+ * new application work.
  *
  * <p>Log and commit-progress methods are default no-op so that test doubles only
  * interested in election state do not need to implement them.
