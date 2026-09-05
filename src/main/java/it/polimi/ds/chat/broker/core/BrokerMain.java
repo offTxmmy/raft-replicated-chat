@@ -136,7 +136,8 @@ public class BrokerMain {
                 + ", storageDir=" + storageDir.toAbsolutePath());
 
         Broker broker = new Broker(config);
-        try {
+        try (BrokerConsoleStatus consoleStatus = BrokerConsoleStatus.create()) {
+            broker.setClientStatusOutput(consoleStatus);
             broker.start();
         } catch (IOException e) {
             System.err.println("Broker failed: " + e.getMessage());

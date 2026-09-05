@@ -10,6 +10,7 @@ import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.client.ClientJoinMessage;
+import it.polimi.ds.chat.protocol.client.ClientQuitMessage;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -26,12 +27,18 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeout;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -152,6 +159,167 @@ class BrokerDeliveryLifecycleTest {
     }
 
     @Test
+    void clientStatusTracksOnlyPostJoinActiveRecipients() throws Exception {
+        Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000));
+        broker.setOrderingService(new ImmediateBoundaryOrderingService());
+
+        try (ServerSocket listener = new ServerSocket(0);
+             Socket peer = new Socket("127.0.0.1", listener.getLocalPort());
+             Socket accepted = listener.accept()) {
+            peer.setSoTimeout(2_000);
+            broker.startClientSession(accepted);
+
+            ObjectOutputStream peerOut = new ObjectOutputStream(peer.getOutputStream());
+            peerOut.flush();
+            ObjectInputStream peerIn = new ObjectInputStream(peer.getInputStream());
+
+            assertEquals(List.of(), broker.activeClientUsernamesSnapshot(),
+                    "an accepted pre-JOIN session is not an active recipient");
+            assertEquals("[Broker 1] Connected clients (0): ",
+                    broker.currentClientStatusLine());
+
+            peerOut.writeObject(ClientJoinMessage.joinCommand("alice", "status-client"));
+            peerOut.flush();
+            assertEquals(ClientJoinMessage.welcome("alice"), peerIn.readObject());
+
+            awaitCondition(() -> broker.activeClientUsernamesSnapshot().equals(List.of("alice")));
+            assertEquals("[Broker 1] Connected clients (1): alice",
+                    broker.currentClientStatusLine());
+
+            peerOut.writeObject(ClientQuitMessage.quitCommand());
+            peerOut.flush();
+            awaitCondition(() -> broker.activeClientUsernamesSnapshot().isEmpty());
+            assertEquals("[Broker 1] Connected clients (0): ",
+                    broker.currentClientStatusLine());
+        } finally {
+            broker.stop();
+        }
+    }
+
+    @Test
+    void clientStatusSnapshotSortsAndPreservesDuplicateUsernames() {
+        Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000));
+        broker.setOrderingService(new ImmediateBoundaryOrderingService());
+        List<NamedClientHandler> handlers = List.of(
+                new NamedClientHandler(broker, "zeta"),
+                new NamedClientHandler(broker, "alice"),
+                new NamedClientHandler(broker, "alice"));
+
+        try {
+            for (NamedClientHandler handler : handlers) {
+                assertTrue(broker.activateClient(handler));
+            }
+
+            assertEquals(List.of("alice", "alice", "zeta"),
+                    broker.activeClientUsernamesSnapshot());
+        } finally {
+            for (NamedClientHandler handler : handlers) {
+                handler.closeSession();
+            }
+            broker.stop();
+        }
+    }
+
+    @Test
+    void clientStatusSnapshotIsSafeDuringConcurrentActivationAndRemoval() throws Exception {
+        Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000));
+        broker.setOrderingService(new ImmediateBoundaryOrderingService());
+        List<NamedClientHandler> handlers = new ArrayList<>();
+        for (int i = 0; i < 200; i++) {
+            handlers.add(new NamedClientHandler(broker, "client-" + (i % 20)));
+        }
+
+        ExecutorService executor = Executors.newFixedThreadPool(5);
+        CountDownLatch start = new CountDownLatch(1);
+        AtomicBoolean mutationsDone = new AtomicBoolean(false);
+        try {
+            Future<?> snapshotter = executor.submit(() -> {
+                awaitUnchecked(start);
+                int inspections = 0;
+                do {
+                    List<String> snapshot = broker.activeClientUsernamesSnapshot();
+                    List<String> sorted = new ArrayList<>(snapshot);
+                    sorted.sort(String::compareTo);
+                    assertEquals(sorted, snapshot);
+                    inspections++;
+                } while (!mutationsDone.get() || inspections < 1_000);
+            });
+
+            List<Future<?>> mutators = new ArrayList<>();
+            for (int worker = 0; worker < 4; worker++) {
+                int offset = worker;
+                mutators.add(executor.submit(() -> {
+                    awaitUnchecked(start);
+                    for (int i = offset; i < handlers.size(); i += 4) {
+                        NamedClientHandler handler = handlers.get(i);
+                        assertTrue(broker.activateClient(handler));
+                        Thread.yield();
+                        broker.removeClient(handler);
+                    }
+                }));
+            }
+
+            start.countDown();
+            for (Future<?> mutator : mutators) {
+                mutator.get(3, TimeUnit.SECONDS);
+            }
+            mutationsDone.set(true);
+            snapshotter.get(3, TimeUnit.SECONDS);
+            assertEquals(List.of(), broker.activeClientUsernamesSnapshot());
+        } finally {
+            mutationsDone.set(true);
+            executor.shutdownNow();
+            for (NamedClientHandler handler : handlers) {
+                handler.closeSession();
+            }
+            broker.stop();
+        }
+    }
+
+    @Test
+    void stopTerminatesClientStatusLoop() throws Exception {
+        int clientPort;
+        try (ServerSocket availablePort = new ServerSocket(0)) {
+            clientPort = availablePort.getLocalPort();
+        }
+
+        Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, clientPort));
+        broker.setOrderingService(new ImmediateBoundaryOrderingService());
+        CountDownLatch firstRender = new CountDownLatch(1);
+        AtomicReference<String> renderedLine = new AtomicReference<>();
+        broker.setClientStatusOutput(line -> {
+            renderedLine.set(line);
+            firstRender.countDown();
+        });
+        AtomicReference<Throwable> startupFailure = new AtomicReference<>();
+        Thread brokerThread = new Thread(() -> {
+            try {
+                broker.start();
+            } catch (Throwable failure) {
+                startupFailure.set(failure);
+            }
+        }, "test-broker-main");
+
+        brokerThread.start();
+        try {
+            assertTrue(broker.awaitClientListenerReady(2, TimeUnit.SECONDS));
+            assertTrue(firstRender.await(2, TimeUnit.SECONDS));
+            assertEquals("[Broker 1] Connected clients (0): ", renderedLine.get());
+            assertTrue(broker.isClientStatusLoopAliveForTesting());
+
+            assertTimeout(Duration.ofSeconds(2), broker::stop);
+            brokerThread.join(2_000L);
+
+            assertFalse(brokerThread.isAlive());
+            assertFalse(broker.isClientStatusLoopAliveForTesting());
+            assertNull(startupFailure.get());
+        } finally {
+            broker.stop();
+            brokerThread.join(2_000L);
+        }
+    }
+
+    @Test
     void stopClosesDirectorySocketBeforeWaitingForBlockedWriterLock() throws Exception {
         Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000));
         broker.setOrderingService(new ImmediateBoundaryOrderingService());
@@ -187,6 +355,23 @@ class BrokerDeliveryLifecycleTest {
                 "sender-client",
                 text,
                 new VectorClock());
+    }
+
+    private static void awaitCondition(BooleanSupplier condition) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+        while (!condition.getAsBoolean() && System.nanoTime() < deadline) {
+            Thread.sleep(10L);
+        }
+        assertTrue(condition.getAsBoolean(), "condition was not met before timeout");
+    }
+
+    private static void awaitUnchecked(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError("test worker interrupted", e);
+        }
     }
 
     private static class ImmediateBoundaryOrderingService implements OrderingService {
@@ -268,6 +453,25 @@ class BrokerDeliveryLifecycleTest {
         @Override
         public void sendMessageToClient(long seq, String sender, String text) {
             outbound.add(seq + ":" + text);
+        }
+    }
+
+    private static final class NamedClientHandler extends ClientHandler {
+        private final String username;
+
+        private NamedClientHandler(Broker broker, String username) {
+            super(new Socket(), broker);
+            this.username = username;
+        }
+
+        @Override
+        public String getUsername() {
+            return username;
+        }
+
+        @Override
+        public void sendLine(Object object) {
+            // No socket writer is needed for this active-recipient model test.
         }
     }
 

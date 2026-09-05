@@ -26,6 +26,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 /**
  * Broker node in the replicated chat infrastructure.
@@ -40,6 +41,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     private static final long HEARTBEAT_INTERVAL_MS = 3000;
     private static final long DIRECTORY_RECONNECT_DELAY_MS = 1000;
     private static final int DIRECTORY_CONNECT_TIMEOUT_MS = 1000;
+    private static final long CLIENT_STATUS_REFRESH_INTERVAL_MS = 3_000L;
 
     // Connection to directory service
     private transient volatile Socket directorySocket;
@@ -59,7 +61,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Hold-back queue for ordered delivery (enforces total order + causal order)
     private final HoldBackQueue holdBackQueue = new HoldBackQueue();
 
-    // All clients currently connected to this broker.
+    // JOIN-completed active clients currently eligible for local fan-out.
     private final List<ClientHandler> clients = Collections.synchronizedList(new ArrayList<>());
 
     // Every accepted session, including sockets that have not completed JOIN.
@@ -85,6 +87,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     private final transient CountDownLatch clientListenerReady = new CountDownLatch(1);
     private transient volatile ServerSocket clientServerSocket;
+    private transient Consumer<String> clientStatusOutput;
+    private transient volatile Thread clientStatusThread;
     private transient volatile boolean running;
 
     /**
@@ -159,6 +163,18 @@ public class Broker implements Serializable, OrderingServiceCallback {
         this.orderingService = orderingService;
     }
 
+    /**
+     * Installs the optional console-status output used by the production entry
+     * point. Keeping the sink injectable leaves Broker tests independent from
+     * terminal capabilities and ANSI rendering.
+     */
+    void setClientStatusOutput(Consumer<String> clientStatusOutput) {
+        if (running) {
+            throw new IllegalStateException("Client status output must be configured before start");
+        }
+        this.clientStatusOutput = clientStatusOutput;
+    }
+
     // =========================================================================
     // Broker lifecycle
     // =========================================================================
@@ -192,6 +208,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
             System.out.println("Broker " + brokerId + " listening for clients on port "
                     + clientServerSocket.getLocalPort());
+            startClientStatusLoop();
 
             while (running) {
                 try {
@@ -224,6 +241,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
     public void stop() {
         running = false;
 
+        Thread statusThread = clientStatusThread;
+        if (statusThread != null) {
+            statusThread.interrupt();
+        }
+
         ServerSocket listener = clientServerSocket;
         clientServerSocket = null;
         if (listener != null) {
@@ -255,6 +277,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Socket close above must also release a Directory writer blocked in
         // flush. Wait only after closing it, never while holding its writer lock.
         joinBounded(heartbeat, 1_000L);
+        joinBounded(statusThread, 1_000L);
 
         if (orderingService != null) {
             orderingService.stop();
@@ -284,6 +307,11 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     int activeSessionCountForTesting() {
         return sessions.size();
+    }
+
+    boolean isClientStatusLoopAliveForTesting() {
+        Thread thread = clientStatusThread;
+        return thread != null && thread.isAlive();
     }
 
     void startClientSession(Socket clientSocket) {
@@ -349,6 +377,33 @@ public class Broker implements Serializable, OrderingServiceCallback {
         if (clients.remove(handler)) {
             sendClientCountUpdate();
         }
+    }
+
+    /**
+     * Returns a stable, sorted view of the active local fan-out recipients.
+     * Duplicate usernames are intentionally retained because distinct client
+     * sessions may use the same display name.
+     */
+    List<String> activeClientUsernamesSnapshot() {
+        List<ClientHandler> snapshot;
+        synchronized (clients) {
+            snapshot = new ArrayList<>(clients);
+        }
+
+        List<String> usernames = new ArrayList<>(snapshot.size());
+        for (ClientHandler handler : snapshot) {
+            if (!handler.isSessionClosed()) {
+                usernames.add(handler.getUsername());
+            }
+        }
+        Collections.sort(usernames);
+        return usernames;
+    }
+
+    String currentClientStatusLine() {
+        List<String> usernames = activeClientUsernamesSnapshot();
+        return "[Broker " + brokerId + "] Connected clients ("
+                + usernames.size() + "): " + String.join(", ", usernames);
     }
 
     /**
@@ -542,6 +597,44 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     int cachedClientRequestCountForTesting() {
         return cachedClientRequests.size();
+    }
+
+    /** Starts the optional, best-effort local console status refresher. */
+    private void startClientStatusLoop() {
+        Consumer<String> output = clientStatusOutput;
+        if (output == null || !running) {
+            return;
+        }
+
+        Thread existing = clientStatusThread;
+        if (existing != null && existing.isAlive()) {
+            return;
+        }
+
+        Thread thread = new Thread(
+                () -> clientStatusLoop(output),
+                "BrokerClientStatus-" + brokerId);
+        thread.setDaemon(true);
+        clientStatusThread = thread;
+        thread.start();
+    }
+
+    private void clientStatusLoop(Consumer<String> output) {
+        try {
+            while (running && !Thread.currentThread().isInterrupted()) {
+                // Snapshot and sorting finish before the terminal sink is called,
+                // so terminal I/O never owns the active-client monitor.
+                output.accept(currentClientStatusLine());
+                Thread.sleep(CLIENT_STATUS_REFRESH_INTERVAL_MS);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException e) {
+            if (running) {
+                System.err.println("[Broker " + brokerId
+                        + "] Client status display disabled: " + e.getMessage());
+            }
+        }
     }
 
     /** Starts one reconnecting Directory session owner for this broker. */
