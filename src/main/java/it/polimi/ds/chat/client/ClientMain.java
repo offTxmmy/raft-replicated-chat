@@ -3,9 +3,14 @@ package it.polimi.ds.chat.client;
 import it.polimi.ds.chat.client.connection.ClientConnection;
 import it.polimi.ds.chat.client.connection.DirectoryAwareClientConnection;
 import it.polimi.ds.chat.client.messaging.ClientMessageSender;
+import org.jline.reader.EndOfFileException;
+import org.jline.reader.LineReader;
+import org.jline.reader.LineReaderBuilder;
+import org.jline.reader.UserInterruptException;
+import org.jline.terminal.Terminal;
+import org.jline.terminal.TerminalBuilder;
 
 import java.io.IOException;
-import java.util.Scanner;
 import java.util.UUID;
 
 /** Entry point for the directory-aware replicated chat client. */
@@ -23,53 +28,73 @@ public class ClientMain {
                 directoryHost,
                 directoryPort
         );
-        ClientRuntime runtime = null;
+        try (Terminal terminal = TerminalBuilder.builder()
+                .system(true)
+                .dumb(true)
+                .build()) {
+            LineReader lineReader = LineReaderBuilder.builder()
+                    .terminal(terminal)
+                    .build();
+            lineReader.option(LineReader.Option.DISABLE_EVENT_EXPANSION, true);
+            ClientRuntime runtime = null;
 
-        try (Scanner stdin = new Scanner(System.in)) {
-            System.out.print("Enter username: ");
-            if (!stdin.hasNextLine()) {
-                return;
-            }
-            String username = stdin.nextLine();
-            String clientId = UUID.randomUUID().toString();
-
-            ClientMessageSender sender = new ClientMessageSender(
-                    ACK_TIMEOUT_MS,
-                    clientId
-            );
-            runtime = new ClientRuntime(
-                    connection,
-                    sender,
-                    username,
-                    clientId
-            );
-            runtime.start();
-            System.out.println("[MAIN] Connecting to an available broker; "
-                    + "messages remain queued until JOIN succeeds.");
-
-            Thread senderThread = new Thread(sender, "MessageSender");
-            senderThread.setDaemon(true);
-            senderThread.start();
-
-            while (stdin.hasNextLine()) {
-                String input = stdin.nextLine();
-                if (input.equalsIgnoreCase("/quit")) {
-                    runtime.shutdown(true);
-                    System.out.println("Goodbye!");
+            try {
+                String username;
+                try {
+                    username = lineReader.readLine("Enter username: ");
+                } catch (EndOfFileException | UserInterruptException e) {
                     return;
                 }
-                if (!input.isBlank()) {
-                    sender.sendUserMessage(input);
+                String clientId = UUID.randomUUID().toString();
+
+                ClientMessageSender sender = new ClientMessageSender(
+                        ACK_TIMEOUT_MS,
+                        clientId
+                );
+                runtime = new ClientRuntime(
+                        connection,
+                        sender,
+                        username,
+                        clientId,
+                        lineReader::printAbove
+                );
+                runtime.start();
+                lineReader.printAbove(
+                        "[MAIN] Connecting to an available broker; "
+                                + "messages remain queued until JOIN succeeds."
+                );
+
+                Thread senderThread = new Thread(sender, "MessageSender");
+                senderThread.setDaemon(true);
+                senderThread.start();
+
+                while (true) {
+                    String input;
+                    try {
+                        input = lineReader.readLine("> ");
+                    } catch (EndOfFileException | UserInterruptException e) {
+                        runtime.shutdown(true);
+                        lineReader.printAbove("Goodbye!");
+                        return;
+                    }
+                    if (input.equalsIgnoreCase("/quit")) {
+                        runtime.shutdown(true);
+                        lineReader.printAbove("Goodbye!");
+                        return;
+                    }
+                    if (!input.isBlank()) {
+                        sender.sendUserMessage(input);
+                    }
+                }
+            } finally {
+                if (runtime != null) {
+                    runtime.shutdown(false);
                 }
             }
         } catch (IOException e) {
             System.err.println("[MAIN] Connection error: " + e.getMessage());
         } finally {
-            if (runtime != null) {
-                runtime.shutdown(false);
-            } else {
-                connection.close();
-            }
+            connection.close();
         }
     }
 

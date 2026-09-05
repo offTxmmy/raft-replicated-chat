@@ -101,9 +101,9 @@ public class BrokerMain {
         Path storageDir = Paths.get("raft-data", "n" + nodeId);
 
         RaftConfig raftConfig = new RaftConfig(
-                200,
-                400,
-                40,
+                1500,
+                3000,
+                100,
                 rpcPort,
                 transportMode,
                 raftBroadcastPort,

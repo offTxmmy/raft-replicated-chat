@@ -13,6 +13,7 @@ import java.util.Objects;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * Coordinates one client's connection-generation lifecycle.
@@ -31,6 +32,7 @@ final class ClientRuntime {
     private final ClientMessageSender sender;
     private final String username;
     private final String clientId;
+    private final Consumer<String> chatOutput;
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final Object lifecycleLock = new Object();
@@ -42,6 +44,14 @@ final class ClientRuntime {
                   ClientMessageSender sender,
                   String username,
                   String clientId) {
+        this(connection, sender, username, clientId, System.out::println);
+    }
+
+    ClientRuntime(ClientConnection connection,
+                  ClientMessageSender sender,
+                  String username,
+                  String clientId,
+                  Consumer<String> chatOutput) {
         this(
                 connection,
                 sender,
@@ -49,7 +59,8 @@ final class ClientRuntime {
                 clientId,
                 INITIAL_RECONNECT_BACKOFF_MS,
                 MAX_RECONNECT_BACKOFF_MS,
-                Thread::sleep
+                Thread::sleep,
+                chatOutput
         );
     }
 
@@ -60,10 +71,31 @@ final class ClientRuntime {
                   long initialReconnectBackoffMs,
                   long maxReconnectBackoffMs,
                   ClientReconnectManager.BackoffWaiter backoffWaiter) {
+        this(
+                connection,
+                sender,
+                username,
+                clientId,
+                initialReconnectBackoffMs,
+                maxReconnectBackoffMs,
+                backoffWaiter,
+                System.out::println
+        );
+    }
+
+    ClientRuntime(ClientConnection connection,
+                  ClientMessageSender sender,
+                  String username,
+                  String clientId,
+                  long initialReconnectBackoffMs,
+                  long maxReconnectBackoffMs,
+                  ClientReconnectManager.BackoffWaiter backoffWaiter,
+                  Consumer<String> chatOutput) {
         this.connection = Objects.requireNonNull(connection, "connection");
         this.sender = Objects.requireNonNull(sender, "sender");
         this.username = Objects.requireNonNull(username, "username");
         this.clientId = Objects.requireNonNull(clientId, "clientId");
+        this.chatOutput = Objects.requireNonNull(chatOutput, "chatOutput");
         this.reconnectManager = new ClientReconnectManager(
                 this::reconnectOnce,
                 initialReconnectBackoffMs,
@@ -159,7 +191,8 @@ final class ClientRuntime {
                             sender,
                             clientId,
                             heartbeatManager,
-                            () -> handleConnectionFailure(generation)
+                            () -> handleConnectionFailure(generation),
+                            chatOutput
                     );
             session = new SessionRuntime(
                     generation,

@@ -39,6 +39,22 @@ public class ClientMessageReceiver implements Runnable {
                                  ClientHeartbeatManager heartbeatManager,
                                  ConnectionFailureHandler failureHandler) {
         this(
+                generation,
+                sender,
+                clientId,
+                heartbeatManager,
+                failureHandler,
+                System.out::println
+        );
+    }
+
+    public ClientMessageReceiver(ClientConnectionGeneration generation,
+                                 ClientMessageSender sender,
+                                 String clientId,
+                                 ClientHeartbeatManager heartbeatManager,
+                                 ConnectionFailureHandler failureHandler,
+                                 Consumer<String> chatOutput) {
+        this(
                 Objects.requireNonNull(generation, "generation").getInputStream(),
                 sender,
                 clientId,
@@ -47,7 +63,7 @@ public class ClientMessageReceiver implements Runnable {
                 generation::dispatchInboundIfActive,
                 failureHandler,
                 () -> { },
-                System.out::println
+                chatOutput
         );
     }
 

@@ -33,6 +33,59 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ClientRuntimeIntegrationTest {
 
     @Test
+    void injectedChatOutputIsReusedAfterReconnect() throws Exception {
+        try (ScriptedBroker firstBroker = new ScriptedBroker();
+             ScriptedBroker replacementBroker = new ScriptedBroker()) {
+            ScriptedClientConnection connection = new ScriptedClientConnection(
+                    firstBroker.port(),
+                    replacementBroker.port()
+            );
+            connection.open();
+
+            BlockingQueue<String> visibleMessages = new LinkedBlockingQueue<>();
+            ClientRuntime runtime = new ClientRuntime(
+                    connection,
+                    new ClientMessageSender(60_000L, "output-client"),
+                    "alice",
+                    "output-client",
+                    10L,
+                    20L,
+                    ignored -> { },
+                    visibleMessages::add
+            );
+
+            try {
+                runtime.start();
+                firstBroker.awaitString(value -> value.startsWith("JOIN_ID "));
+
+                firstBroker.send("MSG 1 bob>>alice:before reconnect");
+                assertEquals(
+                        "MSG 1 bob>>alice:before reconnect",
+                        visibleMessages.poll(1L, TimeUnit.SECONDS)
+                );
+
+                firstBroker.dropConnection();
+                replacementBroker.awaitString(
+                        value -> value.startsWith("JOIN_ID ")
+                );
+
+                replacementBroker.send(
+                        ClientAckMessages.buildAck("output-client", 1L)
+                );
+                replacementBroker.send("MSG 2 bob>>alice:after reconnect");
+                assertEquals(
+                        "MSG 2 bob>>alice:after reconnect",
+                        visibleMessages.poll(1L, TimeUnit.SECONDS)
+                );
+                assertTrue(visibleMessages.isEmpty(),
+                        "ACKs must not be routed to the chat output");
+            } finally {
+                runtime.shutdown(false);
+            }
+        }
+    }
+
+    @Test
     void realDirectoryPostInstallFailureExcludesPreferredBrokerAndPreservesPendingFifo()
             throws Exception {
         DirectoryService directory = new DirectoryService(Map.of());
