@@ -215,11 +215,13 @@ public final class RaftOrderingService implements OrderingService {
                     if (!isActiveRunLocked(runGeneration, runReplicationManager)) {
                         return;
                     }
-                    runReplicationManager.onLeaderElected(leaderId, term);
-                    if (leaderId == localNodeId) {
-                        runReplicationManager.appendCommandAsLeader(null);
+                    if (!runReplicationManager.initializeLeaderState(leaderId, term)) {
+                        return;
                     }
-                    notifyLeaderChanged(leaderId, term);
+                    runReplicationManager.appendCommandAsLeader(null, term);
+                    if (raftNode.isLeader() && raftNode.getCurrentTerm() == term) {
+                        notifyLeaderChanged(leaderId, term);
+                    }
                 }
             }
 
@@ -230,7 +232,7 @@ public final class RaftOrderingService implements OrderingService {
                         return;
                     }
                     runReplicationManager.onSteppedDown(newTerm, knownLeaderId);
-                    failAllPendingCommits();
+                    failPendingCommitsForStepDown(newTerm);
                 }
             }
 
@@ -238,6 +240,11 @@ public final class RaftOrderingService implements OrderingService {
             public void onLeaderObserved(int leaderId, long term) {
                 synchronized (RaftOrderingService.this) {
                     if (!isActiveRunLocked(runGeneration, runReplicationManager)) {
+                        return;
+                    }
+                    if (raftNode.getCurrentTerm() != term
+                            || raftNode.getRole() != RaftRole.FOLLOWER
+                            || raftNode.getLeaderId() != leaderId) {
                         return;
                     }
                     runReplicationManager.onLeaderObserved(leaderId, term);
@@ -268,6 +275,7 @@ public final class RaftOrderingService implements OrderingService {
                 raftNode,
                 raftLog,
                 raftTransport,
+                raftTransport,
                 raftClock,
                 electionListener
         );
@@ -277,6 +285,10 @@ public final class RaftOrderingService implements OrderingService {
         raftTransport.attachHandlers(
                 electionManager::onRequestVoteResponse,
                 replicationManager::handleAppendEntriesResponse
+        );
+        raftTransport.attachPreVoteHandlers(
+                electionManager::onPreVoteRequest,
+                electionManager::onPreVoteResponse
         );
         if (raftTransport instanceof RaftHybridTransport hybridTransport) {
             hybridTransport.attachRequestHandlers(
@@ -292,6 +304,7 @@ public final class RaftOrderingService implements OrderingService {
                 replicationManager::handleAppendEntries,
                 this::handleForwardedProposal
         );
+        rpcServer.attachPreVoteHandler(electionManager::onPreVoteRequest);
 
         // 12. Start in dependency order.
         try {
@@ -309,6 +322,7 @@ public final class RaftOrderingService implements OrderingService {
                 + ", voters=" + raftConfig.getVoters().keySet()
                 + ", rpcPort=" + raftConfig.getRpcPort()
                 + ", transportMode=" + raftConfig.getTransportMode()
+                + ", preVote=true"
                 + (raftConfig.getTransportMode() == RaftTransportMode.HYBRID
                     ? ", raftBroadcastPort=" + raftConfig.getRaftBroadcastPort()
                         + ", clusterId=" + raftConfig.getClusterId()
@@ -609,12 +623,21 @@ public final class RaftOrderingService implements OrderingService {
         return false;
     }
 
-    private void failAllPendingCommits() {
+    private void failPendingCommitsForStepDown(long term) {
         List<CompletableFuture<Boolean>> pending;
 
-        synchronized (idempotencyLock) {
-            pending = List.copyOf(pendingCommits.values());
-            pendingCommits.clear();
+        // A delayed step-down notification must not reject proposals registered
+        // by a newer leader. Capture the old pending set atomically with the
+        // term/role check; complete futures after releasing the node monitor.
+        synchronized (raftNode) {
+            if (raftNode.getCurrentTerm() != term
+                    || raftNode.getRole() != RaftRole.FOLLOWER) {
+                return;
+            }
+            synchronized (idempotencyLock) {
+                pending = List.copyOf(pendingCommits.values());
+                pendingCommits.clear();
+            }
         }
 
         for (CompletableFuture<Boolean> future : pending) {

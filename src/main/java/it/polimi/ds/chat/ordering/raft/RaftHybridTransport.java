@@ -2,6 +2,8 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 
@@ -41,6 +43,14 @@ public final class RaftHybridTransport implements RaftTransport {
         udpTransport.attachHandlers(voteResponseHandler, appendResponseHandler);
     }
 
+    @Override
+    public void attachPreVoteHandlers(
+            Function<PreVoteRequestMessage, PreVoteResponseMessage> requestHandler,
+            Consumer<PreVoteResponseMessage> responseHandler) {
+        tcpTransport.attachPreVoteHandlers(requestHandler, responseHandler);
+        udpTransport.attachPreVoteHandlers(requestHandler, responseHandler);
+    }
+
     public void attachRequestHandlers(
             Function<RequestVoteRequestMessage, RequestVoteResponseMessage> voteRequestHandler,
             Function<AppendEntriesRequestMessage, AppendEntriesResponseMessage> appendRequestHandler) {
@@ -65,6 +75,16 @@ public final class RaftHybridTransport implements RaftTransport {
     @Override
     public void sendRequestVote(int peerId, RequestVoteRequestMessage request) {
         tcpTransport.sendRequestVote(peerId, request);
+    }
+
+    @Override
+    public void sendPreVote(int peerId, PreVoteRequestMessage request) {
+        tcpTransport.sendPreVote(peerId, request);
+    }
+
+    @Override
+    public void broadcastPreVote(PreVoteRequestMessage request, Set<Integer> peerIds) {
+        udpTransport.broadcastPreVote(request, peerIds);
     }
 
     @Override

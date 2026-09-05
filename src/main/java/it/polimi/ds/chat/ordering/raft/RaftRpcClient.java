@@ -6,6 +6,8 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalRequestMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalResponseMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 
@@ -23,6 +25,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * TCP client for outbound Raft RPCs.
@@ -51,6 +54,7 @@ public final class RaftRpcClient implements RaftTransport {
     private final int readTimeoutMs;
 
     private Consumer<RequestVoteResponseMessage> voteResponseHandler;
+    private Consumer<PreVoteResponseMessage> preVoteResponseHandler;
     private BiConsumer<Integer, AppendEntriesResponseMessage> appendResponseHandler;
 
     private ExecutorService sendExecutor;
@@ -83,6 +87,15 @@ public final class RaftRpcClient implements RaftTransport {
             BiConsumer<Integer, AppendEntriesResponseMessage> appendResponseHandler) {
         this.voteResponseHandler   = Objects.requireNonNull(voteResponseHandler);
         this.appendResponseHandler = Objects.requireNonNull(appendResponseHandler);
+    }
+
+    @Override
+    public synchronized void attachPreVoteHandlers(
+            Function<PreVoteRequestMessage, PreVoteResponseMessage> requestHandler,
+            Consumer<PreVoteResponseMessage> responseHandler) {
+        // Incoming TCP requests are handled separately by RaftRpcServer.
+        Objects.requireNonNull(requestHandler, "requestHandler");
+        this.preVoteResponseHandler = Objects.requireNonNull(responseHandler, "responseHandler");
     }
 
     @Override
@@ -119,6 +132,18 @@ public final class RaftRpcClient implements RaftTransport {
 
     public int getLocalNodeId() {
         return localNodeId;
+    }
+
+    @Override
+    public void sendPreVote(int peerId, PreVoteRequestMessage request) {
+        if (preVoteResponseHandler == null) {
+            throw new IllegalStateException("attachPreVoteHandlers must be called before sendPreVote");
+        }
+        sendAsync(peerId, request, response -> {
+            if (response instanceof PreVoteResponseMessage r) {
+                preVoteResponseHandler.accept(r);
+            }
+        });
     }
 
     @Override

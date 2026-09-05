@@ -827,6 +827,51 @@ class RaftOrderingServiceIntegrationTest {
         assertSame(newRunPending, currentPending.get("client:new-run:1"));
     }
 
+    @Test
+    void delayedCallbacksWithinSameRunCannotAffectNewLeadership(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort = pickFreePorts(1)[0];
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0, new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000));
+        nodes = new RaftOrderingService[]{
+                buildService(0, rpcPort, voters, baseDir.resolve("n0"))};
+        nodes[0].start();
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS));
+
+        RaftElectionManager elections = electionManagerOf(nodes[0]);
+        RaftElectionListener listener = objectPrivateField(
+                elections, "electionListener", RaftElectionListener.class);
+        RaftNode node = raftNodeOf(nodes[0]);
+        long oldLeaderTerm = node.getCurrentTerm();
+        long oldStepDownTerm = oldLeaderTerm + 1L;
+        elections.onHigherTermObserved(oldStepDownTerm);
+        elections.onElectionTimeoutFired();
+        assertTrue(node.isLeader());
+        long newLeaderTerm = node.getCurrentTerm();
+        assertEquals(oldStepDownTerm + 1L, newLeaderTerm);
+        long lastIndex = raftLogOf(nodes[0]).lastLogIndex();
+
+        CompletableFuture<Boolean> currentPending = new CompletableFuture<>();
+        pendingCommitsOf(nodes[0]).put("client:new-leadership:1", currentPending);
+
+        // Replay callbacks delayed after they left the election monitor, then
+        // duplicate the current leader event. None belongs to fresh work now.
+        listener.onSteppedDown(oldStepDownTerm, RaftNode.NO_LEADER);
+        listener.onLeaderElected(0, oldLeaderTerm);
+        listener.onLeaderElected(0, newLeaderTerm);
+        listener.onLeaderObserved(2, oldStepDownTerm);
+
+        assertTrue(node.isLeader());
+        assertEquals(newLeaderTerm, node.getCurrentTerm());
+        assertEquals(lastIndex, raftLogOf(nodes[0]).lastLogIndex(),
+                "stale and duplicate events must not append extra no-op entries");
+        assertFalse(currentPending.isDone(),
+                "a delayed step-down must not fail the current leader's proposal");
+        assertSame(currentPending,
+                pendingCommitsOf(nodes[0]).get("client:new-leadership:1"));
+    }
+
     /**
      * Verifies that if leadership disappears after a pending future has been
      * registered but before the leader append succeeds, that future is explicitly

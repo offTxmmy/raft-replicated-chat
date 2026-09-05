@@ -4,6 +4,8 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalRequestMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalResponseMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 
@@ -42,6 +44,7 @@ public final class RaftRpcServer {
     private final Function<RequestVoteRequestMessage, RequestVoteResponseMessage> voteHandler;
     private final Function<AppendEntriesRequestMessage, AppendEntriesResponseMessage> appendHandler;
     private final Function<ForwardClientProposalRequestMessage, ForwardClientProposalResponseMessage> forwardHandler;
+    private Function<PreVoteRequestMessage, PreVoteResponseMessage> preVoteHandler;
 
     private ServerSocket serverSocket;
     private ExecutorService acceptExecutor;
@@ -67,6 +70,15 @@ public final class RaftRpcServer {
         this.voteHandler = Objects.requireNonNull(voteHandler, "voteHandler");
         this.appendHandler = Objects.requireNonNull(appendHandler, "appendHandler");
         this.forwardHandler = Objects.requireNonNull(forwardHandler, "forwardHandler");
+    }
+
+    /** Installs the preliminary election handler before the server starts. */
+    public synchronized void attachPreVoteHandler(
+            Function<PreVoteRequestMessage, PreVoteResponseMessage> preVoteHandler) {
+        if (running) {
+            throw new IllegalStateException("PreVote handler must be installed before start");
+        }
+        this.preVoteHandler = Objects.requireNonNull(preVoteHandler, "preVoteHandler");
     }
 
     public synchronized void start() throws IOException {
@@ -144,6 +156,13 @@ public final class RaftRpcServer {
     }
 
     private Object dispatch(Object msg) {
+        if (msg instanceof PreVoteRequestMessage r) {
+            if (preVoteHandler == null) {
+                System.err.println("[RaftRpcServer] PreVote handler unavailable");
+                return null;
+            }
+            return preVoteHandler.apply(r);
+        }
         if (msg instanceof RequestVoteRequestMessage r) {
             return voteHandler.apply(r);
         }

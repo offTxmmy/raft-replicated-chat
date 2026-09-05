@@ -32,6 +32,7 @@ public class RaftReplicationManager implements RaftElectionListener {
     private final RaftHigherTermObserver higherTermObserver;
 
     private final Map<Integer, RaftPeerReplicationState> replicationState = new LinkedHashMap<>();
+    private long initializedLeaderTerm = -1L;
 
     private volatile boolean running;
 
@@ -64,11 +65,13 @@ public class RaftReplicationManager implements RaftElectionListener {
         }
         running = true;
         replicationState.clear();
+        initializedLeaderTerm = -1L;
     }
 
     public synchronized void stop() {
         running = false;
         replicationState.clear();
+        initializedLeaderTerm = -1L;
     }
 
     public boolean isRunning() {
@@ -87,13 +90,19 @@ public class RaftReplicationManager implements RaftElectionListener {
      * @return appended log entry, or null if not leader
      */
     public synchronized RaftLogEntry appendCommandAsLeader(ChatCommand command) {
+        return appendCommandAsLeader(command, null);
+    }
+
+    /** Appends only while the leadership event's term is still authoritative. */
+    synchronized RaftLogEntry appendCommandAsLeader(ChatCommand command, Long expectedTerm) {
         if (!running) {
             return null;
         }
         RaftLogEntry entry;
 
         synchronized (raftNode) {
-            if (raftNode.getRole() != RaftRole.LEADER) {
+            if (raftNode.getRole() != RaftRole.LEADER
+                    || (expectedTerm != null && expectedTerm != raftNode.getCurrentTerm())) {
                 return null;
             }
 
@@ -283,24 +292,43 @@ public class RaftReplicationManager implements RaftElectionListener {
     }
 
     @Override
-    public synchronized void onLeaderElected(int leaderId, long term) {
-        if (!running || leaderId != localNodeId) {
-            return;
-        }
+    public void onLeaderElected(int leaderId, long term) {
+        initializeLeaderState(leaderId, term);
+    }
 
-        replicationState.clear();
-        long nextIndex = log.lastLogIndex() + 1L;
-        for (Integer peerId : peerVotingNodeIds) {
-            replicationState.put(peerId, new RaftPeerReplicationState(nextIndex));
+    /**
+     * Listener delivery can race a later transition because election callbacks
+     * run outside the election monitor. Initialize each current leadership once.
+     */
+    synchronized boolean initializeLeaderState(int leaderId, long term) {
+        synchronized (raftNode) {
+            if (!running || leaderId != localNodeId
+                    || raftNode.getRole() != RaftRole.LEADER
+                    || raftNode.getCurrentTerm() != term
+                    || initializedLeaderTerm == term) {
+                return false;
+            }
+
+            replicationState.clear();
+            long nextIndex = log.lastLogIndex() + 1L;
+            for (Integer peerId : peerVotingNodeIds) {
+                replicationState.put(peerId, new RaftPeerReplicationState(nextIndex));
+            }
+            initializedLeaderTerm = term;
+            return true;
         }
     }
 
     @Override
     public synchronized void onSteppedDown(long newTerm, int knownLeaderId) {
-        if (!running) {
-            return;
+        synchronized (raftNode) {
+            if (!running || raftNode.getCurrentTerm() != newTerm
+                    || raftNode.getRole() != RaftRole.FOLLOWER) {
+                return;
+            }
+            replicationState.clear();
+            initializedLeaderTerm = -1L;
         }
-        replicationState.clear();
     }
 
     @Override

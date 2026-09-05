@@ -955,6 +955,85 @@ class RaftReplicationManagerTest {
         assertEquals(List.of(1L, 2L, 3L), applied);
     }
 
+    @Test
+    void delayedStepDownCallbackMustNotEraseNewLeaderReplicationState() {
+        RaftNode node = leaderNode(1);
+        RaftLog log = new RaftLog();
+        RaftCommitManager commits = new RaftCommitManager(log, entry -> {});
+        RecordingSender sender = new RecordingSender();
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1, Set.of(1, 2, 3), node, log, commits, sender, null, null);
+        manager.start();
+        manager.onLeaderElected(1, 1L);
+
+        node.becomeFollower(2L, RaftNode.NO_LEADER);
+        // The term-2 callback left the election monitor but has not reached the
+        // listener yet. Another timer/response thread wins term 3 in the meantime.
+        node.startElection();
+        node.becomeLeader();
+        manager.onLeaderElected(1, 3L);
+        manager.appendCommandAsLeader(command("after-reelection"));
+        manager.onSteppedDown(2L, RaftNode.NO_LEADER);
+
+        manager.onHeartbeatRoundDue(3L);
+        assertEquals(2, sender.totalRequests(),
+                "an old step-down must not leave the current leader with no peers/heartbeats");
+        manager.handleAppendEntriesResponse(2,
+                new AppendEntriesResponseMessage(3L, true, 2, 1L, -1L, 0L));
+        assertEquals(1L, commits.getCommitIndex(),
+                "the new leadership must still replicate and commit without a restart");
+    }
+
+    @Test
+    void delayedOldLeaderCallbackMustNotDiscardCurrentMatchIndexes() {
+        assertLeaderCallbackPreservesMatches(1L);
+    }
+
+    @Test
+    void duplicateCurrentLeaderCallbackMustNotDiscardCurrentMatchIndexes() {
+        assertLeaderCallbackPreservesMatches(3L);
+    }
+
+    private void assertLeaderCallbackPreservesMatches(long callbackTerm) {
+        RaftNode node = leaderNode(1);
+        node.becomeFollower(2L, RaftNode.NO_LEADER);
+        node.startElection();
+        node.becomeLeader();
+        RaftLog log = new RaftLog();
+        log.append(3L, command("current-leadership"));
+        RaftCommitManager commits = new RaftCommitManager(log, entry -> {});
+        RaftReplicationManager manager = new RaftReplicationManager(
+                1, Set.of(1, 2, 3, 4, 5), node, log, commits,
+                new RecordingSender(), null, null);
+        manager.start();
+        manager.onLeaderElected(1, 3L);
+        manager.handleAppendEntriesResponse(2,
+                new AppendEntriesResponseMessage(3L, true, 2, 1L, -1L, 0L));
+        assertEquals(0L, commits.getCommitIndex());
+
+        manager.onLeaderElected(1, callbackTerm);
+        manager.handleAppendEntriesResponse(3,
+                new AppendEntriesResponseMessage(3L, true, 3, 1L, -1L, 0L));
+
+        assertEquals(1L, commits.getCommitIndex(),
+                "votes for replication must survive duplicate or delayed leadership notifications");
+    }
+
+    @Test
+    void oldLeadershipEventCannotAppendNoOpIntoNewerTerm() {
+        RaftNode node = leaderNode(1);
+        node.becomeFollower(2L, RaftNode.NO_LEADER);
+        node.startElection();
+        node.becomeLeader();
+        RaftReplicationManager manager = newManager(node);
+
+        assertNull(manager.appendCommandAsLeader(null, 1L));
+        RaftLogEntry currentNoOp = manager.appendCommandAsLeader(null, 3L);
+        assertNotNull(currentNoOp);
+        assertEquals(1L, currentNoOp.getIndex());
+        assertEquals(3L, currentNoOp.getTerm());
+    }
+
     private RaftReplicationManager newManager(RaftNode node) {
         return newManager(node, new RecordingObserver());
     }

@@ -8,6 +8,11 @@ package it.polimi.ds.chat.ordering.raft;
  */
 public interface RaftClock {
 
+    /** Monotonic time used only for the recent-leader PreVote guard. */
+    default long nanoTime() {
+        return System.nanoTime();
+    }
+
     /**
      * Schedules a one-shot task.
      *

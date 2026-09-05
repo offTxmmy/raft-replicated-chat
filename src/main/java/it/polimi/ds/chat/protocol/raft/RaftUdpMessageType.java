@@ -5,6 +5,10 @@ package it.polimi.ds.chat.protocol.raft;
  */
 public enum RaftUdpMessageType {
 
+    PRE_VOTE_REQUEST,
+
+    PRE_VOTE_RESPONSE,
+
     REQUEST_VOTE_REQUEST,
 
     REQUEST_VOTE_RESPONSE,

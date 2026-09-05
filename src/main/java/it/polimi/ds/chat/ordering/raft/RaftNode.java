@@ -2,6 +2,8 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteResponseMessage;
 
 /**
  * Core Raft node state.
@@ -246,6 +248,17 @@ public class RaftNode {
     }
 
     /**
+     * Tests a prospective election without changing term, vote, role or storage.
+     * Recent leader contact and static membership are checked by the election owner.
+     */
+    public synchronized PreVoteResponseMessage handlePreVote(
+            PreVoteRequestMessage request, RaftLogMetadata logMetadata, boolean eligible) {
+        boolean granted = eligible && request.getTerm() > currentTerm
+                && isCandidateLogUpToDate(request.getLastLogIndex(), request.getLastLogTerm(), logMetadata);
+        return new PreVoteResponseMessage(currentTerm, request.getTerm(), request.getRoundId(), granted, nodeId);
+    }
+
+    /**
      * A node can vote if:
      * - it has not voted yet in this term, or
      * - it has already voted for the same candidate.
@@ -260,17 +273,21 @@ public class RaftNode {
      * - if terms are equal, candidate log is more up-to-date if its lastLogIndex is >=
      */
     private boolean isCandidateLogUpToDate(RequestVoteRequestMessage request, RaftLogMetadata logMetadata) {
+        return isCandidateLogUpToDate(request.getLastLogIndex(), request.getLastLogTerm(), logMetadata);
+    }
+
+    private boolean isCandidateLogUpToDate(long candidateLastIndex, long candidateLastTerm, RaftLogMetadata logMetadata) {
         long localLastLogTerm = logMetadata.lastLogTerm();
         long localLastLogIndex = logMetadata.lastLogIndex();
 
-        if (request.getLastLogTerm() > localLastLogTerm) {
+        if (candidateLastTerm > localLastLogTerm) {
             return true;
         }
 
-        if (request.getLastLogTerm() < localLastLogTerm) {
+        if (candidateLastTerm < localLastLogTerm) {
             return false;
         }
 
-        return request.getLastLogIndex() >= localLastLogIndex;
+        return candidateLastIndex >= localLastLogIndex;
     }
 }

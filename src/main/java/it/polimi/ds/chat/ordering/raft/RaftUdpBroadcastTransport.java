@@ -4,6 +4,8 @@ import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RaftUdpEnvelope;
@@ -28,6 +30,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
@@ -36,7 +39,7 @@ import java.util.function.Function;
 /**
  * UDP LAN transport for broadcast-friendly Raft RPCs.
  *
- * <p>In hybrid mode this transport carries broadcast {@code RequestVote}
+ * <p>In hybrid mode this transport carries broadcast {@code PreVote}/{@code RequestVote}
  * requests and empty {@code AppendEntries} heartbeats. Log-bearing
  * {@code AppendEntries} requests stay on TCP.
  */
@@ -48,6 +51,8 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
     private final RaftConfig raftConfig;
 
     private Consumer<RequestVoteResponseMessage> voteResponseHandler;
+    private Consumer<PreVoteResponseMessage> preVoteResponseHandler;
+    private Function<PreVoteRequestMessage, PreVoteResponseMessage> preVoteRequestHandler;
     private BiConsumer<Integer, AppendEntriesResponseMessage> appendResponseHandler;
     private Function<RequestVoteRequestMessage, RequestVoteResponseMessage> voteRequestHandler;
     private Function<AppendEntriesRequestMessage, AppendEntriesResponseMessage> appendRequestHandler;
@@ -57,10 +62,12 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
     // Monotonic per-transport sequence number used as envelope creation marker.
     private final AtomicLong envelopeSeq = new AtomicLong(0);
 
-    private DatagramSocket socket;
+    private volatile DatagramSocket socket;
     private ExecutorService receiveExecutor;
 
     private volatile boolean running;
+    private final AtomicLong receivedPackets = new AtomicLong();
+    private volatile long lastReceiveNanos;
 
     public RaftUdpBroadcastTransport(int localNodeId, RaftConfig raftConfig) {
         this.localNodeId = localNodeId;
@@ -77,6 +84,14 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
             BiConsumer<Integer, AppendEntriesResponseMessage> appendResponseHandler) {
         this.voteResponseHandler = Objects.requireNonNull(voteResponseHandler, "voteResponseHandler");
         this.appendResponseHandler = Objects.requireNonNull(appendResponseHandler, "appendResponseHandler");
+    }
+
+    @Override
+    public synchronized void attachPreVoteHandlers(
+            Function<PreVoteRequestMessage, PreVoteResponseMessage> requestHandler,
+            Consumer<PreVoteResponseMessage> responseHandler) {
+        this.preVoteRequestHandler = Objects.requireNonNull(requestHandler, "requestHandler");
+        this.preVoteResponseHandler = Objects.requireNonNull(responseHandler, "responseHandler");
     }
 
     /**
@@ -119,7 +134,12 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
         });
 
         running = true;
-        receiveExecutor.submit(this::receiveLoop);
+        DatagramSocket receiveSocket = socket;
+        ExecutorService executor = receiveExecutor;
+        // execute leaves uncaught Errors visible instead of hiding them in an ignored Future.
+        executor.execute(() -> receiveLoop(receiveSocket, executor));
+        System.out.println("[RaftUdpBroadcastTransport] node=" + localNodeId
+                + " receiver started port=" + raftConfig.getRaftBroadcastPort());
     }
 
     @Override
@@ -140,12 +160,18 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
         recentlySeenMessageIds.clear();
     }
 
+    /** Whether the current receive task is active, including unexpected task termination. */
+    public boolean isRunning() {
+        return running;
+    }
+
     @Override
     public void sendRequestVote(int peerId, RequestVoteRequestMessage request) {
         if (!running) {
             return;
         }
 
+        logElectionSend("RequestVote", request.getTerm());
         RaftUdpEnvelope envelope = createEnvelope(
                 peerId,
                 RaftUdpMessageType.REQUEST_VOTE_REQUEST,
@@ -155,11 +181,33 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
     }
 
     @Override
+    public void sendPreVote(int peerId, PreVoteRequestMessage request) {
+        if (!running) {
+            return;
+        }
+        logElectionSend("PreVote", request.getTerm());
+        sendEnvelopeToPeer(peerId, createEnvelope(
+                peerId, RaftUdpMessageType.PRE_VOTE_REQUEST, request.getTerm(), request));
+    }
+
+    @Override
+    public void broadcastPreVote(PreVoteRequestMessage request, Set<Integer> peerIds) {
+        if (!running) {
+            return;
+        }
+        logElectionSend("PreVote", request.getTerm());
+        broadcastEnvelope(createEnvelope(
+                RaftUdpEnvelope.BROADCAST_TARGET, RaftUdpMessageType.PRE_VOTE_REQUEST,
+                request.getTerm(), request));
+    }
+
+    @Override
     public void broadcastRequestVote(RequestVoteRequestMessage request, Set<Integer> peerIds) {
         if (!running) {
             return;
         }
 
+        logElectionSend("RequestVote", request.getTerm());
         RaftUdpEnvelope envelope = createEnvelope(
                 RaftUdpEnvelope.BROADCAST_TARGET,
                 RaftUdpMessageType.REQUEST_VOTE_REQUEST,
@@ -206,25 +254,78 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
         broadcastEnvelope(envelope);
     }
 
-    private void receiveLoop() {
-        byte[] buffer = new byte[raftConfig.getUdpMaxPayloadBytes()];
-        while (running) {
-            try {
+    private void receiveLoop(DatagramSocket receiveSocket, ExecutorService executor) {
+        try {
+            byte[] buffer = new byte[raftConfig.getUdpMaxPayloadBytes()];
+            while (running && !receiveSocket.isClosed()) {
                 DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                socket.receive(packet);
-
-                RaftUdpEnvelope envelope = deserialize(packet.getData(), packet.getLength());
-                handleEnvelope(envelope);
-            } catch (SocketException e) {
-                if (running) {
-                    System.err.println("[RaftUdpBroadcastTransport] receive socket error: " + e.getMessage());
-                }
-            } catch (IOException | ClassNotFoundException e) {
-                if (running) {
-                    System.err.println("[RaftUdpBroadcastTransport] failed to decode UDP packet: " + e.getMessage());
+                RaftUdpEnvelope envelope = null;
+                try {
+                    receiveSocket.receive(packet);
+                    receivedPackets.incrementAndGet();
+                    lastReceiveNanos = System.nanoTime();
+                    envelope = deserialize(packet.getData(), packet.getLength());
+                    handleEnvelope(envelope);
+                } catch (SocketException e) {
+                    if (running && !receiveSocket.isClosed()) {
+                        System.err.println("[RaftUdpBroadcastTransport] node=" + localNodeId
+                                + " receive socket error: " + e);
+                    }
+                } catch (IOException | ClassNotFoundException e) {
+                    if (running && !receiveSocket.isClosed()) {
+                        logPacketFailure("failed to decode UDP packet", packet, envelope, e);
+                    }
+                } catch (FileRaftPersistence.RaftPersistenceException e) {
+                    // A failed durable write is not a recoverable packet error.
+                    // Do not turn it into permission to keep processing Raft RPCs.
+                    logPacketFailure("unrecoverable Raft storage failure", packet, envelope, e);
+                    throw e;
+                } catch (RuntimeException e) {
+                    // A failed RPC is lost, as with an omitted UDP datagram. Later RPCs
+                    // must still be received. Errors deliberately escape this boundary.
+                    logPacketFailure("UDP packet processing failed", packet, envelope, e);
                 }
             }
+        } finally {
+            synchronized (this) {
+                // An old task finishing after stop/start must not disable its replacement.
+                if (socket == receiveSocket) {
+                    boolean unexpected = running;
+                    running = false;
+                    receiveSocket.close();
+                    socket = null;
+                    receiveExecutor = null;
+                    recentlySeenMessageIds.clear();
+                    if (unexpected) {
+                        System.err.println("[RaftUdpBroadcastTransport] node=" + localNodeId
+                                + " receiver stopped unexpectedly; transport disabled"
+                                + " rxPackets=" + receivedPackets.get());
+                    }
+                }
+            }
+            executor.shutdown();
         }
+    }
+
+    private void logPacketFailure(String action, DatagramPacket packet,
+                                  RaftUdpEnvelope envelope, Exception failure) {
+        System.err.println("[RaftUdpBroadcastTransport] node=" + localNodeId + " " + action
+                + " type=" + (envelope == null ? "unknown" : envelope.getType())
+                + " sender=" + (envelope == null ? "unknown" : envelope.getSenderId())
+                + " term=" + (envelope == null ? "unknown" : envelope.getTerm())
+                + " source=" + packet.getSocketAddress()
+                + " rxPackets=" + receivedPackets.get() + ": " + failure);
+        failure.printStackTrace(System.err);
+    }
+
+    private void logElectionSend(String type, long term) {
+        long lastReceive = lastReceiveNanos;
+        String receiveAge = lastReceive == 0L ? "never"
+                : Long.toString(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - lastReceive));
+        System.out.println("[RaftUdpBroadcastTransport] node=" + localNodeId
+                + " TX " + type + " term=" + term
+                + " rxPackets=" + receivedPackets.get() + " lastRxAgeMs=" + receiveAge
+                + " receiverRunning=" + running);
     }
 
     private void handleEnvelope(RaftUdpEnvelope envelope) {
@@ -248,6 +349,19 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
 
     private void dispatchEnvelope(RaftUdpEnvelope envelope) {
         switch (envelope.getType()) {
+            case PRE_VOTE_RESPONSE -> {
+                if (envelope.getPayload() instanceof PreVoteResponseMessage response) {
+                    preVoteResponseHandler.accept(response);
+                }
+            }
+            case PRE_VOTE_REQUEST -> {
+                if (envelope.getPayload() instanceof PreVoteRequestMessage request) {
+                    PreVoteResponseMessage response = preVoteRequestHandler.apply(request);
+                    sendEnvelopeToPeer(envelope.getSenderId(), createEnvelope(
+                            envelope.getSenderId(), RaftUdpMessageType.PRE_VOTE_RESPONSE,
+                            response.getTerm(), response));
+                }
+            }
             case REQUEST_VOTE_RESPONSE -> {
                 if (envelope.getPayload() instanceof RequestVoteResponseMessage response) {
                     voteResponseHandler.accept(response);
@@ -304,7 +418,8 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
     }
 
     private void broadcastEnvelope(RaftUdpEnvelope envelope) {
-        if (socket == null || socket.isClosed()) {
+        DatagramSocket sendSocket = socket;
+        if (sendSocket == null || sendSocket.isClosed()) {
             return;
         }
 
@@ -328,7 +443,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
                             data.length,
                             broadcast,
                             raftConfig.getRaftBroadcastPort());
-                    socket.send(packet);
+                    sendSocket.send(packet);
                 }
             }
         } catch (IOException e) {
@@ -353,7 +468,8 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
     }
 
     private void sendEnvelopeToPeer(int peerId, RaftUdpEnvelope envelope) {
-        if (socket == null || socket.isClosed()) {
+        DatagramSocket sendSocket = socket;
+        if (sendSocket == null || sendSocket.isClosed()) {
             return;
         }
 
@@ -370,7 +486,7 @@ public final class RaftUdpBroadcastTransport implements RaftTransport {
                     data.length,
                     address,
                     raftConfig.getRaftBroadcastPort());
-            socket.send(packet);
+            sendSocket.send(packet);
         } catch (IOException e) {
             System.err.println("[RaftUdpBroadcastTransport] failed to send UDP envelope to peer "
                     + peerId + ": " + e.getMessage());

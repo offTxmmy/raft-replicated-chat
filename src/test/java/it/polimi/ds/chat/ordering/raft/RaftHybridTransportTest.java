@@ -4,6 +4,8 @@ import it.polimi.ds.chat.common.clock.VectorClock;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
+import it.polimi.ds.chat.protocol.raft.PreVoteRequestMessage;
+import it.polimi.ds.chat.protocol.raft.PreVoteResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
@@ -14,11 +16,45 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RaftHybridTransportTest {
+
+    @Test
+    void broadcastPreVoteUsesUdpAndTargetedPreVoteUsesTcp() {
+        RecordingTransport tcp = new RecordingTransport();
+        RecordingTransport udp = new RecordingTransport();
+        RaftHybridTransport hybrid = new RaftHybridTransport(tcp, udp);
+        PreVoteRequestMessage request = new PreVoteRequestMessage(3L, 1, 5L, 2L, "round-1");
+
+        hybrid.broadcastPreVote(request, Set.of(2, 3));
+        hybrid.sendPreVote(2, request);
+
+        assertTrue(tcp.broadcastPreVoteRequests.isEmpty());
+        assertEquals(List.of(new BroadcastPreVote(request, Set.of(2, 3))), udp.broadcastPreVoteRequests);
+        assertEquals(List.of(new SentPreVote(2, request)), tcp.sentPreVoteRequests);
+        assertTrue(udp.sentPreVoteRequests.isEmpty());
+    }
+
+    @Test
+    void preVoteHandlersAreAttachedToBothTransports() {
+        RecordingTransport tcp = new RecordingTransport();
+        RecordingTransport udp = new RecordingTransport();
+        RaftHybridTransport hybrid = new RaftHybridTransport(tcp, udp);
+        Function<PreVoteRequestMessage, PreVoteResponseMessage> requestHandler =
+                request -> new PreVoteResponseMessage(2L, request.getTerm(), request.getRoundId(), true, 1);
+        Consumer<PreVoteResponseMessage> responseHandler = response -> { };
+
+        hybrid.attachPreVoteHandlers(requestHandler, responseHandler);
+
+        assertEquals(requestHandler, tcp.preVoteRequestHandler);
+        assertEquals(requestHandler, udp.preVoteRequestHandler);
+        assertEquals(responseHandler, tcp.preVoteResponseHandler);
+        assertEquals(responseHandler, udp.preVoteResponseHandler);
+    }
 
     @Test
     void broadcastRequestVoteShouldUseUdpTransport() {
@@ -111,6 +147,12 @@ class RaftHybridTransportTest {
     private record BroadcastVote(RequestVoteRequestMessage request, Set<Integer> peerIds) {
     }
 
+    private record BroadcastPreVote(PreVoteRequestMessage request, Set<Integer> peerIds) {
+    }
+
+    private record SentPreVote(int peerId, PreVoteRequestMessage request) {
+    }
+
     private record BroadcastAppendEntries(AppendEntriesRequestMessage request, Set<Integer> peerIds) {
     }
 
@@ -118,9 +160,31 @@ class RaftHybridTransportTest {
     }
 
     private static final class RecordingTransport implements RaftTransport {
+        private final List<BroadcastPreVote> broadcastPreVoteRequests = new ArrayList<>();
+        private final List<SentPreVote> sentPreVoteRequests = new ArrayList<>();
+        private Function<PreVoteRequestMessage, PreVoteResponseMessage> preVoteRequestHandler;
+        private Consumer<PreVoteResponseMessage> preVoteResponseHandler;
         private final List<BroadcastVote> broadcastVoteRequests = new ArrayList<>();
         private final List<BroadcastAppendEntries> broadcastAppendEntriesRequests = new ArrayList<>();
         private final List<SentAppendEntries> sentAppendEntriesRequests = new ArrayList<>();
+
+        @Override
+        public void attachPreVoteHandlers(
+                Function<PreVoteRequestMessage, PreVoteResponseMessage> requestHandler,
+                Consumer<PreVoteResponseMessage> responseHandler) {
+            preVoteRequestHandler = requestHandler;
+            preVoteResponseHandler = responseHandler;
+        }
+
+        @Override
+        public void sendPreVote(int peerId, PreVoteRequestMessage request) {
+            sentPreVoteRequests.add(new SentPreVote(peerId, request));
+        }
+
+        @Override
+        public void broadcastPreVote(PreVoteRequestMessage request, Set<Integer> peerIds) {
+            broadcastPreVoteRequests.add(new BroadcastPreVote(request, Set.copyOf(peerIds)));
+        }
 
         @Override
         public void attachHandlers(
