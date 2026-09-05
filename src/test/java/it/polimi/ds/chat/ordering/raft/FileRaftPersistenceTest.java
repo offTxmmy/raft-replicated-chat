@@ -22,10 +22,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * and tolerance to a truncated log tail.
  */
 class FileRaftPersistenceTest {
+    private final java.util.List<FileRaftPersistence> owned = new java.util.ArrayList<>();
+    private FileRaftPersistence open(Path dir) {
+        FileRaftPersistence storage = new FileRaftPersistence(dir);
+        owned.add(storage);
+        return storage;
+    }
+    @org.junit.jupiter.api.AfterEach
+    void closeOwnedStorage() { owned.forEach(FileRaftPersistence::close); }
+
 
     @Test
     void emptyDirectoryLoadsDefaults(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
 
         RaftPersistence.PersistedState state = p.loadTermAndVote();
         assertEquals(0L, state.currentTerm());
@@ -35,11 +44,12 @@ class FileRaftPersistenceTest {
 
     @Test
     void persistAndReloadTermAndVote(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.persistTermAndVote(7L, 3);
 
         // Crash + restart: fresh instance on the same directory.
-        FileRaftPersistence restored = new FileRaftPersistence(dir);
+        p.close();
+        FileRaftPersistence restored = open(dir);
         RaftPersistence.PersistedState state = restored.loadTermAndVote();
         assertEquals(7L, state.currentTerm());
         assertEquals(Integer.valueOf(3), state.votedFor());
@@ -47,10 +57,11 @@ class FileRaftPersistenceTest {
 
     @Test
     void persistTermWithoutVoteRoundTrips(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.persistTermAndVote(12L, null);
 
-        FileRaftPersistence restored = new FileRaftPersistence(dir);
+        p.close();
+        FileRaftPersistence restored = open(dir);
         RaftPersistence.PersistedState state = restored.loadTermAndVote();
         assertEquals(12L, state.currentTerm());
         assertNull(state.votedFor());
@@ -58,10 +69,11 @@ class FileRaftPersistenceTest {
 
     @Test
     void persistAndReloadCommitProgress(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.persistCommitProgress(9L, 7L);
 
-        FileRaftPersistence restored = new FileRaftPersistence(dir);
+        p.close();
+        FileRaftPersistence restored = open(dir);
         RaftPersistence.CommitProgress progress = restored.loadCommitProgress();
 
         assertEquals(9L, progress.commitIndex());
@@ -70,7 +82,7 @@ class FileRaftPersistenceTest {
 
     @Test
     void overwriteKeepsLatestValue(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.persistTermAndVote(1L, 1);
         p.persistTermAndVote(2L, 2);
         p.persistTermAndVote(3L, null);
@@ -82,12 +94,13 @@ class FileRaftPersistenceTest {
 
     @Test
     void appendAndLoadLogEntries(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.appendLogEntry(entry(1L, 1L, "a"));
         p.appendLogEntry(entry(2L, 1L, "b"));
         p.appendLogEntry(entry(3L, 2L, "c"));
 
-        FileRaftPersistence restored = new FileRaftPersistence(dir);
+        p.close();
+        FileRaftPersistence restored = open(dir);
         List<RaftLogEntry> entries = restored.loadLogEntries();
 
         assertEquals(3, entries.size());
@@ -99,7 +112,7 @@ class FileRaftPersistenceTest {
 
     @Test
     void truncateRemovesTail(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.appendLogEntry(entry(1L, 1L, "a"));
         p.appendLogEntry(entry(2L, 1L, "b"));
         p.appendLogEntry(entry(3L, 2L, "c"));
@@ -111,7 +124,8 @@ class FileRaftPersistenceTest {
         assertEquals(1L, entries.get(0).getIndex());
 
         // Survives a restart.
-        FileRaftPersistence restored = new FileRaftPersistence(dir);
+        p.close();
+        FileRaftPersistence restored = open(dir);
         List<RaftLogEntry> reloaded = restored.loadLogEntries();
         assertEquals(1, reloaded.size());
         assertEquals(1L, reloaded.get(0).getIndex());
@@ -119,7 +133,7 @@ class FileRaftPersistenceTest {
 
     @Test
     void truncateFromZeroIsNoOp(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.appendLogEntry(entry(1L, 1L, "a"));
         p.truncateLogFrom(0L);
         assertEquals(1, p.loadLogEntries().size());
@@ -127,7 +141,7 @@ class FileRaftPersistenceTest {
 
     @Test
     void truncateBeyondTailKeepsEverything(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.appendLogEntry(entry(1L, 1L, "a"));
         p.appendLogEntry(entry(2L, 1L, "b"));
 
@@ -138,7 +152,7 @@ class FileRaftPersistenceTest {
 
     @Test
     void truncatedTailFromPartialAppendIsDroppedSilently(@TempDir Path dir) throws IOException {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.appendLogEntry(entry(1L, 1L, "a"));
         p.appendLogEntry(entry(2L, 1L, "b"));
 
@@ -150,14 +164,15 @@ class FileRaftPersistenceTest {
             raf.writeInt(9999); // length prefix with no payload
         }
 
-        FileRaftPersistence restored = new FileRaftPersistence(dir);
+        p.close();
+        FileRaftPersistence restored = open(dir);
         List<RaftLogEntry> entries = restored.loadLogEntries();
         assertEquals(2, entries.size());
     }
 
     @Test
     void noLeftoverTmpFilesAfterPersistAndTruncate(@TempDir Path dir) {
-        FileRaftPersistence p = new FileRaftPersistence(dir);
+        FileRaftPersistence p = open(dir);
         p.persistTermAndVote(5L, 2);
         p.persistCommitProgress(5L, 4L);
         p.appendLogEntry(entry(1L, 1L, "a"));

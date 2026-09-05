@@ -8,7 +8,9 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
-import java.io.EOFException;
+import java.io.RandomAccessFile;
+import java.nio.channels.FileLock;
+import java.nio.file.AccessDeniedException;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -58,6 +60,10 @@ public final class FileRaftPersistence implements RaftPersistence {
     private static final String LOG_FILE   = "log.bin";
     private static final String LOG_TMP    = "log.bin.tmp";
 
+    private FileChannel ownershipChannel;
+    private FileLock ownershipLock;
+    private boolean closed;
+
     private final Path stateFile;
     private final Path stateTmp;
     private final Path commitFile;
@@ -78,10 +84,33 @@ public final class FileRaftPersistence implements RaftPersistence {
         this.logFile   = storageDir.resolve(LOG_FILE);
         this.logTmp    = storageDir.resolve(LOG_TMP);
 
+        try {
+            ownershipChannel = FileChannel.open(storageDir.resolve("storage.lock"),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            ownershipLock = ownershipChannel.tryLock();
+            for (int attempt = 0; ownershipLock == null && attempt < 4; attempt++) {
+                // Process termination can precede Windows releasing the last file handle.
+                // Every retry still requires the OS to grant the exclusive lock.
+                try { Thread.sleep(25L * (attempt + 1)); }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted acquiring Raft storage ownership", interrupted);
+                }
+                ownershipLock = ownershipChannel.tryLock();
+            }
+            if (ownershipLock == null) {
+                throw new IOException("Storage is already owned by another broker");
+            }
+        } catch (IOException | RuntimeException e) {
+            close();
+            throw new RaftPersistenceException("Cannot acquire exclusive Raft storage ownership: " + storageDir, e);
+        }
+
         if (!Files.exists(logFile)) {
             try {
                 Files.createFile(logFile);
             } catch (IOException e) {
+                close();
                 throw new RaftPersistenceException("Cannot create log file " + logFile, e);
             }
         }
@@ -91,6 +120,7 @@ public final class FileRaftPersistence implements RaftPersistence {
 
     @Override
     public synchronized void persistTermAndVote(long currentTerm, Integer votedFor) {
+        checkHealthy();
         try (DataOutputStream out = new DataOutputStream(
                 new BufferedOutputStream(Files.newOutputStream(stateTmp,
                         StandardOpenOption.CREATE,
@@ -107,9 +137,7 @@ public final class FileRaftPersistence implements RaftPersistence {
         }
         fsync(stateTmp);
         try {
-            Files.move(stateTmp, stateFile,
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING);
+            atomicReplace(stateTmp, stateFile);
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to rename state file", e);
         }
@@ -118,6 +146,7 @@ public final class FileRaftPersistence implements RaftPersistence {
 
     @Override
     public synchronized PersistedState loadTermAndVote() {
+        checkHealthy();
         if (!Files.exists(stateFile)) {
             return PersistedState.EMPTY;
         }
@@ -135,6 +164,7 @@ public final class FileRaftPersistence implements RaftPersistence {
     // --- Commit progress (commitIndex / lastApplied) ----------------------
     @Override
     public synchronized void persistCommitProgress(long commitIndex, long lastApplied) {
+        checkHealthy();
         try (DataOutputStream out = new DataOutputStream(
                 new BufferedOutputStream(Files.newOutputStream(commitTmp,
                         StandardOpenOption.CREATE,
@@ -148,9 +178,7 @@ public final class FileRaftPersistence implements RaftPersistence {
         }
         fsync(commitTmp);
         try {
-            Files.move(commitTmp, commitFile,
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING);
+            atomicReplace(commitTmp, commitFile);
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to rename commit progress file", e);
         }
@@ -159,6 +187,7 @@ public final class FileRaftPersistence implements RaftPersistence {
 
     @Override
     public synchronized CommitProgress loadCommitProgress() {
+        checkHealthy();
         if (!Files.exists(commitFile)) {
             return CommitProgress.EMPTY;
         }
@@ -176,6 +205,7 @@ public final class FileRaftPersistence implements RaftPersistence {
 
     @Override
     public synchronized void appendLogEntry(RaftLogEntry entry) {
+        checkHealthy();
         byte[] payload = serialize(entry);
         try (DataOutputStream out = new DataOutputStream(
                 new BufferedOutputStream(Files.newOutputStream(logFile,
@@ -191,6 +221,7 @@ public final class FileRaftPersistence implements RaftPersistence {
 
     @Override
     public synchronized void truncateLogFrom(long fromIndex) {
+        checkHealthy();
         if (fromIndex <= 0L) {
             return;
         }
@@ -217,9 +248,7 @@ public final class FileRaftPersistence implements RaftPersistence {
         }
         fsync(logTmp);
         try {
-            Files.move(logTmp, logFile,
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING);
+            atomicReplace(logTmp, logFile);
         } catch (IOException e) {
             throw new RaftPersistenceException("Failed to rename log file", e);
         }
@@ -228,32 +257,84 @@ public final class FileRaftPersistence implements RaftPersistence {
 
     @Override
     public synchronized List<RaftLogEntry> loadLogEntries() {
+        checkHealthy();
         List<RaftLogEntry> entries = new ArrayList<>();
         if (!Files.exists(logFile)) {
             return entries;
         }
-        try (DataInputStream in = new DataInputStream(
-                new BufferedInputStream(Files.newInputStream(logFile)))) {
-            while (true) {
-                int len;
-                try {
-                    len = in.readInt();
-                } catch (EOFException eof) {
-                    break;
+        try (RandomAccessFile file = new RandomAccessFile(logFile.toFile(), "rw")) {
+            long validEnd = 0L;
+            while (file.getFilePointer() < file.length()) {
+                if (file.length() - file.getFilePointer() < Integer.BYTES) break;
+                int length = file.readInt();
+                if (length <= 0) {
+                    throw new IOException("Invalid Raft record length at offset " + validEnd);
                 }
-                if (len <= 0) {
-                    break; // corrupted tail
+                if (length > file.length() - file.getFilePointer()) break;
+                byte[] payload = new byte[length];
+                file.readFully(payload);
+                RaftLogEntry entry = deserialize(payload);
+                if (entry.getIndex() != entries.size() + 1L) {
+                    throw new IOException("Non-contiguous Raft log at offset " + validEnd);
                 }
-                byte[] payload = in.readNBytes(len);
-                if (payload.length < len) {
-                    break; // truncated tail from a crash mid-append: drop silently
+                entries.add(entry);
+                validEnd = file.getFilePointer();
+            }
+            if (validEnd < file.length()) {
+                if (loadCommitProgress().commitIndex() > entries.size()) {
+                    throw new IOException("Incomplete record intersects the committed prefix; preserving damaged log");
                 }
-                entries.add(deserialize(payload));
+                // Remove the incomplete append BEFORE any future append can be acknowledged.
+                // Otherwise a second recovery would stop before those later valid records.
+                file.setLength(validEnd);
+                file.getChannel().force(true);
             }
         } catch (IOException e) {
-            throw new RaftPersistenceException("Failed to read log file", e);
+            throw new RaftPersistenceException("Failed to recover log file", e);
         }
         return entries;
+    }
+
+    @Override
+    public synchronized void checkHealthy() {
+        if (closed) throw new RaftPersistenceException("Raft storage is closed", null);
+    }
+
+    @Override
+    public synchronized void close() {
+        if (closed) return;
+        closed = true;
+        try {
+            if (ownershipChannel != null) ownershipChannel.close();
+        } catch (IOException e) {
+            throw new RaftPersistenceException("Cannot release Raft storage ownership", e);
+        }
+    }
+
+    @FunctionalInterface
+    interface AtomicMover { void move(Path source, Path target) throws IOException; }
+
+    private static void atomicReplace(Path source, Path target) throws IOException {
+        atomicReplace(source, target, (from, to) -> Files.move(from, to,
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING));
+    }
+
+    static void atomicReplace(Path source, Path target, AtomicMover mover) throws IOException {
+        for (int attempt = 0; ; attempt++) {
+            try {
+                mover.move(source, target);
+                return;
+            } catch (AccessDeniedException transientLock) {
+                // Windows scanners can temporarily deny replacement. Keep the fsynced tmp,
+                // retry the SAME atomic operation, and never fall back to delete/non-atomic move.
+                if (attempt == 4) throw transientLock;
+                try { Thread.sleep(25L * (attempt + 1)); }
+                catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("Interrupted during atomic Raft replacement", interrupted);
+                }
+            }
+        }
     }
 
     // --- Helpers -----------------------------------------------------------

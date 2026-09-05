@@ -212,6 +212,7 @@ public class ClientHandler implements Runnable {
      * @param obj the received object (String or HeartbeatMessage)
      */
     void handleCommand(Object obj) {
+        if (sessionClosed.get()) return;
         if (obj instanceof String line) {
             Object msg = parseLineToMessage(line, username);
             if (msg instanceof ClientJoinMessage) {
@@ -240,6 +241,11 @@ public class ClientHandler implements Runnable {
                     sendLine(ClientAckMessages.buildAck(
                             clientMessage.getClientId(),
                             clientMessage.getClientSeq()));
+                } else {
+                    // A live edge can still be unable to reach the Raft majority.
+                    // Release the client to Directory failover; its FIFO head keeps
+                    // the same identity because no definitive ACK was sent.
+                    closeSession();
                 }
             } else if (msg instanceof HeartbeatMessage) {
                 HeartbeatMessage hb = (HeartbeatMessage) msg;

@@ -28,6 +28,8 @@ public class RaftNode {
     private final int nodeId;
     private final RaftPersistence persistence;
 
+    private RuntimeException storageFailure;
+
     private long currentTerm;
     private Integer votedFor;
     private int leaderId;
@@ -78,22 +80,27 @@ public class RaftNode {
     }
 
     public synchronized long getCurrentTerm() {
+        checkStorage();
         return currentTerm;
     }
 
     public synchronized Integer getVotedFor() {
+        checkStorage();
         return votedFor;
     }
 
     public synchronized int getLeaderId() {
+        checkStorage();
         return leaderId;
     }
 
     public synchronized RaftRole getRole() {
+        checkStorage();
         return role;
     }
 
     public synchronized boolean isLeader() {
+        checkStorage();
         return role == RaftRole.LEADER;
     }
 
@@ -108,11 +115,12 @@ public class RaftNode {
      * @return the new current term
      */
     public synchronized long startElection() {
+        checkStorage();
         currentTerm++;
         role = RaftRole.CANDIDATE;
         votedFor = nodeId;
         leaderId = NO_LEADER;
-        persistence.persistTermAndVote(currentTerm, votedFor);
+        persistTermAndVote();
         return currentTerm;
     }
 
@@ -124,6 +132,7 @@ public class RaftNode {
      * @throws IllegalStateException if the node is not currently a candidate
      */
     public synchronized void becomeLeader() {
+        checkStorage();
         if (role != RaftRole.CANDIDATE) {
             throw new IllegalStateException("Only a candidate can become leader");
         }
@@ -146,6 +155,7 @@ public class RaftNode {
      * @return true if the node accepted the transition, false if the term was stale
      */
     public synchronized boolean becomeFollower(long observedTerm, int knownLeaderId) {
+        checkStorage();
         if (observedTerm < currentTerm) {
             return false;
         }
@@ -161,7 +171,7 @@ public class RaftNode {
         leaderId = knownLeaderId;
 
         if (termChanged) {
-            persistence.persistTermAndVote(currentTerm, votedFor);
+            persistTermAndVote();
         }
         return true;
     }
@@ -174,6 +184,7 @@ public class RaftNode {
      * @return true if the node stepped down, false if the observed term was not higher
      */
     public synchronized boolean stepDownIfHigherTerm(long observedHigherTerm) {
+        checkStorage();
         if (observedHigherTerm <= currentTerm){
             return false;
         }
@@ -182,7 +193,7 @@ public class RaftNode {
         votedFor = null;
         role = RaftRole.FOLLOWER;
         leaderId = NO_LEADER;
-        persistence.persistTermAndVote(currentTerm, votedFor);
+        persistTermAndVote();
         return true;
     }
 
@@ -194,6 +205,7 @@ public class RaftNode {
      * @throws IllegalStateException if a different vote already exists in this term
      */
     public synchronized void recordVoteFor(int candidateId) {
+        checkStorage();
         if (votedFor != null && votedFor != candidateId) {
             throw new IllegalStateException("Node has already voted for " + votedFor + " in term " + currentTerm);
         }
@@ -215,6 +227,7 @@ public class RaftNode {
      * @return vote response containing the local current term and the decision
      */
     public synchronized RequestVoteResponseMessage handleRequestVote(RequestVoteRequestMessage request, RaftLogMetadata logMetadata) {
+        checkStorage();
         if (request.getTerm() < currentTerm) {
             return new RequestVoteResponseMessage(currentTerm, false, nodeId);
         }
@@ -241,7 +254,7 @@ public class RaftNode {
         if (voteChanged) {
             // Persist the vote BEFORE returning the response: a granted vote must
             // be durable before it becomes observable to the candidate.
-            persistence.persistTermAndVote(currentTerm, votedFor);
+            persistTermAndVote();
         }
 
         return new RequestVoteResponseMessage(currentTerm, true, nodeId);
@@ -253,9 +266,24 @@ public class RaftNode {
      */
     public synchronized PreVoteResponseMessage handlePreVote(
             PreVoteRequestMessage request, RaftLogMetadata logMetadata, boolean eligible) {
+        checkStorage();
         boolean granted = eligible && request.getTerm() > currentTerm
                 && isCandidateLogUpToDate(request.getLastLogIndex(), request.getLastLogTerm(), logMetadata);
         return new PreVoteResponseMessage(currentTerm, request.getTerm(), request.getRoundId(), granted, nodeId);
+    }
+
+    private void checkStorage() {
+        if (storageFailure != null) throw storageFailure;
+        persistence.checkHealthy();
+    }
+
+    private void persistTermAndVote() {
+        try {
+            persistence.persistTermAndVote(currentTerm, votedFor);
+        } catch (RuntimeException failure) {
+            storageFailure = failure;
+            throw failure;
+        }
     }
 
     /**

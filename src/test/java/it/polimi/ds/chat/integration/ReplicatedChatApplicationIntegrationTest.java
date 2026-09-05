@@ -270,8 +270,74 @@ class ReplicatedChatApplicationIntegrationTest {
 
                     newcomer.sendMessageAndAwaitAck(1L, "after-restart");
                     observer.awaitExactWireMessage("MSG 4 newcomer:after-restart");
+                    sender.awaitExactWireMessage("MSG 4 newcomer:after-restart");
                     newcomer.assertNoInboundObject(ABSENCE_WINDOW,
                             "the post-restart sender received an echo or a replay");
+                }
+                for (int cycle = 0; cycle < 2; cycle++) {
+                    cluster.stopBroker(restartedBrokerId);
+                    long clientSeq = 4L + 2L * cycle;
+                    long appSeq = 5L + 2L * cycle;
+                    sender.sendMessageAndAwaitAck(clientSeq, "outage-" + cycle);
+                    observer.awaitExactWireMessage("MSG " + appSeq + " alice:outage-" + cycle);
+                    cluster.restartBroker(restartedBrokerId);
+                    cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
+                    try (WireClient rejoined = WireClient.connect(LOOPBACK,
+                            cluster.clientPort(restartedBrokerId), "rejoined", "rejoined-" + cycle)) {
+                        rejoined.awaitWelcome();
+                        rejoined.assertNoInboundObject(ABSENCE_WINDOW, "history after repeated restart");
+                        sender.sendMessageAndAwaitAck(clientSeq + 1, "healed-" + cycle);
+                        String expected = "MSG " + (appSeq + 1) + " alice:healed-" + cycle;
+                        observer.awaitExactWireMessage(expected);
+                        rejoined.awaitExactWireMessage(expected);
+                    }
+                }
+                cluster.stopBroker(restartedBrokerId);
+                sender.sendMessageAndAwaitAck(8, "after-third-recovery");
+                observer.awaitExactWireMessage("MSG 9 alice:after-third-recovery");
+
+            }
+        }
+    }
+
+    @Test
+    void oldLeaderRestartsThenAnotherBrokerFailsAndLostAckRetryIsDeduplicated(
+            @TempDir Path storageRoot) throws Exception {
+        try (ApplicationCluster cluster = ApplicationCluster.start(storageRoot)) {
+            int oldLeader = cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
+            int senderId = (oldLeader + 1) % 3;
+            int observerId = (oldLeader + 2) % 3;
+            try (WireClient sender = WireClient.connect(LOOPBACK, cluster.clientPort(senderId), "alice", "stable-retry");
+                 WireClient observer = WireClient.connect(LOOPBACK, cluster.clientPort(observerId), "observer", "observer-old")) {
+                sender.awaitWelcome(); observer.awaitWelcome();
+                sender.sendMessageAndAwaitAck(1, "before-leader-failure");
+                observer.awaitExactWireMessage("MSG 1 alice:before-leader-failure");
+                cluster.stopBroker(oldLeader);
+                cluster.awaitLeaderAgreement(cluster.liveNodeIds(), oldLeader);
+                sender.sendMessageAndAwaitAck(2, "new-leader");
+                observer.awaitExactWireMessage("MSG 2 alice:new-leader");
+                cluster.restartBroker(oldLeader);
+                cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
+                try (WireClient restoredObserver = WireClient.connect(LOOPBACK,
+                        cluster.clientPort(oldLeader), "restored", "restored-observer")) {
+                    restoredObserver.awaitWelcome();
+                    restoredObserver.assertNoInboundObject(ABSENCE_WINDOW, "old leader replayed history");
+                    // Commit is observed by another client, but the producer never consumes its ACK.
+                    sender.sendMessage(3, "ack-not-consumed");
+                    observer.awaitExactWireMessage("MSG 3 alice:ack-not-consumed");
+                    restoredObserver.awaitExactWireMessage("MSG 3 alice:ack-not-consumed");
+                    cluster.stopBroker(senderId);
+                    cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
+                    try (WireClient retried = WireClient.connect(LOOPBACK,
+                            cluster.clientPort(oldLeader), "alice", "stable-retry")) {
+                        retried.awaitWelcome();
+                        retried.sendMessageAndAwaitAck(3, "ack-not-consumed");
+                        observer.assertNoInboundObject(ABSENCE_WINDOW, "same identity was delivered twice");
+                        restoredObserver.assertNoInboundObject(ABSENCE_WINDOW, "retry consumed another application sequence");
+                        retried.sendMessageAndAwaitAck(4, "after-second-failure");
+                        observer.awaitExactWireMessage("MSG 4 alice:after-second-failure");
+                        restoredObserver.awaitExactWireMessage("MSG 4 alice:after-second-failure");
+                    }
                 }
             }
         }

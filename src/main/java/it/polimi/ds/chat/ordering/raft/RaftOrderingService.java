@@ -53,6 +53,23 @@ public final class RaftOrderingService implements OrderingService {
     private DefaultRaftClock raftClock;
 
     private volatile boolean running;
+    private volatile FileRaftPersistence.RaftPersistenceException terminalFailure;
+    private Consumer<Throwable> failureHandler = failure -> stop();
+
+    /** The owner must withdraw its client listener and Directory lease as well. */
+    public synchronized void setFailureHandler(Consumer<Throwable> failureHandler) {
+        this.failureHandler = Objects.requireNonNull(failureHandler);
+    }
+
+    private void storageFailed(FileRaftPersistence.RaftPersistenceException failure) {
+        terminalFailure = failure;
+        System.err.println("[RaftOrderingService] node=" + localNodeId + " FATAL durable-state failure; withdrawing broker");
+        failure.printStackTrace(System.err);
+        // Called with persistence/node/replication monitors held: teardown must run elsewhere.
+        Thread shutdown = new Thread(() -> failureHandler.accept(failure), "raft-fatal-stop-" + localNodeId);
+        shutdown.setDaemon(true);
+        shutdown.start();
+    }
     // Invalidates manager callbacks that escaped their old run before stop().
     private long lifecycleGeneration;
 
@@ -93,10 +110,22 @@ public final class RaftOrderingService implements OrderingService {
         if (running) {
             return;
         }
+        if (terminalFailure != null) throw terminalFailure;
         long runGeneration = ++lifecycleGeneration;
+        try {
+            startRun(runGeneration);
+        } catch (RuntimeException failure) {
+            running = false;
+            lifecycleGeneration++;
+            cleanupStartedComponents();
+            throw failure;
+        }
+    }
 
+    private void startRun(long runGeneration) {
         // 1. Persistence + recovery of (term, vote).
-        persistence = new FileRaftPersistence(raftConfig.getStorageDir());
+        persistence = new GuardedRaftPersistence(new FileRaftPersistence(raftConfig.getStorageDir()), this::storageFailed);
+        RaftPersistence runPersistence = persistence;
         RaftPersistence.PersistedState persisted = persistence.loadTermAndVote();
 
         // 2. Core Raft state.
@@ -107,14 +136,16 @@ public final class RaftOrderingService implements OrderingService {
         raftLog.loadFromPersistence(persistedEntries);
 
         RaftPersistence.CommitProgress persistedProgress = persistence.loadCommitProgress();
-        long restoredCommitIndex = Math.min(
-                persistedProgress.commitIndex(),
-                raftLog.lastLogIndex()
-        );
-        long restoredLastApplied = Math.min(
-                persistedProgress.lastApplied(),
-                restoredCommitIndex
-        );
+        if (persisted.currentTerm() < 0 || persistedProgress.commitIndex() < 0
+                || persistedProgress.lastApplied() < 0
+                || persistedProgress.lastApplied() > persistedProgress.commitIndex()
+                || persistedProgress.commitIndex() > raftLog.lastLogIndex()
+                || raftLog.lastLogTerm() > persisted.currentTerm()) {
+            throw new FileRaftPersistence.RaftPersistenceException(
+                    "Inconsistent durable Raft state: refusing to discard committed progress", null);
+        }
+        long restoredCommitIndex = persistedProgress.commitIndex();
+        long restoredLastApplied = persistedProgress.lastApplied();
 
         // Rebuild every volatile application projection from the prefix that had
         // already crossed the state-machine boundary before the crash. This runs
@@ -140,11 +171,11 @@ public final class RaftOrderingService implements OrderingService {
         // committed-but-not-applied suffix (restoredLastApplied, restoredCommitIndex].
         commitManager = new RaftCommitManager(
                 raftLog,
-                entry -> applyCommittedEntryOnce(entry, applyHook),
+                entry -> { runPersistence.checkHealthy(); applyCommittedEntryOnce(entry, applyHook); },
                 restoredCommitIndex,
                 restoredLastApplied,
                 (commitIndex, lastApplied) ->
-                        persistence.persistCommitProgress(commitIndex, lastApplied)
+                        runPersistence.persistCommitProgress(commitIndex, lastApplied)
         );
 
         raftLog.setCommitIndexSupplier(commitManager::getCommitIndex);
@@ -343,9 +374,6 @@ public final class RaftOrderingService implements OrderingService {
 
     @Override
     public synchronized void stop() {
-        if (!running) {
-            return;
-        }
         running = false;
         lifecycleGeneration++;
 
@@ -362,7 +390,7 @@ public final class RaftOrderingService implements OrderingService {
 
     @Override
     public boolean propose(ChatReqMessage request) {
-        if (!running) {
+        if (!running || terminalFailure != null) {
             return false;
         }
         if (!raftNode.isLeader()) {
@@ -381,7 +409,7 @@ public final class RaftOrderingService implements OrderingService {
     public boolean establishDeliveryBoundary(String boundaryId, Runnable onApplied) {
         Objects.requireNonNull(boundaryId, "boundaryId");
         Objects.requireNonNull(onApplied, "onApplied");
-        if (boundaryId.isBlank() || !running) {
+        if (boundaryId.isBlank() || !running || terminalFailure != null) {
             return false;
         }
 
@@ -519,7 +547,7 @@ public final class RaftOrderingService implements OrderingService {
 
     private ForwardClientProposalResponseMessage handleForwardedProposal(
             ForwardClientProposalRequestMessage request) {
-        if (!running) {
+        if (!running || terminalFailure != null) {
             return new ForwardClientProposalResponseMessage(false, getLeaderId(), "service not running");
         }
         if (!raftNode.isLeader()) {
@@ -540,12 +568,12 @@ public final class RaftOrderingService implements OrderingService {
 
     @Override
     public boolean isLeader() {
-        return raftNode != null && raftNode.isLeader();
+        return running && terminalFailure == null && raftNode != null && raftNode.isLeader();
     }
 
     @Override
     public int getLeaderId() {
-        return raftNode == null ? -1 : raftNode.getLeaderId();
+        return terminalFailure != null || raftNode == null ? -1 : raftNode.getLeaderId();
     }
 
     public int getLocalNodeId() {
@@ -559,7 +587,9 @@ public final class RaftOrderingService implements OrderingService {
 
         RaftUdpBroadcastTransport udpTransport =
                 new RaftUdpBroadcastTransport(localNodeId, raftConfig);
-        return new RaftHybridTransport(tcpClient, udpTransport);
+        int tcpHeartbeatEvery = (int) Math.max(1L, Math.min(5L,
+                raftConfig.getElectionTimeoutMinMs() / raftConfig.getHeartbeatIntervalMs() / 2L));
+        return new RaftHybridTransport(tcpClient, udpTransport, tcpHeartbeatEvery);
     }
 
     private void notifyDelivery(ChatDeliverMessage message) {
@@ -656,6 +686,7 @@ public final class RaftOrderingService implements OrderingService {
             RaftReplicationManager expectedReplicationManager
     ) {
         return running
+                && terminalFailure == null
                 && lifecycleGeneration == expectedGeneration
                 && replicationManager == expectedReplicationManager;
     }
@@ -680,6 +711,9 @@ public final class RaftOrderingService implements OrderingService {
         }
         if (raftClock != null) {
             raftClock.shutdown();
+        }
+        if (persistence != null) {
+            persistence.close();
         }
     }
 

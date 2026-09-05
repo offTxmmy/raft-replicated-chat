@@ -24,6 +24,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ClientRuntimeBlockedWriteTest {
 
     @Test
+    void blackholedWriteClosesTransportWithoutReceiverOrHeartbeatProgress() throws Exception {
+        try (Scenario scenario = new Scenario(150L)) {
+            Future<?> blocked = scenario.blockChatWrite();
+            assertTrue(scenario.socket.closed.await(2, TimeUnit.SECONDS),
+                    "write deadline depended on the blocked heartbeat writer or an external read failure");
+            blocked.get(1, TimeUnit.SECONDS);
+            assertTrue(scenario.connection.replacementAttempted.await(2, TimeUnit.SECONDS),
+                    "deadline closed the socket but failed to trigger reconnect");
+        }
+    }
+
+    @Test
     void receiverFailureClosesSocketBeforeDetachingBlockedSender()
             throws Exception {
         try (Scenario scenario = new Scenario()) {
@@ -83,6 +95,11 @@ class ClientRuntimeBlockedWriteTest {
         private final ClientConnectionGeneration generation;
 
         private Scenario() throws Exception {
+            this(10_000L);
+        }
+
+        private Scenario(long writeTimeoutMillis) throws Exception {
+            connection.writeTimeoutMillis = writeTimeoutMillis;
             connection.open();
             generation = connection.getCurrentGeneration();
             runtime.start();
@@ -112,6 +129,8 @@ class ClientRuntimeBlockedWriteTest {
         private final ObjectInputStream input;
         private final ObjectOutputStream output;
         private final AtomicInteger attempts = new AtomicInteger();
+        private long writeTimeoutMillis;
+        private final CountDownLatch replacementAttempted = new CountDownLatch(1);
 
         private ScriptedConnection(CloseAwareSocket socket,
                                    ObjectInputStream input,
@@ -129,6 +148,7 @@ class ClientRuntimeBlockedWriteTest {
         ) throws IOException {
             int attempt = attempts.incrementAndGet();
             if (attempt > 1) {
+                replacementAttempted.countDown();
                 throw new IOException("replacement deliberately unavailable");
             }
             return ClientGenerationTestFactory.create(
@@ -137,7 +157,7 @@ class ClientRuntimeBlockedWriteTest {
                     port,
                     socket,
                     input,
-                    new ClientObjectWriter(output)
+                    new ClientObjectWriter(output, socket, writeTimeoutMillis)
             );
         }
     }

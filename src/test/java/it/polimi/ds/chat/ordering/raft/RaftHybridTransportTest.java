@@ -33,7 +33,7 @@ class RaftHybridTransportTest {
         hybrid.broadcastPreVote(request, Set.of(2, 3));
         hybrid.sendPreVote(2, request);
 
-        assertTrue(tcp.broadcastPreVoteRequests.isEmpty());
+        assertEquals(List.of(new BroadcastPreVote(request, Set.of(2, 3))), tcp.broadcastPreVoteRequests);
         assertEquals(List.of(new BroadcastPreVote(request, Set.of(2, 3))), udp.broadcastPreVoteRequests);
         assertEquals(List.of(new SentPreVote(2, request)), tcp.sentPreVoteRequests);
         assertTrue(udp.sentPreVoteRequests.isEmpty());
@@ -66,7 +66,7 @@ class RaftHybridTransportTest {
 
         hybrid.broadcastRequestVote(request, Set.of(2, 3));
 
-        assertEquals(0, tcp.broadcastVoteRequests.size());
+        assertEquals(1, tcp.broadcastVoteRequests.size());
         assertEquals(1, udp.broadcastVoteRequests.size());
         assertEquals(Set.of(2, 3), udp.broadcastVoteRequests.get(0).peerIds());
     }
@@ -88,7 +88,7 @@ class RaftHybridTransportTest {
 
         hybrid.broadcastAppendEntries(heartbeat, Set.of(2, 3));
 
-        assertEquals(0, tcp.broadcastAppendEntriesRequests.size());
+        assertEquals(1, tcp.broadcastAppendEntriesRequests.size());
         assertEquals(1, udp.broadcastAppendEntriesRequests.size());
         BroadcastAppendEntries broadcast = udp.broadcastAppendEntriesRequests.get(0);
         assertEquals(heartbeat, broadcast.request());

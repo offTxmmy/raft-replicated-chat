@@ -58,7 +58,10 @@ public final class ClientConnectionGeneration implements AutoCloseable {
     }
 
     public boolean isActive() {
-        return !closed.get() && writer.isActive() && !socket.isClosed();
+        // Only owner teardown invalidates a generation. A socket closed by a
+        // write deadline is still this owner's failed connection: its receiver
+        // must report that failure so the runtime can quarantine and reconnect.
+        return !closed.get() && writer.isActive();
     }
 
     /**

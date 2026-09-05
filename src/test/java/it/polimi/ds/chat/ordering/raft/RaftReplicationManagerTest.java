@@ -21,6 +21,46 @@ import static org.junit.jupiter.api.Assertions.*;
 class RaftReplicationManagerTest {
 
     @Test
+    void boundedCatchUpRepairsDivergentTailWithoutCommittingUnverifiedEntries() {
+        RaftLog leaderLog = new RaftLog();
+        RaftLog followerLog = new RaftLog();
+        // First batch matches; the later tail diverges. Committing the follower's
+        // whole local tip after batch one would make the repair impossible.
+        for (int index = 1; index <= 200; index++) {
+            leaderLog.append(index <= 64 ? 1 : 3, command("entry-" + index));
+            followerLog.append(1, command("entry-" + index));
+        }
+        RaftNode leader = new RaftNode(1, RaftPersistence.NO_OP, 2, null);
+        leader.startElection(); leader.becomeLeader();
+        RaftNode follower = new RaftNode(2, RaftPersistence.NO_OP, 3, null);
+        RaftCommitManager leaderCommit = new RaftCommitManager(leaderLog, entry -> {});
+        leaderCommit.advanceCommitIndex(200);
+        List<RaftLogEntry> applied = new ArrayList<>();
+        RaftCommitManager followerCommit = new RaftCommitManager(followerLog, applied::add);
+        followerLog.setCommitIndexSupplier(followerCommit::getCommitIndex);
+        RecordingSender sender = new RecordingSender();
+        RaftReplicationManager leaderReplication = new RaftReplicationManager(1, Set.of(1, 2, 3),
+                leader, leaderLog, leaderCommit, sender, null, null);
+        RaftReplicationManager followerReplication = new RaftReplicationManager(2, Set.of(1, 2, 3),
+                follower, followerLog, followerCommit, new RecordingSender(), null, null);
+        leaderReplication.start(); followerReplication.start();
+        leaderReplication.initializeLeaderState(1, 3);
+        leaderReplication.handleAppendEntriesResponse(2, new AppendEntriesResponseMessage(3, false, 2, 0, -1, 1));
+        for (int round = 0; round < 4; round++) {
+            leaderReplication.onHeartbeatRoundDue(3);
+            AppendEntriesRequestMessage request = sender.lastRequest(2);
+            assertTrue(request.getEntries().size() <= 64);
+            var response = followerReplication.handleAppendEntries(request);
+            assertTrue(response.isSuccess());
+            assertEquals(Math.min(200, 64L * (round + 1)), followerCommit.getCommitIndex());
+            leaderReplication.handleAppendEntriesResponse(2, response);
+        }
+        assertEquals(200, applied.size());
+        assertEquals(3, followerLog.getTermAt(65));
+        assertEquals(200, followerCommit.getLastApplied());
+    }
+
+    @Test
     // Rejects construction when the voting set is empty.
     void constructorShouldRejectEmptyVotingSet() {
         RaftNode node = followerNode(1);
@@ -1138,10 +1178,10 @@ class RaftReplicationManagerTest {
         private final CountDownLatch sendPlanBuildRelease = new CountDownLatch(1);
 
         @Override
-        public synchronized List<RaftLogEntry> getEntriesFrom(long startIndex) {
+        public synchronized List<RaftLogEntry> getEntriesFrom(long startIndex, int maximumEntries) {
             sendPlanBuildEntered.countDown();
             awaitRelease(sendPlanBuildRelease);
-            return super.getEntriesFrom(startIndex);
+            return super.getEntriesFrom(startIndex, maximumEntries);
         }
 
         boolean awaitSendPlanBuildEntered() throws InterruptedException {

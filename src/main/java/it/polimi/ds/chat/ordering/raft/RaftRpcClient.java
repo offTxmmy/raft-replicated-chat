@@ -12,6 +12,10 @@ import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 
 import java.io.IOException;
+import it.polimi.ds.chat.common.net.SocketDeadline;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.RejectedExecutionException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
@@ -22,7 +26,6 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -59,6 +62,11 @@ public final class RaftRpcClient implements RaftTransport {
 
     private ExecutorService sendExecutor;
     private volatile boolean running;
+    private long generation;
+    private final Set<Socket> activeSockets = ConcurrentHashMap.newKeySet();
+    private final ConcurrentHashMap<RequestKey, Object> inFlight = new ConcurrentHashMap<>();
+    private record RequestKey(int peer, Class<?> type) { }
+
 
     public RaftRpcClient(int localNodeId, Map<Integer, RaftPeerEndpoint> voters) {
         this(localNodeId, voters, DEFAULT_CONNECT_TIMEOUT_MS, DEFAULT_READ_TIMEOUT_MS);
@@ -111,6 +119,7 @@ public final class RaftRpcClient implements RaftTransport {
             t.setDaemon(true);
             return t;
         });
+        generation++;
         running = true;
     }
 
@@ -120,14 +129,12 @@ public final class RaftRpcClient implements RaftTransport {
             return;
         }
         running = false;
-        if (sendExecutor != null) {
-            sendExecutor.shutdownNow();
-            try {
-                sendExecutor.awaitTermination(2, TimeUnit.SECONDS);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
+        generation++;
+        for (Socket socket : activeSockets) {
+            try { socket.close(); } catch (IOException ignored) { }
         }
+        inFlight.clear();
+        if (sendExecutor != null) sendExecutor.shutdownNow();
     }
 
     public int getLocalNodeId() {
@@ -178,30 +185,45 @@ public final class RaftRpcClient implements RaftTransport {
                 new ForwardClientProposalRequestMessage(request),
                 FORWARD_PROPOSAL_READ_TIMEOUT_MS);
 
+        if (response == null) {
+            return new ForwardClientProposalResponseMessage(false, -1,
+                    "leader unavailable or RPC deadline expired; commit outcome unknown");
+        }
         if (response instanceof ForwardClientProposalResponseMessage r) {
             return r;
         }
         return new ForwardClientProposalResponseMessage(false, -1, "invalid forward response");
     }
 
-    private void sendAsync(int peerId, Object request, Consumer<Object> onResponse) {
-        if (!running) {
-            return;
-        }
+    private synchronized void sendAsync(int peerId, Object request, Consumer<Object> onResponse) {
+        if (!running) return;
         RaftPeerEndpoint endpoint = voters.get(peerId);
-        if (endpoint == null) {
-            return;
-        }
-        sendExecutor.submit(() -> {
-            Object response = exchangeBlocking(endpoint, request, readTimeoutMs);
-            if (response != null) {
-                onResponse.accept(response);
-            }
-        });
+        if (endpoint == null) return;
+        RequestKey key = new RequestKey(peerId, request.getClass());
+        Object token = new Object();
+        if (inFlight.putIfAbsent(key, token) != null) return;
+        long runGeneration = generation;
+        try {
+            sendExecutor.execute(() -> {
+                try {
+                    Object response = exchangeBlocking(endpoint, request, readTimeoutMs);
+                    synchronized (RaftRpcClient.this) {
+                        if (!running || generation != runGeneration) return;
+                    }
+                    if (response != null) onResponse.accept(response);
+                } finally { inFlight.remove(key, token); }
+            });
+        } catch (RejectedExecutionException stopped) { inFlight.remove(key, token); }
     }
 
     private Object exchangeBlocking(RaftPeerEndpoint endpoint, Object request, int socketReadTimeoutMs) {
-        try (Socket sock = new Socket()) {
+        Socket sock = new Socket();
+        synchronized (this) {
+            if (!running) return null;
+            activeSockets.add(sock);
+        }
+        try (sock; SocketDeadline deadline = new SocketDeadline(sock,
+                connectTimeoutMs + socketReadTimeoutMs)) {
             sock.connect(new InetSocketAddress(endpoint.host(), endpoint.rpcPort()), connectTimeoutMs);
             sock.setSoTimeout(socketReadTimeoutMs);
 
@@ -214,6 +236,6 @@ public final class RaftRpcClient implements RaftTransport {
         } catch (IOException | ClassNotFoundException e) {
             // peer unreachable, timeout, or malformed reply: Raft will retry naturally
             return null;
-        }
+        } finally { activeSockets.remove(sock); }
     }
 }

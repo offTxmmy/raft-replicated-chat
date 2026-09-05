@@ -90,6 +90,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     private transient Consumer<String> clientStatusOutput;
     private transient volatile Thread clientStatusThread;
     private transient volatile boolean running;
+    private transient volatile Throwable terminalOrderingFailure;
 
     /**
      * Construct a broker with the given configuration.
@@ -109,6 +110,10 @@ public class Broker implements Serializable, OrderingServiceCallback {
         it.polimi.ds.chat.ordering.raft.RaftOrderingService raftService =
                 new it.polimi.ds.chat.ordering.raft.RaftOrderingService(config);
         raftService.setCallback(this);
+        raftService.setFailureHandler(failure -> {
+            terminalOrderingFailure = failure;
+            stop();
+        });
         raftService.onDeliver(this::handleOrderedMessage);
         this.orderingService = raftService;
     }
@@ -199,6 +204,9 @@ public class Broker implements Serializable, OrderingServiceCallback {
             // though this thread has not entered accept() yet.
             clientServerSocket = new ServerSocket(config.getClientPort());
             running = true;
+            if (terminalOrderingFailure != null) {
+                throw new IOException("Raft failed during broker startup", terminalOrderingFailure);
+            }
             clientListenerReady.countDown();
 
             // Complete the remaining local startup before registration. These

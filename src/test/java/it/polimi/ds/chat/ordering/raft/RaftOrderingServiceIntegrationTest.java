@@ -55,6 +55,28 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * <p>Timeouts are conservative to keep the test stable under CI load.
  */
 class RaftOrderingServiceIntegrationTest {
+    @Test
+    void corruptCommittedPrefixIsRejectedBeforeNetworkingAndReleasesOwnership(@TempDir Path dir) throws Exception {
+        int port = pickFreePorts(1)[0];
+        try (FileRaftPersistence storage = new FileRaftPersistence(dir)) {
+            storage.persistTermAndVote(3, null);
+            storage.appendLogEntry(new RaftLogEntry(1, 3, null));
+            storage.persistCommitProgress(2, 2);
+        }
+        RaftOrderingService service = buildService(0, port,
+                Map.of(0, new RaftPeerEndpoint(0, "127.0.0.1", port, 50000)), dir);
+        assertThrows(FileRaftPersistence.RaftPersistenceException.class, service::start);
+        try (java.net.ServerSocket unused = new java.net.ServerSocket(port);
+             FileRaftPersistence nextOwner = new FileRaftPersistence(dir)) {
+            assertEquals(2, nextOwner.loadCommitProgress().commitIndex(), "startup silently rewrote committed progress");
+        } finally { service.stop(); }
+    }
+    private static Object storageField(RaftOrderingService service) throws Exception {
+        java.lang.reflect.Field field = RaftOrderingService.class.getDeclaredField("persistence");
+        field.setAccessible(true);
+        return field.get(service);
+    }
+
 
     private static final long ELECTION_TIMEOUT_MIN_MS = 200;
     private static final long ELECTION_TIMEOUT_MAX_MS = 400;
@@ -360,6 +382,7 @@ class RaftOrderingServiceIntegrationTest {
         // Indexes 1..3 crossed the application boundary before the crash.
         // Indexes 4..5 are committed but not applied. Index 6 is not committed.
         persistence.persistCommitProgress(5L, 3L);
+        persistence.close();
 
         Map<Integer, RaftPeerEndpoint> voters = Map.of(
                 0, new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000));
@@ -393,7 +416,7 @@ class RaftOrderingServiceIntegrationTest {
         assertEquals(2, queue.getDeliveredClock().getTimeStamp(0));
 
         RaftPersistence.CommitProgress restored =
-                new FileRaftPersistence(storageDir).loadCommitProgress();
+                ((RaftPersistence) storageField(nodes[0])).loadCommitProgress();
         assertEquals(5L, restored.commitIndex());
         assertEquals(5L, restored.lastApplied(),
                 "the committed-but-not-applied suffix must be applied exactly once");
@@ -523,6 +546,7 @@ class RaftOrderingServiceIntegrationTest {
         // Both entries are committed, but neither has crossed the application
         // boundary yet.
         persistence.persistCommitProgress(2L, 0L);
+        persistence.close();
 
         nodes = new RaftOrderingService[1];
 

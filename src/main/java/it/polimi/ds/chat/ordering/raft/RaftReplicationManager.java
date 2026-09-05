@@ -197,9 +197,10 @@ public class RaftReplicationManager implements RaftElectionListener {
                     );
                 }
 
-                commitManager.updateCommitIndexFromLeader(request.getLeaderCommit());
-
                 long ackedMatchIndex = request.getPrevLogIndex() + request.getEntries().size();
+                // A bounded batch proves only this prefix. A local divergent tail
+                // beyond it must remain uncommitted until a later batch repairs it.
+                commitManager.updateCommitIndexFromLeader(Math.min(request.getLeaderCommit(), ackedMatchIndex));
 
                 return new AppendEntriesResponseMessage(
                         raftNode.getCurrentTerm(),
@@ -401,7 +402,7 @@ public class RaftReplicationManager implements RaftElectionListener {
         long nextIndex = state.getNextIndex();
         long prevLogIndex = nextIndex - 1L;
         long prevLogTerm = log.getTermAt(prevLogIndex);
-        List<RaftLogEntry> entries = log.getEntriesFrom(nextIndex);
+        List<RaftLogEntry> entries = log.getEntriesFrom(nextIndex, 64);
 
         return new AppendEntriesSendPlan(peerId, new AppendEntriesRequestMessage(
                 leaderTerm,

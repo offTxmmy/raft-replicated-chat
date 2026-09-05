@@ -400,6 +400,14 @@ public class DirectoryService {
             lease = registerBroker(registration);
             while (running) {
                 Object obj = in.readObject();
+                synchronized (registryLock) {
+                    BrokerSlot current = brokerSlots.get(lease.brokerId());
+                    if (current == null || current.epoch() != lease.epoch()) {
+                        // Do not leave a superseded but live broker sending ignored
+                        // renewals forever. EOF makes its session owner re-register.
+                        return;
+                    }
+                }
                 if (obj instanceof HeartbeatMessage) {
                     recordHeartbeat(lease);
                 } else if (obj instanceof ClientCountUpdateMessage update) {
@@ -446,6 +454,12 @@ public class DirectoryService {
         BrokerRecord record = lease.toRecord(0, clock.getAsLong());
 
         synchronized (registryLock) {
+            BrokerSlot current = brokerSlots.get(message.getBrokerId());
+            if (current != null && current.epoch() > epoch) {
+                // Epoch allocation precedes publication. A paused old handler
+                // must not replace a registration already published by a newer one.
+                return lease;
+            }
             brokerSlots.put(message.getBrokerId(), new BrokerSlot(epoch, record));
             registryLock.notifyAll();
         }

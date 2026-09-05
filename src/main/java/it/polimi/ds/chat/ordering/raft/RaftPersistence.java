@@ -32,7 +32,13 @@ import java.util.List;
  *
  * Tests use an in-memory fake.
  */
-public interface RaftPersistence {
+public interface RaftPersistence extends AutoCloseable {
+
+    /** Fences every protocol operation after a durable-state failure or close. */
+    default void checkHealthy() { }
+
+    @Override
+    default void close() { }
 
     /**
      * Persists the current Raft term and vote atomically and synchronously.

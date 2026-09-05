@@ -22,6 +22,10 @@ import java.util.function.Function;
  */
 public final class RaftHybridTransport implements RaftTransport {
 
+    // Preserve UDP broadcast while periodically probing TCP: a filtered broadcast
+    // must not prevent a TCP-connected majority from electing or staying idle.
+    private int heartbeatRounds;
+    private final int tcpHeartbeatEvery;
     private final RaftTransport tcpTransport;
     private final RaftTransport udpTransport;
 
@@ -31,8 +35,13 @@ public final class RaftHybridTransport implements RaftTransport {
     }
 
     RaftHybridTransport(RaftTransport tcpTransport, RaftTransport udpTransport) {
+        this(tcpTransport, udpTransport, 1);
+    }
+
+    RaftHybridTransport(RaftTransport tcpTransport, RaftTransport udpTransport, int tcpHeartbeatEvery) {
         this.tcpTransport = Objects.requireNonNull(tcpTransport, "tcpTransport");
         this.udpTransport = Objects.requireNonNull(udpTransport, "udpTransport");
+        this.tcpHeartbeatEvery = Math.max(1, tcpHeartbeatEvery);
     }
 
     @Override
@@ -62,6 +71,7 @@ public final class RaftHybridTransport implements RaftTransport {
 
     @Override
     public void start() {
+        heartbeatRounds = 0;
         tcpTransport.start();
         udpTransport.start();
     }
@@ -84,12 +94,14 @@ public final class RaftHybridTransport implements RaftTransport {
 
     @Override
     public void broadcastPreVote(PreVoteRequestMessage request, Set<Integer> peerIds) {
-        udpTransport.broadcastPreVote(request, peerIds);
+        try { udpTransport.broadcastPreVote(request, peerIds); }
+        finally { tcpTransport.broadcastPreVote(request, peerIds); }
     }
 
     @Override
     public void broadcastRequestVote(RequestVoteRequestMessage request, Set<Integer> peerIds) {
-        udpTransport.broadcastRequestVote(request, peerIds);
+        try { udpTransport.broadcastRequestVote(request, peerIds); }
+        finally { tcpTransport.broadcastRequestVote(request, peerIds); }
     }
 
     @Override
@@ -100,10 +112,21 @@ public final class RaftHybridTransport implements RaftTransport {
     @Override
     public void broadcastAppendEntries(AppendEntriesRequestMessage request, Set<Integer> peerIds) {
         if (request.getEntries().isEmpty()) {
-            udpTransport.broadcastAppendEntries(request, peerIds);
+            try { udpTransport.broadcastAppendEntries(request, peerIds); }
+            finally {
+                // The first and periodic common heartbeats also travel over TCP.
+                // The period stays below the configured minimum election timeout.
+                if (tcpHeartbeatDue()) tcpTransport.broadcastAppendEntries(request, peerIds);
+            }
             return;
         }
 
         tcpTransport.broadcastAppendEntries(request, peerIds);
     }
+    private synchronized boolean tcpHeartbeatDue() {
+        boolean due = heartbeatRounds == 0;
+        heartbeatRounds = (heartbeatRounds + 1) % tcpHeartbeatEvery;
+        return due;
+    }
+
 }

@@ -92,7 +92,7 @@ public class ClientConnection {
                     new ObjectInputStream(candidateSocket.getInputStream());
 
             candidateSocket.setSoTimeout(0);
-            ClientObjectWriter writer = new ClientObjectWriter(objectOut);
+            ClientObjectWriter writer = new ClientObjectWriter(objectOut, candidateSocket, 10_000L);
             return new ClientConnectionGeneration(
                     nextGenerationId.incrementAndGet(),
                     newHost,

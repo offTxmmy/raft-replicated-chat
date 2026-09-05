@@ -1,6 +1,8 @@
 package it.polimi.ds.chat.client.connection;
 
 import java.io.IOException;
+import java.net.Socket;
+import it.polimi.ds.chat.common.net.SocketDeadline;
 import java.io.ObjectOutputStream;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -16,11 +18,19 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class ClientObjectWriter {
 
     private final ObjectOutputStream output;
+    private final Socket socket;
+    private final long writeTimeoutMillis;
     private final Object writeLock = new Object();
     private final AtomicBoolean active = new AtomicBoolean(true);
 
     public ClientObjectWriter(ObjectOutputStream output) {
+        this(output, null, 10_000L);
+    }
+
+    public ClientObjectWriter(ObjectOutputStream output, Socket socket, long writeTimeoutMillis) {
         this.output = Objects.requireNonNull(output, "output");
+        this.socket = socket;
+        this.writeTimeoutMillis = writeTimeoutMillis;
     }
 
     /**
@@ -33,8 +43,10 @@ public final class ClientObjectWriter {
                 throw new IOException("Client connection generation is no longer active");
             }
 
-            output.writeObject(message);
-            output.flush();
+            try (SocketDeadline deadline = socket == null ? null : new SocketDeadline(socket, writeTimeoutMillis)) {
+                output.writeObject(message);
+                output.flush();
+            }
         }
     }
 

@@ -26,7 +26,8 @@ class RaftPreVoteTest {
             assertEquals(RaftRole.FOLLOWER, f.node.getRole());
             assertNull(f.manager.getCurrentElectionTerm());
         }
-        assertEquals(new RaftPersistence.PersistedState(7, 1), new FileRaftPersistence(dir).loadTermAndVote());
+        assertEquals(new RaftPersistence.PersistedState(7, 1), storage.loadTermAndVote());
+        storage.close();
         assertEquals(200, f.sender.preVotes.size());
         assertTrue(f.sender.votes.isEmpty());
     }

@@ -10,6 +10,12 @@ import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
 
 import java.io.EOFException;
+import it.polimi.ds.chat.common.net.SocketDeadline;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
@@ -51,6 +57,7 @@ public final class RaftRpcServer {
     private ExecutorService handlerExecutor;
     private volatile boolean running;
     private int boundPort = -1;
+    private final Set<Socket> activeSockets = ConcurrentHashMap.newKeySet();
 
     public RaftRpcServer(int port,
                          Function<RequestVoteRequestMessage, RequestVoteResponseMessage> voteHandler,
@@ -88,9 +95,12 @@ public final class RaftRpcServer {
         serverSocket = new ServerSocket(requestedPort);
         boundPort = serverSocket.getLocalPort();
         acceptExecutor  = Executors.newSingleThreadExecutor(r -> daemon(r, "raft-rpc-accept"));
-        handlerExecutor = Executors.newCachedThreadPool(r -> daemon(r, "raft-rpc-handler"));
+        handlerExecutor = new ThreadPoolExecutor(0, 64, 30, TimeUnit.SECONDS,
+                new SynchronousQueue<>(), r -> daemon(r, "raft-rpc-handler"));
         running = true;
-        acceptExecutor.submit(this::acceptLoop);
+        ServerSocket runSocket = serverSocket;
+        ExecutorService runHandlers = handlerExecutor;
+        acceptExecutor.execute(() -> acceptLoop(runSocket, runHandlers));
     }
 
     public synchronized void stop() {
@@ -104,10 +114,8 @@ public final class RaftRpcServer {
         }
         if (acceptExecutor != null) acceptExecutor.shutdownNow();
         if (handlerExecutor != null) handlerExecutor.shutdownNow();
-        try {
-            if (handlerExecutor != null) handlerExecutor.awaitTermination(2, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+        for (Socket socket : activeSockets) {
+            try { socket.close(); } catch (IOException ignored) { }
         }
     }
 
@@ -120,11 +128,19 @@ public final class RaftRpcServer {
         return boundPort;
     }
 
-    private void acceptLoop() {
-        while (running) {
+    private void acceptLoop(ServerSocket runSocket, ExecutorService runHandlers) {
+        while (running && !runSocket.isClosed()) {
             try {
-                Socket sock = serverSocket.accept();
-                handlerExecutor.submit(() -> handleConnection(sock));
+                Socket sock = runSocket.accept();
+                synchronized (this) {
+                    if (!running || serverSocket != runSocket) { sock.close(); continue; }
+                    activeSockets.add(sock);
+                    try { runHandlers.execute(() -> handleConnection(sock)); }
+                    catch (RejectedExecutionException overloaded) {
+                        activeSockets.remove(sock);
+                        sock.close();
+                    }
+                }
             } catch (IOException e) {
                 if (running) {
                     System.err.println("[RaftRpcServer] accept failed: " + e.getMessage());
@@ -134,7 +150,8 @@ public final class RaftRpcServer {
     }
 
     private void handleConnection(Socket sock) {
-        try (sock) {
+        try (sock; SocketDeadline deadline = new SocketDeadline(sock, 10_000L)) {
+            sock.setSoTimeout(2_000);
             // ObjectOutputStream must be created and flushed BEFORE ObjectInputStream
             // on both ends: its constructor writes a stream header that the peer's
             // ObjectInputStream reads. Creating OIS first on both sides would deadlock.
@@ -151,8 +168,8 @@ public final class RaftRpcServer {
         } catch (EOFException eof) {
             // peer closed before sending — ignore
         } catch (IOException | ClassNotFoundException e) {
-            System.err.println("[RaftRpcServer] connection error: " + e.getMessage());
-        }
+            if (running) System.err.println("[RaftRpcServer] connection error: " + e.getMessage());
+        } finally { activeSockets.remove(sock); }
     }
 
     private Object dispatch(Object msg) {

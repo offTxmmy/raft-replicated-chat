@@ -33,6 +33,58 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DirectoryServiceTest {
 
+    @Test
+    void supersededRegistrationSocketIsClosedSoLiveBrokerCanReregister() throws Exception {
+        DirectoryService directory = startDirectory();
+        try (var old = register(directory.getBoundBrokerPortForTesting(), 7, "old", 50007)) {
+            assertTrue(directory.awaitActiveBrokerForTesting(7, "old", 50007, 1, TimeUnit.SECONDS));
+            try (var current = register(directory.getBoundBrokerPortForTesting(), 7, "new", 51007)) {
+                assertTrue(directory.awaitActiveBrokerForTesting(7, "new", 51007, 1, TimeUnit.SECONDS));
+                old.socket().setSoTimeout(1000);
+                old.output().writeObject(new it.polimi.ds.chat.protocol.client.HeartbeatMessage(1L));
+                old.output().flush();
+                assertEquals(-1, old.socket().getInputStream().read(),
+                        "superseded live connection keeps writing heartbeats that Directory silently ignores forever");
+                assertEquals("new", directory.brokerRecordForTesting(7).host());
+            }
+        }
+    }
+
+    @Test
+    void delayedRegistrationCannotOverwriteNewerEpochOrDeactivateIt() throws Exception {
+        var oldAllocated = new java.util.concurrent.CountDownLatch(1);
+        var releaseOld = new java.util.concurrent.CountDownLatch(1);
+        var first = new java.util.concurrent.atomic.AtomicBoolean(true);
+        AtomicLong now = new AtomicLong(100);
+        DirectoryService directory = new DirectoryService(Map.of(), () -> {
+            if (first.compareAndSet(true, false)) {
+                oldAllocated.countDown();
+                try { assertTrue(releaseOld.await(2, TimeUnit.SECONDS)); }
+                catch (InterruptedException e) { throw new RuntimeException(e); }
+            }
+            return now.get();
+        }, 10, 10, false);
+        var worker = java.util.concurrent.Executors.newSingleThreadExecutor();
+        try {
+            var oldRegistration = worker.submit(() -> directory.registerBroker(
+                    new DirectoryRegisterMessage(7, "old", 50007)));
+            assertTrue(oldAllocated.await(1, TimeUnit.SECONDS));
+            var current = directory.registerBroker(new DirectoryRegisterMessage(7, "new", 51007));
+            releaseOld.countDown();
+            var obsolete = oldRegistration.get(1, TimeUnit.SECONDS);
+            assertEquals("new", directory.brokerRecordForTesting(7).host(), "late epoch replaced current registration");
+            directory.recordHeartbeat(obsolete);
+            var deactivate = DirectoryService.class.getDeclaredMethod("deactivateLease", DirectoryService.RegistrationLease.class);
+            deactivate.setAccessible(true);
+            deactivate.invoke(directory, obsolete);
+            assertEquals("new", directory.brokerRecordForTesting(7).host());
+            now.set(200);
+            directory.reapExpiredBrokers();
+            directory.recordHeartbeat(current);
+            assertEquals("new", directory.brokerRecordForTesting(7).host(), "current connection can no longer renew its lease");
+        } finally { releaseOld.countDown(); worker.shutdownNow(); directory.stop(); }
+    }
+
     private DirectoryService runningService;
 
     @AfterEach

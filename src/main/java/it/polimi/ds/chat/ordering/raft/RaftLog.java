@@ -139,11 +139,17 @@ public class RaftLog implements RaftLogMetadata {
     }
 
     public synchronized List<RaftLogEntry> getEntriesFrom(long startIndex) {
+        return getEntriesFrom(startIndex, Integer.MAX_VALUE);
+    }
+
+    public synchronized List<RaftLogEntry> getEntriesFrom(long startIndex, int maximumEntries) {
+        if (maximumEntries <= 0) throw new IllegalArgumentException("maximumEntries must be positive");
         if (startIndex <= 0L || startIndex > lastLogIndex()) {
             return Collections.emptyList();
         }
         int from = (int) startIndex - 1;
-        return Collections.unmodifiableList(new ArrayList<>(entries.subList(from, entries.size())));
+        int end = (int) Math.min(entries.size(), (long) from + maximumEntries);
+        return Collections.unmodifiableList(new ArrayList<>(entries.subList(from, end)));
     }
 
     public synchronized void loadFromPersistence(List<RaftLogEntry> persistedEntries) {

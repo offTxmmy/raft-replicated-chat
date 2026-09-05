@@ -37,6 +37,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ClientHandlerOutboundTest {
 
     @Test
+    void liveBrokerWithoutCommitPathReleasesClientForFailover() {
+        Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000)) {
+            @Override public boolean onClientMessage(it.polimi.ds.chat.protocol.client.ClientMessage message) {
+                return false;
+            }
+        };
+        ClientHandler handler = new ClientHandler(new Socket(), broker);
+        assertTrue(handler.activateAtDeliveryBoundary());
+        handler.handleCommand("MSG stable-client 1 retry-me");
+        assertTrue(handler.isSessionClosed(), "heartbeat-alive edge must not strand the pending FIFO head");
+    }
+
+    @Test
     void fullSlowConsumerQueueIsolatesOnlyThatSessionWithoutBlockingFanOut() throws Exception {
         Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000));
         broker.setOrderingService(new ImmediateOrderingService());
@@ -134,11 +147,15 @@ class ClientHandlerOutboundTest {
                 new ScriptedOrderingService(false, true, true);
         broker.setOrderingService(orderingService);
         ClientHandler handler = new ClientHandler(new Socket(), broker);
+        handler.handleCommand(ClientJoinMessage.joinCommand("alice", "client-a"));
+        handler.handleCommand("MSG client-a 1 first");
+        assertTrue(handler.isSessionClosed());
+        // The client reconnects, repeats JOIN and retries the SAME FIFO identity.
+        handler = new ClientHandler(new Socket(), broker);
         RecordingObjectOutputStream output = new RecordingObjectOutputStream(3);
         handler.startOutboundWorker(output);
 
         handler.handleCommand(ClientJoinMessage.joinCommand("alice", "client-a"));
-        handler.handleCommand("MSG client-a 1 first");
         handler.handleCommand("MSG client-a 1 first");
         handler.handleCommand("MSG client-a 2 second");
 
