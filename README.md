@@ -308,9 +308,3 @@ Additional design and verification material lives under [`docs/`](docs/):
 
 - [`PROJECT_SPECIFICATION.md`](docs/PROJECT_SPECIFICATION.md) — requirement
   compliance baseline and design decisions.
-- [`raft_lan_broadcast_migration_report.md`](docs/raft_lan_broadcast_migration_report.md)
-  — the hybrid UDP/TCP transport migration.
-- [`PRE_GROUP_MANUAL_TESTING_TODO.md`](docs/PRE_GROUP_MANUAL_TESTING_TODO.md) —
-  manual testing and LAN validation tracker.
-- [`CODE_ISSUES_BY_GROUP.md`](docs/CODE_ISSUES_BY_GROUP.md) — issue log and
-  counterexamples.
