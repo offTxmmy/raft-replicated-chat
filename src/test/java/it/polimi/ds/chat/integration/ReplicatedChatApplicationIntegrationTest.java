@@ -103,7 +103,8 @@ class ReplicatedChatApplicationIntegrationTest {
                             "JOIN boundary leaked a chat committed before this connection became active");
 
                     sender.sendMessageAndAwaitAck(2L, "visible before failover");
-                    observer.awaitExactWireMessage("MSG 2 alice:visible before failover");
+                    long beforeFailover = observer.awaitChatMessage(
+                            "alice", "visible before failover");
                     sender.assertNoInboundObject(ABSENCE_WINDOW,
                             "the originating client received an echo before failover");
 
@@ -114,7 +115,10 @@ class ReplicatedChatApplicationIntegrationTest {
                             "the stopped leader cannot remain authoritative");
 
                     sender.sendMessageAndAwaitAck(3L, "visible after failover");
-                    observer.awaitExactWireMessage("MSG 3 alice:visible after failover");
+                    long afterFailover = observer.awaitChatMessage(
+                            "alice", "visible after failover");
+                    assertTrue(afterFailover > beforeFailover,
+                            "new leader delivery did not extend the committed order");
                     sender.assertNoInboundObject(ABSENCE_WINDOW,
                             "the originating client received an echo after failover");
                 }
@@ -159,18 +163,21 @@ class ReplicatedChatApplicationIntegrationTest {
                 observerTwo.awaitWelcome();
 
                 alice.sendMessageAndAwaitAck(1L, "causal-m1");
-                bob.awaitExactWireMessage("MSG 1 alice:causal-m1");
+                long causalFirst = bob.awaitChatMessage("alice", "causal-m1");
 
                 // Bob sends only after its real socket reader delivered m1. This
                 // creates the application-level causal chain m1 -> m2.
                 bob.sendMessageAndAwaitAck(1L, "causal-m2");
-                alice.awaitExactWireMessage("MSG 2 bob:causal-m2");
-                observerOne.awaitExactWireMessages(List.of(
-                        "MSG 1 alice:causal-m1",
-                        "MSG 2 bob:causal-m2"));
-                observerTwo.awaitExactWireMessages(List.of(
-                        "MSG 1 alice:causal-m1",
-                        "MSG 2 bob:causal-m2"));
+                long causalSecond = alice.awaitChatMessage("bob", "causal-m2");
+                assertTrue(causalSecond > causalFirst);
+                assertEquals(causalFirst,
+                        observerOne.awaitChatMessage("alice", "causal-m1"));
+                assertEquals(causalSecond,
+                        observerOne.awaitChatMessage("bob", "causal-m2"));
+                assertEquals(causalFirst,
+                        observerTwo.awaitChatMessage("alice", "causal-m1"));
+                assertEquals(causalSecond,
+                        observerTwo.awaitChatMessage("bob", "causal-m2"));
 
                 alice.assertNoInboundObject(ABSENCE_WINDOW,
                         "alice received a self-echo or duplicate in the causal phase");
@@ -234,30 +241,21 @@ class ReplicatedChatApplicationIntegrationTest {
                 observer.awaitWelcome();
 
                 sender.sendMessageAndAwaitAck(1L, "before-restart-1");
-                observer.awaitExactWireMessage("MSG 1 alice:before-restart-1");
+                long lastSequence = observer.awaitChatMessage("alice", "before-restart-1");
                 sender.sendMessageAndAwaitAck(2L, "before-restart-2");
-                observer.awaitExactWireMessage("MSG 2 alice:before-restart-2");
-
-                assertTrue(awaitCondition(
-                        () -> cluster.broker(restartedBrokerId)
-                                .getVectorClock().getTimeStamp(senderBrokerId) == 2,
-                        MESSAGE_TIMEOUT),
-                        "the follower did not apply the prefix before it was stopped");
+                long nextSequence = observer.awaitChatMessage("alice", "before-restart-2");
+                assertTrue(nextSequence > lastSequence);
+                lastSequence = nextSequence;
 
                 cluster.stopBroker(restartedBrokerId);
 
                 sender.sendMessageAndAwaitAck(3L, "committed-while-follower-down");
-                observer.awaitExactWireMessage("MSG 3 alice:committed-while-follower-down");
+                nextSequence = observer.awaitChatMessage("alice", "committed-while-follower-down");
+                assertTrue(nextSequence > lastSequence);
+                lastSequence = nextSequence;
 
                 cluster.restartBroker(restartedBrokerId);
                 cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
-
-                assertTrue(awaitCondition(() -> {
-                    Broker restarted = cluster.broker(restartedBrokerId);
-                    return restarted.getVectorClock().getTimeStamp(senderBrokerId) == 3
-                            && restarted.getSendVectorClock().getTimeStamp(senderBrokerId) == 3;
-                }, MESSAGE_TIMEOUT),
-                        "the restarted follower did not rebuild and catch up its causal state");
 
                 try (WireClient newcomer = WireClient.connect(
                         LOOPBACK,
@@ -269,17 +267,21 @@ class ReplicatedChatApplicationIntegrationTest {
                             "persisted chat history leaked to a post-restart JOIN");
 
                     newcomer.sendMessageAndAwaitAck(1L, "after-restart");
-                    observer.awaitExactWireMessage("MSG 4 newcomer:after-restart");
-                    sender.awaitExactWireMessage("MSG 4 newcomer:after-restart");
+                    nextSequence = observer.awaitChatMessage("newcomer", "after-restart");
+                    assertTrue(nextSequence > lastSequence);
+                    assertEquals(nextSequence,
+                            sender.awaitChatMessage("newcomer", "after-restart"));
+                    lastSequence = nextSequence;
                     newcomer.assertNoInboundObject(ABSENCE_WINDOW,
                             "the post-restart sender received an echo or a replay");
                 }
                 for (int cycle = 0; cycle < 2; cycle++) {
                     cluster.stopBroker(restartedBrokerId);
                     long clientSeq = 4L + 2L * cycle;
-                    long appSeq = 5L + 2L * cycle;
                     sender.sendMessageAndAwaitAck(clientSeq, "outage-" + cycle);
-                    observer.awaitExactWireMessage("MSG " + appSeq + " alice:outage-" + cycle);
+                    nextSequence = observer.awaitChatMessage("alice", "outage-" + cycle);
+                    assertTrue(nextSequence > lastSequence);
+                    lastSequence = nextSequence;
                     cluster.restartBroker(restartedBrokerId);
                     cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
                     try (WireClient rejoined = WireClient.connect(LOOPBACK,
@@ -287,14 +289,17 @@ class ReplicatedChatApplicationIntegrationTest {
                         rejoined.awaitWelcome();
                         rejoined.assertNoInboundObject(ABSENCE_WINDOW, "history after repeated restart");
                         sender.sendMessageAndAwaitAck(clientSeq + 1, "healed-" + cycle);
-                        String expected = "MSG " + (appSeq + 1) + " alice:healed-" + cycle;
-                        observer.awaitExactWireMessage(expected);
-                        rejoined.awaitExactWireMessage(expected);
+                        nextSequence = observer.awaitChatMessage("alice", "healed-" + cycle);
+                        assertTrue(nextSequence > lastSequence);
+                        assertEquals(nextSequence,
+                                rejoined.awaitChatMessage("alice", "healed-" + cycle));
+                        lastSequence = nextSequence;
                     }
                 }
                 cluster.stopBroker(restartedBrokerId);
                 sender.sendMessageAndAwaitAck(8, "after-third-recovery");
-                observer.awaitExactWireMessage("MSG 9 alice:after-third-recovery");
+                nextSequence = observer.awaitChatMessage("alice", "after-third-recovery");
+                assertTrue(nextSequence > lastSequence);
 
             }
         }
@@ -311,11 +316,13 @@ class ReplicatedChatApplicationIntegrationTest {
                  WireClient observer = WireClient.connect(LOOPBACK, cluster.clientPort(observerId), "observer", "observer-old")) {
                 sender.awaitWelcome(); observer.awaitWelcome();
                 sender.sendMessageAndAwaitAck(1, "before-leader-failure");
-                observer.awaitExactWireMessage("MSG 1 alice:before-leader-failure");
+                long lastSequence = observer.awaitChatMessage("alice", "before-leader-failure");
                 cluster.stopBroker(oldLeader);
                 cluster.awaitLeaderAgreement(cluster.liveNodeIds(), oldLeader);
                 sender.sendMessageAndAwaitAck(2, "new-leader");
-                observer.awaitExactWireMessage("MSG 2 alice:new-leader");
+                long nextSequence = observer.awaitChatMessage("alice", "new-leader");
+                assertTrue(nextSequence > lastSequence);
+                lastSequence = nextSequence;
                 cluster.restartBroker(oldLeader);
                 cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
                 try (WireClient restoredObserver = WireClient.connect(LOOPBACK,
@@ -324,8 +331,11 @@ class ReplicatedChatApplicationIntegrationTest {
                     restoredObserver.assertNoInboundObject(ABSENCE_WINDOW, "old leader replayed history");
                     // Commit is observed by another client, but the producer never consumes its ACK.
                     sender.sendMessage(3, "ack-not-consumed");
-                    observer.awaitExactWireMessage("MSG 3 alice:ack-not-consumed");
-                    restoredObserver.awaitExactWireMessage("MSG 3 alice:ack-not-consumed");
+                    nextSequence = observer.awaitChatMessage("alice", "ack-not-consumed");
+                    assertTrue(nextSequence > lastSequence);
+                    assertEquals(nextSequence,
+                            restoredObserver.awaitChatMessage("alice", "ack-not-consumed"));
+                    lastSequence = nextSequence;
                     cluster.stopBroker(senderId);
                     cluster.awaitLeaderAgreement(cluster.liveNodeIds(), -1);
                     try (WireClient retried = WireClient.connect(LOOPBACK,
@@ -333,10 +343,12 @@ class ReplicatedChatApplicationIntegrationTest {
                         retried.awaitWelcome();
                         retried.sendMessageAndAwaitAck(3, "ack-not-consumed");
                         observer.assertNoInboundObject(ABSENCE_WINDOW, "same identity was delivered twice");
-                        restoredObserver.assertNoInboundObject(ABSENCE_WINDOW, "retry consumed another application sequence");
+                        restoredObserver.assertNoInboundObject(ABSENCE_WINDOW, "retry produced another delivery");
                         retried.sendMessageAndAwaitAck(4, "after-second-failure");
-                        observer.awaitExactWireMessage("MSG 4 alice:after-second-failure");
-                        restoredObserver.awaitExactWireMessage("MSG 4 alice:after-second-failure");
+                        nextSequence = observer.awaitChatMessage("alice", "after-second-failure");
+                        assertTrue(nextSequence > lastSequence);
+                        assertEquals(nextSequence,
+                                restoredObserver.awaitChatMessage("alice", "after-second-failure"));
                     }
                 }
             }
@@ -406,7 +418,7 @@ class ReplicatedChatApplicationIntegrationTest {
 
     private static void assertConcurrentPair(List<String> messages) {
         assertEquals(2, messages.size(), "observers must receive exactly two concurrent messages");
-        Set<Long> sequences = new HashSet<>();
+        List<Long> sequences = new ArrayList<>();
         Set<String> payloads = new HashSet<>();
         for (String message : messages) {
             String[] parts = message.split(" ", 3);
@@ -415,8 +427,8 @@ class ReplicatedChatApplicationIntegrationTest {
             sequences.add(Long.parseLong(parts[1]));
             payloads.add(parts[2]);
         }
-        assertEquals(Set.of(3L, 4L), sequences,
-                "concurrent messages were lost, duplicated or assigned non-contiguous order");
+        assertTrue(sequences.get(1) > sequences.get(0),
+                "deliveries did not follow increasing Raft indexes");
         assertEquals(Set.of("alice:concurrent-alice", "bob:concurrent-bob"), payloads,
                 "concurrent messages were lost or duplicated");
     }
@@ -433,7 +445,7 @@ class ReplicatedChatApplicationIntegrationTest {
             if (expectedAck.equals(object)) {
                 ackCount++;
             } else if (object instanceof String line
-                    && line.matches("MSG [34] "
+                    && line.matches("MSG [0-9]+ "
                     + java.util.regex.Pattern.quote(remoteSender + ":" + remoteText))) {
                 remoteMessageCount++;
             } else {
@@ -491,7 +503,7 @@ class ReplicatedChatApplicationIntegrationTest {
                             nodeId, LOOPBACK, rpcPorts[nodeId], clientPorts[nodeId]));
                 }
 
-                directory = new DirectoryService(voters);
+                directory = new DirectoryService();
                 reservations.release(0);
                 reservations.release(1);
                 directory.start(directoryBrokerPort, directoryClientPort);
@@ -808,13 +820,21 @@ class ReplicatedChatApplicationIntegrationTest {
             write("MSG " + clientId + " " + clientSequence + " " + text);
         }
 
-        void awaitExactWireMessage(String expected) throws Exception {
-            Object actual = awaitNext(MESSAGE_TIMEOUT, expected);
-            assertEquals(expected, actual);
-        }
-
-        void awaitExactWireMessages(List<String> expected) throws Exception {
-            assertEquals(expected, awaitWireMessages(expected.size()));
+        long awaitChatMessage(String expectedSender, String expectedText) throws Exception {
+            Object object = awaitNext(
+                    MESSAGE_TIMEOUT,
+                    "chat message " + expectedSender + ":" + expectedText
+            );
+            assertTrue(object instanceof String,
+                    "expected a client-visible wire string, received=" + object);
+            String line = (String) object;
+            assertTrue(line.startsWith("MSG "), "malformed chat delivery: " + line);
+            int sequenceEnd = line.indexOf(' ', 4);
+            assertTrue(sequenceEnd > 4, "missing Raft index in delivery: " + line);
+            long sequence = Long.parseLong(line.substring(4, sequenceEnd));
+            assertEquals(expectedSender + ":" + expectedText,
+                    line.substring(sequenceEnd + 1));
+            return sequence;
         }
 
         List<String> awaitWireMessages(int count) throws Exception {

@@ -4,7 +4,6 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -24,7 +23,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * Each test exercises one fix in isolation so a regression points to the exact
  * issue that came back.
  */
-class Section2FixesTest {
+class RaftInvariantRegressionTest {
 
     // -------------------------------------------------------------------------
     // P0 — Follower must not overstate matchIndex on empty AppendEntries.
@@ -171,7 +170,7 @@ class Section2FixesTest {
 
         assertEquals(1L, log.lastLogIndex(),
                 "In-memory log must be rolled back when persistence rejects the append");
-        assertEquals("ok", log.getEntry(1L).getCommand().getLocalMsgId());
+        assertEquals("ok", log.getEntry(1L).getCommand().getClientId());
     }
 
     // -------------------------------------------------------------------------
@@ -185,7 +184,7 @@ class Section2FixesTest {
         List<String> removedIds = new ArrayList<>();
         log.setTruncationHook(entry -> {
             if (entry.getCommand() != null) {
-                removedIds.add(entry.getCommand().getLocalMsgId());
+                removedIds.add(entry.getCommand().getClientId());
             }
         });
 
@@ -201,20 +200,7 @@ class Section2FixesTest {
         assertTrue(applied);
         assertEquals(List.of("drop-1", "drop-2"), removedIds);
         assertEquals(2L, log.lastLogIndex());
-        assertEquals("replacement", log.getEntry(2L).getCommand().getLocalMsgId());
-    }
-
-    // -------------------------------------------------------------------------
-    // P2 — VectorClock must declare a serialVersionUID so previously written
-    // log files survive innocent class evolution.
-    // -------------------------------------------------------------------------
-
-    @Test
-    void vectorClockShouldDeclareSerialVersionUID() throws Exception {
-        java.io.ObjectStreamClass desc = java.io.ObjectStreamClass.lookup(VectorClock.class);
-        assertNotNull(desc);
-        assertEquals(1L, desc.getSerialVersionUID(),
-                "VectorClock must declare an explicit serialVersionUID");
+        assertEquals("replacement", log.getEntry(2L).getCommand().getClientId());
     }
 
     // -------------------------------------------------------------------------
@@ -255,8 +241,8 @@ class Section2FixesTest {
         return node;
     }
 
-    private ChatCommand command(String localMsgId) {
-        return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    private ChatCommand command(String clientId) {
+        return new ChatCommand("alice", clientId, 1L, "msg-" + clientId);
     }
 
     private static final class FailingPersistence implements RaftPersistence {

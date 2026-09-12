@@ -33,7 +33,6 @@ import java.util.function.Consumer;
  */
 public final class RaftOrderingService implements OrderingService {
 
-    private final BrokerConfig brokerConfig;
     private final RaftConfig raftConfig;
     private final int localNodeId;
 
@@ -53,7 +52,7 @@ public final class RaftOrderingService implements OrderingService {
     private DefaultRaftClock raftClock;
 
     private volatile boolean running;
-    private volatile FileRaftPersistence.RaftPersistenceException terminalFailure;
+    private volatile RuntimeException terminalFailure;
     private Consumer<Throwable> failureHandler = failure -> stop();
 
     /** The owner must withdraw its client listener and Directory lease as well. */
@@ -62,11 +61,27 @@ public final class RaftOrderingService implements OrderingService {
     }
 
     private void storageFailed(FileRaftPersistence.RaftPersistenceException failure) {
-        terminalFailure = failure;
-        System.err.println("[RaftOrderingService] node=" + localNodeId + " FATAL durable-state failure; withdrawing broker");
+        failTerminally("durable-state", failure);
+    }
+
+    private void applicationFailed(RuntimeException failure) {
+        failTerminally("state-machine application", failure);
+    }
+
+    private void failTerminally(String component, RuntimeException failure) {
+        synchronized (this) {
+            if (terminalFailure != null) {
+                return;
+            }
+            terminalFailure = failure;
+            running = false;
+        }
+        System.err.println("[RaftOrderingService] node=" + localNodeId + " FATAL "
+                + component + " failure; withdrawing broker");
         failure.printStackTrace(System.err);
-        // Called with persistence/node/replication monitors held: teardown must run elsewhere.
-        Thread shutdown = new Thread(() -> failureHandler.accept(failure), "raft-fatal-stop-" + localNodeId);
+        // Failure may be observed while Raft component monitors are held.
+        Thread shutdown = new Thread(() -> failureHandler.accept(failure),
+                "raft-fatal-stop-" + localNodeId);
         shutdown.setDaemon(true);
         shutdown.start();
     }
@@ -78,17 +93,11 @@ public final class RaftOrderingService implements OrderingService {
     private final ConcurrentHashMap<String, CompletableFuture<Boolean>> pendingCommits =
             new ConcurrentHashMap<>();
 
-    // A JOIN boundary is complete only once this replica has applied it, not
-    // merely when the leader has reported the entry committed.
-    private final ConcurrentHashMap<String, PendingLocalBarrier> pendingLocalBarriers =
-            new ConcurrentHashMap<>();
-
     // Guards the check-and-register sequence for retry idempotency.
     private final Set<String> committedProposalKeys = ConcurrentHashMap.newKeySet();
     private final Object idempotencyLock = new Object();
 
     public RaftOrderingService(BrokerConfig brokerConfig) {
-        this.brokerConfig = brokerConfig;
         if (brokerConfig.getRaftConfig() == null) {
             throw new IllegalArgumentException("RaftOrderingService requires raftConfig");
         }
@@ -147,25 +156,18 @@ public final class RaftOrderingService implements OrderingService {
         long restoredCommitIndex = persistedProgress.commitIndex();
         long restoredLastApplied = persistedProgress.lastApplied();
 
-        // Rebuild every volatile application projection from the prefix that had
-        // already crossed the state-machine boundary before the crash. This runs
-        // before Raft networking (and, in Broker.start(), before the client
-        // listener), so callbacks reconstruct sequence/causal state without
-        // exposing persisted chat history to newly connected clients.
-        //
-        // Reusing applyCommittedEntryOnce is important: a duplicate client
-        // command that occupied two committed log positions was applied only
-        // once before the crash and must consume only one application sequence
-        // again during reconstruction.
+        // Rebuild durable client-operation deduplication from the applied prefix.
+        // Do not replay callbacks: Raft storage is protocol state, not chat history.
         committedProposalKeys.clear();
-        RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
         for (RaftLogEntry entry : persistedEntries) {
             if (entry.getIndex() > restoredLastApplied) {
                 break;
             }
-
-            applyCommittedEntryOnce(entry, applyHook);
+            if (entry.getCommand() != null) {
+                committedProposalKeys.add(proposalKey(entry.getCommand()));
+            }
         }
+        RaftStateMachineAdapter applyHook = new RaftStateMachineAdapter(this::notifyDelivery);
 
         // 3. Resume normal application. The constructor applies exactly the
         // committed-but-not-applied suffix (restoredLastApplied, restoredCommitIndex].
@@ -195,11 +197,6 @@ public final class RaftOrderingService implements OrderingService {
 
             if (pending != null) {
                 pending.complete(false);
-            }
-
-            PendingLocalBarrier localBarrier = pendingLocalBarriers.remove(key);
-            if (localBarrier != null) {
-                localBarrier.completion.complete(false);
             }
         });
 
@@ -379,8 +376,6 @@ public final class RaftOrderingService implements OrderingService {
 
         pendingCommits.forEach((id, future) -> future.complete(false));
         pendingCommits.clear();
-        pendingLocalBarriers.forEach((id, barrier) -> barrier.completion.complete(false));
-        pendingLocalBarriers.clear();
         committedProposalKeys.clear();
 
         cleanupStartedComponents();
@@ -401,54 +396,17 @@ public final class RaftOrderingService implements OrderingService {
     }
 
     @Override
-    public boolean establishDeliveryBoundary(String boundaryId) {
-        return establishDeliveryBoundary(boundaryId, () -> { });
-    }
-
-    @Override
-    public boolean establishDeliveryBoundary(String boundaryId, Runnable onApplied) {
-        Objects.requireNonNull(boundaryId, "boundaryId");
-        Objects.requireNonNull(onApplied, "onApplied");
-        if (boundaryId.isBlank() || !running || terminalFailure != null) {
-            return false;
-        }
-
-        ChatReqMessage request = ChatReqMessage.deliveryBarrier(
-                "join-barrier:" + boundaryId,
-                localNodeId
-        );
-        String key = proposalKey(request);
-        PendingLocalBarrier localBarrier = new PendingLocalBarrier(onApplied);
-        PendingLocalBarrier existing = pendingLocalBarriers.putIfAbsent(key, localBarrier);
-        if (existing != null) {
-            localBarrier = existing;
-        }
-
-        synchronized (idempotencyLock) {
-            if (committedProposalKeys.contains(key)) {
-                localBarrier.activate();
+    public boolean executeAtDeliveryBoundary(Runnable action) {
+        Objects.requireNonNull(action, "action");
+        RaftCommitManager manager;
+        synchronized (this) {
+            if (!running || terminalFailure != null || commitManager == null) {
+                return false;
             }
+            manager = commitManager;
         }
-
-        if (!localBarrier.completion.isDone() && !propose(request)) {
-            pendingLocalBarriers.remove(key, localBarrier);
-            localBarrier.completion.complete(false);
-            return false;
-        }
-
-        try {
-            return localBarrier.completion.get(
-                    PROPOSE_COMMIT_TIMEOUT_MS,
-                    TimeUnit.MILLISECONDS
-            );
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        } catch (ExecutionException | TimeoutException e) {
-            return false;
-        } finally {
-            pendingLocalBarriers.remove(key, localBarrier);
-        }
+        manager.executeAtApplyBoundary(action);
+        return true;
     }
 
     private boolean appendAndWaitForCommit(ChatReqMessage request) {
@@ -470,31 +428,9 @@ public final class RaftOrderingService implements OrderingService {
         }
 
         if (owner) {
-            ChatCommand command;
-            if (request.isDeliveryBarrier()) {
-                command = ChatCommand.deliveryBarrier(
-                        request.getLocalMsgId(),
-                        request.getBrokerId()
-                );
-            } else if (request.hasClientIdentity()) {
-                command = new ChatCommand(
-                        request.getLocalMsgId(),
-                        request.getBrokerId(),
-                        request.getUsername(),
-                        request.getText(),
-                        request.getVectorClock(),
-                        request.getClientId(),
-                        request.getClientSeq()
-                );
-            } else {
-                command = new ChatCommand(
-                        request.getLocalMsgId(),
-                        request.getBrokerId(),
-                        request.getUsername(),
-                        request.getText(),
-                        request.getVectorClock()
-                );
-            }
+            ChatCommand command = new ChatCommand(
+                    request.getUsername(), request.getClientId(),
+                    request.getClientSeq(), request.getText());
 
             if (raftLogContainsProposalKey(proposalKey)) {
                 synchronized (idempotencyLock) {
@@ -594,12 +530,7 @@ public final class RaftOrderingService implements OrderingService {
 
     private void notifyDelivery(ChatDeliverMessage message) {
         for (Consumer<ChatDeliverMessage> cb : deliveryCallbacks) {
-            try {
-                cb.accept(message);
-            } catch (Exception e) {
-                System.err.println("[RaftOrderingService] delivery callback error: "
-                        + e.getMessage());
-            }
+            cb.accept(message);
         }
     }
 
@@ -620,26 +551,28 @@ public final class RaftOrderingService implements OrderingService {
 
         String key = proposalKey(entry.getCommand());
         CompletableFuture<Boolean> pending;
-        PendingLocalBarrier localBarrier;
         boolean firstApplication;
 
         synchronized (idempotencyLock) {
-            firstApplication = committedProposalKeys.add(key);
-            pending = pendingCommits.remove(key);
-            localBarrier = entry.getCommand().isDeliveryBarrier()
-                    ? pendingLocalBarriers.get(key)
-                    : null;
+            firstApplication = !committedProposalKeys.contains(key);
         }
 
         if (firstApplication) {
-            applyHook.accept(entry);
+            try {
+                applyHook.accept(entry);
+            } catch (RuntimeException failure) {
+                applicationFailed(failure);
+                throw failure;
+            }
+        }
+
+        synchronized (idempotencyLock) {
+            committedProposalKeys.add(key);
+            pending = pendingCommits.remove(key);
         }
 
         if (pending != null) {
             pending.complete(true);
-        }
-        if (localBarrier != null) {
-            localBarrier.activate();
         }
     }
 
@@ -718,37 +651,14 @@ public final class RaftOrderingService implements OrderingService {
     }
 
     private static String proposalKey(ChatReqMessage request) {
-        if (request.hasClientIdentity()) {
-            return "client:" + request.getClientId() + ":" + request.getClientSeq();
-        }
-        return "local:" + request.getLocalMsgId();
+        return clientProposalKey(request.getClientId(), request.getClientSeq());
     }
 
     private static String proposalKey(ChatCommand command) {
-        if (command.hasClientIdentity()) {
-            return "client:" + command.getClientId() + ":" + command.getClientSeq();
-        }
-        return "local:" + command.getLocalMsgId();
+        return clientProposalKey(command.getClientId(), command.getClientSeq());
     }
 
-    private static final class PendingLocalBarrier {
-        private final CompletableFuture<Boolean> completion = new CompletableFuture<>();
-        private final Runnable onApplied;
-
-        private PendingLocalBarrier(Runnable onApplied) {
-            this.onApplied = onApplied;
-        }
-
-        private void activate() {
-            if (completion.isDone()) {
-                return;
-            }
-            try {
-                onApplied.run();
-                completion.complete(true);
-            } catch (RuntimeException e) {
-                completion.completeExceptionally(e);
-            }
-        }
+    private static String clientProposalKey(String clientId, long clientSeq) {
+        return "client:" + clientId + ":" + clientSeq;
     }
 }

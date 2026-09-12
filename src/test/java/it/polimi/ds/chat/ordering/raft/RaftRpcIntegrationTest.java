@@ -7,7 +7,6 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ForwardClientProposalResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
@@ -142,7 +141,7 @@ class RaftRpcIntegrationTest {
                 req -> { throw new AssertionError("vote handler should not be invoked"); },
                 req -> { throw new AssertionError("append handler should not be invoked"); },
                 req -> new ForwardClientProposalResponseMessage(
-                        "msg-forward".equals(req.getRequest().getLocalMsgId()),
+                        "client-forward".equals(req.getRequest().getClientId()),
                         7,
                         "committed"));
         server.start();
@@ -157,7 +156,7 @@ class RaftRpcIntegrationTest {
 
             ForwardClientProposalResponseMessage response = client.forwardClientProposal(
                     7,
-                    new ChatReqMessage("msg-forward", 1, "alice", "hello", new VectorClock()));
+                    new ChatReqMessage("alice", "client-forward", 1L, "hello"));
 
             assertTrue(response.isAccepted());
             assertEquals(7, response.getLeaderId());

@@ -3,7 +3,6 @@ package it.polimi.ds.chat.broker.core;
 import it.polimi.ds.chat.TestConfigs;
 import it.polimi.ds.chat.broker.config.BrokerConfig;
 import it.polimi.ds.chat.broker.session.ClientHandler;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import it.polimi.ds.chat.ordering.api.OrderingService;
 import it.polimi.ds.chat.ordering.raft.config.RaftConfig;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
@@ -54,7 +53,7 @@ class BrokerDeliveryLifecycleTest {
         AtomicBoolean activated = new AtomicBoolean(false);
 
         // Model the next committed entry being applied immediately after the
-        // boundary callback, before establishDeliveryBoundary returns to JOIN.
+        // boundary callback, before executeAtDeliveryBoundary returns to JOIN.
         ordering.afterApplied = () -> broker.handleOrderedMessage(delivery(2L, 0, "new"));
 
         Thread join = new Thread(() -> activated.set(broker.activateClient(handler)), "test-join");
@@ -62,7 +61,7 @@ class BrokerDeliveryLifecycleTest {
         assertTrue(ordering.boundaryEntered.await(1, TimeUnit.SECONDS));
 
         // This represents a command committed before JOIN but applied by this
-        // lagging broker while the JOIN fence is still pending.
+        // lagging broker while the local JOIN boundary is still pending.
         broker.handleOrderedMessage(delivery(1L, 0, "old"));
         assertEquals(List.of(), handler.outbound);
 
@@ -75,34 +74,6 @@ class BrokerDeliveryLifecycleTest {
                 List.of(ClientJoinMessage.welcome("anonymous"), "2:new"),
                 handler.outbound,
                 "WELCOME must be queued by the boundary callback before the next chat");
-        assertEquals(1, ordering.boundaryIds.size());
-        assertTrue(ordering.boundaryIds.get(0).startsWith("join:1:"));
-    }
-
-    @Test
-    void outgoingVectorClockAdvancesOnlyForEachActuallyReleasedMessage() {
-        ClockObservingBroker broker = new ClockObservingBroker(
-                TestConfigs.raftBrokerConfig(1, 5000));
-
-        VectorClock secondClock = new VectorClock();
-        secondClock.increment(2);
-        secondClock.increment(2);
-        broker.handleOrderedMessage(new ChatDeliverMessage(
-                2L, 2, "bob", "client-b", "second", secondClock));
-
-        assertEquals(0, broker.getSendVectorClock().getTimeStamp(2),
-                "a held-back message must not leak causal knowledge");
-        assertEquals(List.of(), broker.observations);
-
-        VectorClock firstClock = new VectorClock();
-        firstClock.increment(1);
-        broker.handleOrderedMessage(new ChatDeliverMessage(
-                1L, 1, "alice", "client-a", "first", firstClock));
-
-        assertEquals(
-                List.of("1:1:0", "2:1:2"),
-                broker.observations,
-                "each released prefix element must be merged before visibility");
     }
 
     @Test
@@ -350,11 +321,10 @@ class BrokerDeliveryLifecycleTest {
     private static ChatDeliverMessage delivery(long seq, int senderBrokerId, String text) {
         return new ChatDeliverMessage(
                 seq,
-                senderBrokerId,
                 "sender",
                 "sender-client",
-                text,
-                new VectorClock());
+                seq,
+                text);
     }
 
     private static void awaitCondition(BooleanSupplier condition) throws InterruptedException {
@@ -384,7 +354,8 @@ class BrokerDeliveryLifecycleTest {
         }
 
         @Override
-        public boolean establishDeliveryBoundary(String boundaryId) {
+        public boolean executeAtDeliveryBoundary(Runnable action) {
+            action.run();
             return true;
         }
 
@@ -417,18 +388,16 @@ class BrokerDeliveryLifecycleTest {
             extends ImmediateBoundaryOrderingService {
         private final CountDownLatch boundaryEntered = new CountDownLatch(1);
         private final CountDownLatch releaseBoundary = new CountDownLatch(1);
-        private final List<String> boundaryIds = new ArrayList<>();
         private Runnable afterApplied = () -> { };
 
         @Override
-        public boolean establishDeliveryBoundary(String boundaryId, Runnable onApplied) {
-            boundaryIds.add(boundaryId);
+        public boolean executeAtDeliveryBoundary(Runnable action) {
             boundaryEntered.countDown();
             try {
                 if (!releaseBoundary.await(1, TimeUnit.SECONDS)) {
                     return false;
                 }
-                onApplied.run();
+                action.run();
                 afterApplied.run();
                 return true;
             } catch (InterruptedException e) {
@@ -510,18 +479,4 @@ class BrokerDeliveryLifecycleTest {
         }
     }
 
-    private static final class ClockObservingBroker extends Broker {
-        private final List<String> observations = new ArrayList<>();
-
-        private ClockObservingBroker(BrokerConfig config) {
-            super(config);
-        }
-
-        @Override
-        public void onChatDeliver(long seq, String sender, String senderClientId, String text) {
-            observations.add(seq
-                    + ":" + getSendVectorClock().getTimeStamp(1)
-                    + ":" + getSendVectorClock().getTimeStamp(2));
-        }
-    }
 }

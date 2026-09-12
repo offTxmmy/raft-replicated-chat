@@ -1,6 +1,5 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.common.clock.VectorClock;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
@@ -140,8 +139,8 @@ class RaftHybridTransportTest {
         assertTrue(udp.sentAppendEntriesRequests.isEmpty());
     }
 
-    private static ChatCommand command(String localMsgId) {
-        return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    private static ChatCommand command(String clientId) {
+        return new ChatCommand("alice", clientId, 1L, "msg-" + clientId);
     }
 
     private record BroadcastVote(RequestVoteRequestMessage request, Set<Integer> peerIds) {

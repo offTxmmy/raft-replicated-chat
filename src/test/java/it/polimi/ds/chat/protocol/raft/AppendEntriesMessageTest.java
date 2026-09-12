@@ -1,6 +1,5 @@
 package it.polimi.ds.chat.protocol.raft;
 
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -41,7 +40,7 @@ class AppendEntriesMessageTest {
         assertEquals(0L, response.getConflictIndex());
     }
 
-    private ChatCommand command(String localMsgId) {
-        return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    private ChatCommand command(String clientId) {
+        return new ChatCommand("alice", clientId, 1L, "msg-" + clientId);
     }
 }

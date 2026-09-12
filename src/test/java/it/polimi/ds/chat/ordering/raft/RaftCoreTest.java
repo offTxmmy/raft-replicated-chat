@@ -5,7 +5,6 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -77,7 +76,7 @@ class RaftCoreTest {
         assertEquals(node.getCurrentTerm(), request.getTerm());
         assertEquals(1, request.getLeaderId());
         assertEquals(1, request.getEntries().size());
-        assertEquals("x", request.getEntries().get(0).getCommand().getLocalMsgId());
+        assertEquals("x", request.getEntries().get(0).getCommand().getClientId());
     }
 
     /**
@@ -381,8 +380,8 @@ class RaftCoreTest {
         assertEquals(List.of(1L), appliedIndexes);
     }
 
-    private ChatCommand command(String localMsgId) {
-        return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    private ChatCommand command(String clientId) {
+        return new ChatCommand("alice", clientId, 1L, "msg-" + clientId);
     }
 
     private static final class RecordingVoteRequestSender implements RaftVoteRequestSender {

@@ -10,8 +10,6 @@ import it.polimi.ds.chat.protocol.raft.ChatCommand;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
-import it.polimi.ds.chat.common.clock.VectorClock;
-import it.polimi.ds.chat.common.delivery.HoldBackQueue;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -31,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -49,7 +48,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * <ul>
  *   <li>a single leader is elected within a reasonable time window,
  *   <li>a proposal sent to the leader is committed and delivered to every node
- *       in the same total order (sequence 1, same payload).
+ *       in the same total order (the same Raft index and payload).
  * </ul>
  *
  * <p>Timeouts are conservative to keep the test stable under CI load.
@@ -127,9 +126,8 @@ class RaftOrderingServiceIntegrationTest {
         assertEquals(1L, leaderCount, "expected exactly one leader, got " + leaderCount);
 
         // Propose a single message on the leader.
-        ChatReqMessage req = new ChatReqMessage(
-                "msg-1", leaderIdx, "alice", "hello", new VectorClock());
-        nodes[leaderIdx].propose(req);
+        ChatReqMessage req = new ChatReqMessage("alice", "client-msg-1", 1L, "hello");
+        assertTrue(nodes[leaderIdx].propose(req));
 
         // Wait until all three nodes have delivered the message.
         boolean delivered = waitFor(
@@ -144,12 +142,13 @@ class RaftOrderingServiceIntegrationTest {
             assertEquals(1, d.size(), "node " + i + " unexpected delivery count");
             assertEquals("hello", d.get(0).getText(), "node " + i + " unexpected text");
             assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected username");
-            assertEquals(leaderIdx, d.get(0).getBrokerId(), "node " + i + " unexpected brokerId");
+            assertEquals("client-msg-1", d.get(0).getClientId(), "node " + i + " unexpected client id");
+            assertEquals(1L, d.get(0).getClientSeq(), "node " + i + " unexpected client sequence");
         }
     }
 
     @Test
-    void deliveryBoundaryActivatesLocallyBeforeLaterChatAndDoesNotConsumeSequence(
+    void deliveryBoundaryActivatesLocallyBeforeLaterChat(
             @TempDir Path baseDir
     ) throws Exception {
         int rpcPort = pickFreePorts(1)[0];
@@ -171,23 +170,78 @@ class RaftOrderingServiceIntegrationTest {
 
         assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS),
                 "single-node service did not become leader");
-        assertTrue(nodes[0].establishDeliveryBoundary(
-                "client-a",
-                () -> visibleEvents.add("JOIN")
-        ));
+        assertTrue(nodes[0].executeAtDeliveryBoundary(() -> visibleEvents.add("JOIN")));
         assertTrue(nodes[0].propose(new ChatReqMessage(
-                "after-join",
-                0,
                 "alice",
-                "new",
-                new VectorClock()
+                "client-after-join",
+                1L,
+                "new"
         )));
 
         assertTrue(waitFor(() -> deliveries.size() == 1, DELIVERY_DEADLINE_MS));
-        assertEquals(List.of("JOIN", "MSG:1:new"), visibleEvents,
+        assertEquals(List.of("JOIN", "MSG:" + deliveries.get(0).getSeq() + ":new"), visibleEvents,
                 "activation must be serialized before the next state-machine delivery");
-        assertEquals(1L, deliveries.get(0).getSeq(),
-                "the internal JOIN boundary must not consume chat sequence numbers");
+    }
+
+    @Test
+    void deliveryFailureWithdrawsTheOrderingServiceInsteadOfAcknowledgingIt(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort = pickFreePorts(1)[0];
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0,
+                new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000)
+        );
+        nodes = new RaftOrderingService[]{
+                buildService(0, rpcPort, voters, baseDir.resolve("n0"))
+        };
+        CountDownLatch failureObserved = new CountDownLatch(1);
+        AtomicReference<Throwable> terminalFailure = new AtomicReference<>();
+        nodes[0].setFailureHandler(failure -> {
+            terminalFailure.set(failure);
+            failureObserved.countDown();
+        });
+        nodes[0].onDeliver(message -> {
+            throw new IllegalStateException("local delivery failed");
+        });
+        nodes[0].start();
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS));
+
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class,
+                () -> nodes[0].propose(new ChatReqMessage(
+                        "alice", "failing-delivery", 1L, "boom"))
+        );
+
+        assertEquals("local delivery failed", failure.getMessage());
+        assertTrue(failureObserved.await(1, TimeUnit.SECONDS));
+        assertSame(failure, terminalFailure.get());
+        assertFalse(nodes[0].isLeader(),
+                "a broker with a failed state machine must withdraw immediately");
+        assertFalse(nodes[0].propose(new ChatReqMessage(
+                "alice", "after-failure", 2L, "must be rejected")));
+    }
+
+    @Test
+    void localJoinBoundaryDoesNotRequireALeaderOrQuorum(@TempDir Path baseDir)
+            throws Exception {
+        int[] ports = pickFreePorts(3);
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0, new RaftPeerEndpoint(0, "127.0.0.1", ports[0], 50000),
+                1, new RaftPeerEndpoint(1, "127.0.0.1", ports[1], 50001),
+                2, new RaftPeerEndpoint(2, "127.0.0.1", ports[2], 50002)
+        );
+        nodes = new RaftOrderingService[]{
+                buildService(0, ports[0], voters, baseDir.resolve("n0"))
+        };
+        nodes[0].start();
+        CountDownLatch joined = new CountDownLatch(1);
+
+        assertTrue(nodes[0].executeAtDeliveryBoundary(joined::countDown));
+        assertEquals(0L, joined.getCount());
+        assertFalse(nodes[0].isLeader());
+        assertFalse(nodes[0].propose(new ChatReqMessage(
+                "alice", "no-majority", 1L, "cannot commit")));
     }
 
     @Test
@@ -216,7 +270,7 @@ class RaftOrderingServiceIntegrationTest {
     }
 
     @Test
-    void restartedNodesReloadPersistedLogAndContinueSequence(@TempDir Path baseDir) throws Exception {
+    void restartedNodesRebuildDeduplicationWithoutReplayingHistory(@TempDir Path baseDir) throws Exception {
         int[] firstPorts = pickFreePorts(3);
 
         Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
@@ -245,13 +299,7 @@ class RaftOrderingServiceIntegrationTest {
         assertTrue(firstLeader >= 0, "no leader elected before restart");
 
         ChatReqMessage firstReq = new ChatReqMessage(
-                "msg-before-restart",
-                firstLeader,
-                "alice",
-                "before restart",
-                new VectorClock(),
-                "restart-client",
-                1L);
+                "alice", "restart-client", 1L, "before restart");
 
         assertTrue(nodes[firstLeader].propose(firstReq), "first proposal should commit");
 
@@ -286,10 +334,8 @@ class RaftOrderingServiceIntegrationTest {
         }
 
         for (int i = 0; i < 3; i++) {
-            assertEquals(1, secondRunDeliveries.get(i).size(),
-                    "node " + i + " did not reconstruct the applied chat prefix");
-            assertEquals(1L, secondRunDeliveries.get(i).get(0).getSeq());
-            assertEquals("before restart", secondRunDeliveries.get(i).get(0).getText());
+            assertTrue(secondRunDeliveries.get(i).isEmpty(),
+                    "node " + i + " replayed persisted chat history");
         }
 
         int secondLeader = waitForSingleLeader();
@@ -297,26 +343,14 @@ class RaftOrderingServiceIntegrationTest {
 
         long logIndexBeforeRetry = nodes[secondLeader].getLastLogIndexForTesting();
         ChatReqMessage committedRetry = new ChatReqMessage(
-                "retry-after-restart",
-                secondLeader,
-                "alice",
-                "must stay deduplicated",
-                new VectorClock(),
-                "restart-client",
-                1L);
+                "alice", "restart-client", 1L, "must stay deduplicated");
         assertTrue(nodes[secondLeader].propose(committedRetry),
                 "a retry committed before restart should receive a definitive ACK");
         assertEquals(logIndexBeforeRetry, nodes[secondLeader].getLastLogIndexForTesting(),
                 "a committed pre-restart retry must not append another log entry");
 
         ChatReqMessage secondReq = new ChatReqMessage(
-                "msg-after-restart",
-                secondLeader,
-                "alice",
-                "after restart",
-                new VectorClock(),
-                "restart-client",
-                2L);
+                "alice", "restart-client", 2L, "after restart");
 
         assertTrue(nodes[secondLeader].propose(secondReq), "second proposal should commit");
 
@@ -328,16 +362,14 @@ class RaftOrderingServiceIntegrationTest {
 
         for (int i = 0; i < 3; i++) {
             List<ChatDeliverMessage> delivered = secondRunDeliveries.get(i);
-            assertEquals(2, delivered.size(),
+            assertEquals(1, delivered.size(),
                     "node " + i + " replayed or delivered an unexpected chat");
-            assertEquals(2L, delivered.get(1).getSeq(),
-                    "node " + i + " did not continue the dense application sequence");
-            assertEquals("after restart", delivered.get(1).getText());
+            assertEquals("after restart", delivered.get(0).getText());
         }
     }
 
     @Test
-    void startupReconstructsAppliedPrefixThenAppliesOnlyCommittedMissingSuffix(
+    void startupDoesNotReplayAppliedPrefixButAppliesCommittedMissingSuffix(
             @TempDir Path baseDir
     ) throws Exception {
         int rpcPort = pickFreePorts(1)[0];
@@ -347,37 +379,21 @@ class RaftOrderingServiceIntegrationTest {
         FileRaftPersistence persistence = new FileRaftPersistence(storageDir);
         persistence.persistTermAndVote(4L, null);
 
-        VectorClock firstClock = new VectorClock();
-        firstClock.increment(0);
-        VectorClock secondClock = new VectorClock(firstClock);
-        secondClock.increment(0);
-        VectorClock uncommittedClock = new VectorClock(secondClock);
-        uncommittedClock.increment(0);
-
         persistence.appendLogEntry(new RaftLogEntry(1L, 1L, null));
         persistence.appendLogEntry(new RaftLogEntry(
                 2L,
                 1L,
-                new ChatCommand(
-                        "committed-1", 0, "alice", "first",
-                        firstClock, "recovery-client", 1L)));
-        persistence.appendLogEntry(new RaftLogEntry(
-                3L,
-                2L,
-                ChatCommand.deliveryBarrier("join-barrier:old-session", 0)));
+                new ChatCommand("alice", "recovery-client", 1L, "first")));
+        persistence.appendLogEntry(new RaftLogEntry(3L, 2L, null));
         persistence.appendLogEntry(new RaftLogEntry(4L, 3L, null));
         persistence.appendLogEntry(new RaftLogEntry(
                 5L,
                 3L,
-                new ChatCommand(
-                        "committed-2", 0, "alice", "second",
-                        secondClock, "recovery-client", 2L)));
+                new ChatCommand("alice", "recovery-client", 2L, "second")));
         persistence.appendLogEntry(new RaftLogEntry(
                 6L,
                 4L,
-                new ChatCommand(
-                        "uncommitted", 0, "alice", "must-not-apply",
-                        uncommittedClock, "recovery-client", 3L)));
+                new ChatCommand("alice", "recovery-client", 3L, "must-not-apply")));
 
         // Indexes 1..3 crossed the application boundary before the crash.
         // Indexes 4..5 are committed but not applied. Index 6 is not committed.
@@ -400,20 +416,16 @@ class RaftOrderingServiceIntegrationTest {
         BrokerConfig cfg = new BrokerConfig(0, "127.0.0.1", 50000, raft);
 
         nodes = new RaftOrderingService[]{new RaftOrderingService(cfg)};
-        HoldBackQueue queue = new HoldBackQueue();
         List<ChatDeliverMessage> released = new CopyOnWriteArrayList<>();
-        nodes[0].onDeliver(message -> released.addAll(queue.enqueue(message)));
+        nodes[0].onDeliver(released::add);
 
         nodes[0].start();
 
-        assertEquals(List.of(1L, 2L),
+        assertEquals(List.of(5L),
                 released.stream().map(ChatDeliverMessage::getSeq).toList(),
-                "no-op and JOIN entries must not consume chat sequence numbers");
-        assertEquals(List.of("first", "second"),
+                "only the committed-but-unapplied Raft entry must be delivered");
+        assertEquals(List.of("second"),
                 released.stream().map(ChatDeliverMessage::getText).toList());
-        assertEquals(3L, queue.getExpectedSeq());
-        assertEquals(0, queue.getPendingCount());
-        assertEquals(2, queue.getDeliveredClock().getTimeStamp(0));
 
         RaftPersistence.CommitProgress restored =
                 ((RaftPersistence) storageField(nodes[0])).loadCommitProgress();
@@ -450,23 +462,10 @@ class RaftOrderingServiceIntegrationTest {
         assertTrue(leaderIdx >= 0, "no leader elected within "
                 + LEADER_ELECTION_DEADLINE_MS + " ms");
 
-        long clientTimestamp = 12345L;
         ChatReqMessage firstAttempt = new ChatReqMessage(
-                "retry-leader-1",
-                leaderIdx,
-                "alice",
-                "same wire message",
-                new VectorClock(),
-                clientTimestamp
-        );
+                "alice", "client-retry-leader", 1L, "same wire message");
         ChatReqMessage retryAttempt = new ChatReqMessage(
-                "retry-leader-2",
-                leaderIdx,
-                "alice",
-                "same wire message",
-                new VectorClock(),
-                clientTimestamp
-        );
+                "alice", "client-retry-leader", 1L, "same wire message");
 
         assertTrue(nodes[leaderIdx].propose(firstAttempt), "first attempt should commit");
         assertTrue(waitFor(
@@ -517,24 +516,10 @@ class RaftOrderingServiceIntegrationTest {
         persistence.persistTermAndVote(1L, null);
 
         ChatCommand first = new ChatCommand(
-                "duplicate-entry-1",
-                0,
-                "alice",
-                "deduplicated payload",
-                new VectorClock(),
-                "client-dedup",
-                1L
-        );
+                "alice", "client-dedup", 1L, "deduplicated payload");
 
         ChatCommand duplicate = new ChatCommand(
-                "duplicate-entry-2",
-                0,
-                "alice",
-                "deduplicated payload",
-                new VectorClock(),
-                "client-dedup",
-                1L
-        );
+                "alice", "client-dedup", 1L, "deduplicated payload");
 
         persistence.appendLogEntry(
                 new RaftLogEntry(1L, 1L, first)
@@ -611,24 +596,10 @@ class RaftOrderingServiceIntegrationTest {
         long clientSeq = 1L;
 
         ChatReqMessage request = new ChatReqMessage(
-                "retry-existing-log",
-                0,
-                "alice",
-                "already in log",
-                new VectorClock(),
-                clientId,
-                clientSeq
-        );
+                "alice", clientId, clientSeq, "already in log");
 
         ChatCommand command = new ChatCommand(
-                "original-existing-log",
-                0,
-                "alice",
-                "already in log",
-                new VectorClock(),
-                clientId,
-                clientSeq
-        );
+                "alice", clientId, clientSeq, "already in log");
 
         RaftLog log = raftLogOf(nodes[0]);
         RaftNode node = raftNodeOf(nodes[0]);
@@ -700,24 +671,10 @@ class RaftOrderingServiceIntegrationTest {
         String key = clientProposalKey(clientId, clientSeq);
 
         ChatReqMessage request = new ChatReqMessage(
-                "retry-after-truncation",
-                0,
-                "alice",
-                "survives retry",
-                new VectorClock(),
-                clientId,
-                clientSeq
-        );
+                "alice", clientId, clientSeq, "survives retry");
 
         ChatCommand command = new ChatCommand(
-                "original-before-truncation",
-                0,
-                "alice",
-                "survives retry",
-                new VectorClock(),
-                clientId,
-                clientSeq
-        );
+                "alice", clientId, clientSeq, "survives retry");
 
         RaftLog log = raftLogOf(nodes[0]);
         RaftNode node = raftNodeOf(nodes[0]);
@@ -866,14 +823,7 @@ class RaftOrderingServiceIntegrationTest {
         long previousIndex = log.lastLogIndex();
         long previousTerm = log.getTermAt(previousIndex);
         ChatCommand command = new ChatCommand(
-                "incoming-after-step-down",
-                1,
-                "bob",
-                "accepted from new leader",
-                new VectorClock(),
-                "remote-client",
-                1L
-        );
+                "bob", "remote-client", 1L, "accepted from new leader");
 
         AppendEntriesResponseMessage response =
                 replicationManagerOf(nodes[0]).handleAppendEntries(
@@ -1072,14 +1022,7 @@ class RaftOrderingServiceIntegrationTest {
         String key = clientProposalKey(clientId, clientSeq);
 
         ChatReqMessage request = new ChatReqMessage(
-                "null-append",
-                0,
-                "alice",
-                "append loses leadership",
-                new VectorClock(),
-                clientId,
-                clientSeq
-        );
+                "alice", clientId, clientSeq, "append loses leadership");
 
         CompletableFuture<Boolean> proposeResult =
                 CompletableFuture.supplyAsync(
@@ -1223,14 +1166,7 @@ class RaftOrderingServiceIntegrationTest {
         long clientSeq = 1L;
 
         ChatCommand command = new ChatCommand(
-                "original-before-failover",
-                oldLeader,
-                "alice",
-                "failover payload",
-                new VectorClock(),
-                clientId,
-                clientSeq
-        );
+                "alice", clientId, clientSeq, "failover payload");
 
         long oldTerm =
                 raftNodeOf(nodes[oldLeader]).getCurrentTerm();
@@ -1280,14 +1216,7 @@ class RaftOrderingServiceIntegrationTest {
         );
 
         ChatReqMessage retry = new ChatReqMessage(
-                "retry-after-failover",
-                nextLeader,
-                "alice",
-                "failover payload",
-                new VectorClock(),
-                clientId,
-                clientSeq
-        );
+                "alice", clientId, clientSeq, "failover payload");
 
         /*
          * The retry may observe K either just before or just after it becomes
@@ -1363,23 +1292,9 @@ class RaftOrderingServiceIntegrationTest {
                 + LEADER_ELECTION_DEADLINE_MS + " ms");
 
         ChatReqMessage fromClientA = new ChatReqMessage(
-                "same-user-a",
-                leaderIdx,
-                "alice",
-                "from client A",
-                new VectorClock(),
-                "client-a",
-                1L
-        );
+                "alice", "client-a", 1L, "from client A");
         ChatReqMessage fromClientB = new ChatReqMessage(
-                "same-user-b",
-                leaderIdx,
-                "alice",
-                "from client B",
-                new VectorClock(),
-                "client-b",
-                1L
-        );
+                "alice", "client-b", 1L, "from client B");
 
         assertTrue(nodes[leaderIdx].propose(fromClientA), "first client message should commit");
         assertTrue(nodes[leaderIdx].propose(fromClientB), "second client message should commit");
@@ -1446,7 +1361,7 @@ class RaftOrderingServiceIntegrationTest {
         }, DELIVERY_DEADLINE_MS), "followers did not learn the HYBRID leader from heartbeats");
 
         ChatReqMessage req = new ChatReqMessage(
-                "hybrid-msg-1", leaderIdx, "alice", "hello hybrid", new VectorClock());
+                "alice", "client-hybrid-1", 1L, "hello hybrid");
 
         assertTrue(nodes[leaderIdx].propose(req), "HYBRID leader proposal should commit");
 
@@ -1462,7 +1377,7 @@ class RaftOrderingServiceIntegrationTest {
             assertEquals(1, d.size(), "node " + i + " unexpected HYBRID delivery count");
             assertEquals("hello hybrid", d.get(0).getText(), "node " + i + " unexpected HYBRID text");
             assertEquals("alice", d.get(0).getUsername(), "node " + i + " unexpected HYBRID username");
-            assertEquals(leaderIdx, d.get(0).getBrokerId(), "node " + i + " unexpected HYBRID brokerId");
+            assertEquals("client-hybrid-1", d.get(0).getClientId(), "node " + i + " unexpected HYBRID client id");
         }
     }
 
@@ -1507,23 +1422,10 @@ class RaftOrderingServiceIntegrationTest {
                 DELIVERY_DEADLINE_MS
         ), "follower did not learn the current leader");
 
-        long clientTimestamp = 67890L;
         ChatReqMessage firstAttempt = new ChatReqMessage(
-                "retry-follower-1",
-                followerIdx,
-                "alice",
-                "same forwarded wire message",
-                new VectorClock(),
-                clientTimestamp
-        );
+                "alice", "client-retry-follower", 1L, "same forwarded wire message");
         ChatReqMessage retryAttempt = new ChatReqMessage(
-                "retry-follower-2",
-                followerIdx,
-                "alice",
-                "same forwarded wire message",
-                new VectorClock(),
-                clientTimestamp
-        );
+                "alice", "client-retry-follower", 1L, "same forwarded wire message");
 
         assertTrue(nodes[followerIdx].propose(firstAttempt), "first follower-forwarded attempt should commit");
         assertTrue(waitFor(
@@ -1592,12 +1494,7 @@ class RaftOrderingServiceIntegrationTest {
         ), "follower did not learn the current leader");
 
         ChatReqMessage forwardedReq = new ChatReqMessage(
-                "msg-follower",
-                followerIdx,
-                "alice",
-                "forwarded through follower",
-                new VectorClock()
-        );
+                "alice", "client-forwarded", 1L, "forwarded through follower");
 
         boolean accepted = nodes[followerIdx].propose(forwardedReq);
 
@@ -1613,7 +1510,7 @@ class RaftOrderingServiceIntegrationTest {
             List<ChatDeliverMessage> d = deliveries.get(i);
             assertEquals(1, d.size(), "node " + i + " unexpected delivery count");
             assertEquals("forwarded through follower", d.get(0).getText(), "node " + i + " unexpected text");
-            assertEquals(followerIdx, d.get(0).getBrokerId(), "node " + i + " unexpected brokerId");
+            assertEquals("client-forwarded", d.get(0).getClientId(), "node " + i + " unexpected client id");
         }
     }
 
@@ -1633,12 +1530,7 @@ class RaftOrderingServiceIntegrationTest {
         nodes[0].start();
 
         ChatReqMessage request = new ChatReqMessage(
-                "msg-no-leader",
-                0,
-                "alice",
-                "no known leader",
-                new VectorClock()
-        );
+                "alice", "client-no-leader", 1L, "no known leader");
 
         boolean accepted = nodes[0].propose(request);
 
@@ -1823,7 +1715,6 @@ class RaftOrderingServiceIntegrationTest {
             ChatCommand command = entry.getCommand();
 
             if (command != null
-                    && command.hasClientIdentity()
                     && clientId.equals(command.getClientId())
                     && command.getClientSeq() == clientSeq) {
                 count++;

@@ -4,7 +4,6 @@ import it.polimi.ds.chat.protocol.raft.AppendEntriesRequestMessage;
 import it.polimi.ds.chat.protocol.raft.AppendEntriesResponseMessage;
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -623,7 +622,7 @@ class RaftReplicationManagerTest {
         assertEquals(1L, request.getPrevLogIndex());
         assertEquals(1L, request.getPrevLogTerm());
         assertEquals(1, request.getEntries().size());
-        assertEquals("b", request.getEntries().get(0).getCommand().getLocalMsgId());
+        assertEquals("b", request.getEntries().get(0).getCommand().getClientId());
     }
 
     @Test
@@ -1119,8 +1118,8 @@ class RaftReplicationManagerTest {
         return node;
     }
 
-    private ChatCommand command(String localMsgId) {
-        return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    private ChatCommand command(String clientId) {
+        return new ChatCommand("alice", clientId, 1L, "msg-" + clientId);
     }
 
     private static boolean waitUntilBlockedOrCompleted(

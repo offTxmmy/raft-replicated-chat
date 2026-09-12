@@ -3,7 +3,6 @@ package it.polimi.ds.chat.ordering.raft;
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
 import it.polimi.ds.chat.protocol.raft.RequestVoteRequestMessage;
 import it.polimi.ds.chat.protocol.raft.RequestVoteResponseMessage;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -289,9 +288,9 @@ class RaftElectionManagerTest {
 
         // The manager was already created when the log was empty.
         // These appends happen later, before the election actually starts.
-        raftLog.append(2L, new ChatCommand("m1", 7, "alice", "one", new VectorClock()));
-        raftLog.append(2L, new ChatCommand("m2", 7, "alice", "two", new VectorClock()));
-        raftLog.append(3L, new ChatCommand("m3", 7, "alice", "three", new VectorClock()));
+        raftLog.append(2L, new ChatCommand("alice", "m1", 1L, "one"));
+        raftLog.append(2L, new ChatCommand("alice", "m2", 2L, "two"));
+        raftLog.append(3L, new ChatCommand("alice", "m3", 3L, "three"));
 
         fakeClock.lastOneShotTask.fire();
 

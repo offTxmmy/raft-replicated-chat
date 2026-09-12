@@ -9,6 +9,7 @@ import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
 import it.polimi.ds.chat.protocol.chat.ChatDeliverMessage;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
 import it.polimi.ds.chat.protocol.directory.DirectoryRegisterMessage;
+import it.polimi.ds.chat.protocol.directory.DirectoryHeartbeatMessage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -41,7 +42,7 @@ class DirectoryServiceTest {
             try (var current = register(directory.getBoundBrokerPortForTesting(), 7, "new", 51007)) {
                 assertTrue(directory.awaitActiveBrokerForTesting(7, "new", 51007, 1, TimeUnit.SECONDS));
                 old.socket().setSoTimeout(1000);
-                old.output().writeObject(new it.polimi.ds.chat.protocol.client.HeartbeatMessage(1L));
+                old.output().writeObject(new DirectoryHeartbeatMessage(0));
                 old.output().flush();
                 assertEquals(-1, old.socket().getInputStream().read(),
                         "superseded live connection keeps writing heartbeats that Directory silently ignores forever");
@@ -56,7 +57,7 @@ class DirectoryServiceTest {
         var releaseOld = new java.util.concurrent.CountDownLatch(1);
         var first = new java.util.concurrent.atomic.AtomicBoolean(true);
         AtomicLong now = new AtomicLong(100);
-        DirectoryService directory = new DirectoryService(Map.of(), () -> {
+        DirectoryService directory = new DirectoryService(() -> {
             if (first.compareAndSet(true, false)) {
                 oldAllocated.countDown();
                 try { assertTrue(releaseOld.await(2, TimeUnit.SECONDS)); }
@@ -73,14 +74,14 @@ class DirectoryServiceTest {
             releaseOld.countDown();
             var obsolete = oldRegistration.get(1, TimeUnit.SECONDS);
             assertEquals("new", directory.brokerRecordForTesting(7).host(), "late epoch replaced current registration");
-            directory.recordHeartbeat(obsolete);
+            directory.recordHeartbeat(obsolete, 0);
             var deactivate = DirectoryService.class.getDeclaredMethod("deactivateLease", DirectoryService.RegistrationLease.class);
             deactivate.setAccessible(true);
             deactivate.invoke(directory, obsolete);
             assertEquals("new", directory.brokerRecordForTesting(7).host());
             now.set(200);
             directory.reapExpiredBrokers();
-            directory.recordHeartbeat(current);
+            directory.recordHeartbeat(current, 0);
             assertEquals("new", directory.brokerRecordForTesting(7).host(), "current connection can no longer renew its lease");
         } finally { releaseOld.countDown(); worker.shutdownNow(); directory.stop(); }
     }
@@ -98,7 +99,7 @@ class DirectoryServiceTest {
     void sameBrokerIdAtomicallyReplacesEndpointAndRejectsOldGenerationHeartbeat() {
         AtomicLong now = new AtomicLong(100L);
         DirectoryService directory = new DirectoryService(
-                Map.of(), now::get, 10L, 10L, false);
+                now::get, 10L, 10L, false);
 
         DirectoryService.RegistrationLease oldLease = directory.registerBroker(
                 new DirectoryRegisterMessage(7, "old-host", 50007));
@@ -111,37 +112,39 @@ class DirectoryServiceTest {
         assertEquals(51007, directory.brokerRecordForTesting(7).port());
 
         now.set(200L);
-        directory.recordHeartbeat(oldLease);
+        directory.recordHeartbeat(oldLease, 3);
         assertEquals(105L, directory.brokerRecordForTesting(7).lastHeartbeatMillis(),
                 "an obsolete connection must not mutate the replacement record");
 
         directory.reapExpiredBrokers();
         assertNull(directory.brokerRecordForTesting(7));
 
-        directory.recordHeartbeat(oldLease);
+        directory.recordHeartbeat(oldLease, 3);
         assertNull(directory.brokerRecordForTesting(7),
                 "the old generation must not resurrect a replacement");
 
-        directory.recordHeartbeat(newLease);
+        directory.recordHeartbeat(newLease, 3);
         DirectoryService.BrokerRecord restored = directory.brokerRecordForTesting(7);
         assertEquals("new-host", restored.host());
         assertEquals(51007, restored.port());
         assertEquals(200L, restored.lastHeartbeatMillis());
+        assertEquals(3, restored.clientCount());
     }
 
     @Test
     void heartbeatBeforeAtomicReapKeepsCurrentRecordAlive() {
         AtomicLong now = new AtomicLong(0L);
         DirectoryService directory = new DirectoryService(
-                Map.of(), now::get, 10L, 10L, false);
+                now::get, 10L, 10L, false);
         DirectoryService.RegistrationLease lease = directory.registerBroker(
                 new DirectoryRegisterMessage(1, "host", 50001));
 
         now.set(11L);
-        directory.recordHeartbeat(lease);
+        directory.recordHeartbeat(lease, 2);
         directory.reapExpiredBrokers();
 
         assertEquals(11L, directory.brokerRecordForTesting(1).lastHeartbeatMillis());
+        assertEquals(2, directory.brokerRecordForTesting(1).clientCount());
     }
 
     @Test
@@ -192,7 +195,7 @@ class DirectoryServiceTest {
     @Test
     void brokerPublishesAndBindsConfiguredClientPort(
             @TempDir Path tempDir) throws Exception {
-        DirectoryService directory = new DirectoryService(Map.of());
+        DirectoryService directory = new DirectoryService();
         runningService = directory;
         directory.start(0, 0);
         int directoryBrokerPort = directory.getBoundBrokerPortForTesting();
@@ -251,7 +254,7 @@ class DirectoryServiceTest {
             brokerPort = reservation.getLocalPort();
         }
 
-        DirectoryService first = new DirectoryService(Map.of());
+        DirectoryService first = new DirectoryService();
         Thread firstListener = startBrokerListener(first, brokerPort);
         assertTrue(first.awaitBrokerListenerReady(1, TimeUnit.SECONDS));
 
@@ -264,7 +267,7 @@ class DirectoryServiceTest {
         firstListener.join(1_000L);
         assertFalse(firstListener.isAlive());
 
-        DirectoryService second = new DirectoryService(Map.of());
+        DirectoryService second = new DirectoryService();
         runningService = second;
         Thread secondListener = startBrokerListener(second, brokerPort);
         assertTrue(second.awaitBrokerListenerReady(1, TimeUnit.SECONDS));
@@ -281,7 +284,7 @@ class DirectoryServiceTest {
     @Test
     void transactionalStartRollsBackFirstBindAndReaperWhenSecondBindFails()
             throws Exception {
-        DirectoryService directory = new DirectoryService(Map.of());
+        DirectoryService directory = new DirectoryService();
         runningService = directory;
 
         try (ServerSocket brokerReservation = new ServerSocket(0);
@@ -309,7 +312,7 @@ class DirectoryServiceTest {
 
     @Test
     void transactionalStopWaitsForBothListenersAndReaper() throws Exception {
-        DirectoryService directory = new DirectoryService(Map.of());
+        DirectoryService directory = new DirectoryService();
         runningService = directory;
         directory.start(0, 0);
 
@@ -328,7 +331,7 @@ class DirectoryServiceTest {
     @Test
     void brokerEventuallyReregistersAfterDirectoryRestart(@TempDir Path tempDir)
             throws Exception {
-        DirectoryService first = new DirectoryService(Map.of());
+        DirectoryService first = new DirectoryService();
         runningService = first;
         first.start(0, 0);
         assertTrue(first.awaitBrokerListenerReady(1, TimeUnit.SECONDS));
@@ -373,7 +376,7 @@ class DirectoryServiceTest {
                     1, "127.0.0.1", clientPort, 5, TimeUnit.SECONDS));
 
             first.stop();
-            second = new DirectoryService(Map.of());
+            second = new DirectoryService();
             runningService = second;
             second.start(directoryBrokerPort, directoryClientPort);
             assertTrue(second.awaitBrokerListenerReady(1, TimeUnit.SECONDS));
@@ -397,8 +400,7 @@ class DirectoryServiceTest {
     }
 
     private DirectoryService startDirectory() throws Exception {
-        DirectoryService directory = new DirectoryService(Map.of(
-                0, new RaftPeerEndpoint(0, "127.0.0.1", 7000, 50000)));
+        DirectoryService directory = new DirectoryService();
         runningService = directory;
 
         Thread brokerListener = startBrokerListener(directory, 0);
@@ -464,7 +466,8 @@ class DirectoryServiceTest {
         }
 
         @Override
-        public boolean establishDeliveryBoundary(String boundaryId) {
+        public boolean executeAtDeliveryBoundary(Runnable action) {
+            action.run();
             return true;
         }
 

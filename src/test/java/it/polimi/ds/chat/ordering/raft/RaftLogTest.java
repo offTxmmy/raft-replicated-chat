@@ -2,7 +2,6 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -34,7 +33,7 @@ class RaftLogTest {
         assertEquals(1L, entry.getTerm());
         assertEquals(1L, log.lastLogIndex());
         assertEquals(1L, log.lastLogTerm());
-        assertEquals("1", entry.getCommand().getLocalMsgId());
+        assertEquals("1", entry.getCommand().getClientId());
     }
 
     @Test
@@ -64,7 +63,7 @@ class RaftLogTest {
         assertTrue(applied);
         assertEquals(3L, log.lastLogIndex());
         assertEquals(2L, log.getTermAt(2L));
-        assertEquals("c", log.getEntry(2L).getCommand().getLocalMsgId());
+        assertEquals("c", log.getEntry(2L).getCommand().getClientId());
     }
 
     @Test
@@ -143,8 +142,8 @@ class RaftLogTest {
         assertTrue(applied);
         assertEquals(List.of(2L), persistence.truncatedFrom);
         assertEquals(2, persistence.appended.size());
-        assertEquals("replacement", log.getEntry(2L).getCommand().getLocalMsgId());
-        assertEquals("new-tail", log.getEntry(3L).getCommand().getLocalMsgId());
+        assertEquals("replacement", log.getEntry(2L).getCommand().getClientId());
+        assertEquals("new-tail", log.getEntry(3L).getCommand().getClientId());
     }
 
     @Test
@@ -159,8 +158,8 @@ class RaftLogTest {
 
         assertEquals(2L, log.lastLogIndex());
         assertEquals(3L, log.lastLogTerm());
-        assertEquals("a", log.getEntry(1L).getCommand().getLocalMsgId());
-        assertEquals("b", log.getEntry(2L).getCommand().getLocalMsgId());
+        assertEquals("a", log.getEntry(1L).getCommand().getClientId());
+        assertEquals("b", log.getEntry(2L).getCommand().getClientId());
         assertTrue(persistence.appended.isEmpty());
         assertTrue(persistence.truncatedFrom.isEmpty());
     }
@@ -179,8 +178,8 @@ class RaftLogTest {
         assertTrue(ex.getMessage().contains("not contiguous"));
     }
 
-    private ChatCommand command(String localMsgId) {
-        return new ChatCommand(localMsgId, 1, "alice", "msg-" + localMsgId, new VectorClock());
+    private ChatCommand command(String clientId) {
+        return new ChatCommand("alice", clientId, 1L, "msg-" + clientId);
     }
 
     private static final class RecordingPersistence implements RaftPersistence {

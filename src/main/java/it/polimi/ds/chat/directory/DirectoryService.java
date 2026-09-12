@@ -1,13 +1,9 @@
 package it.polimi.ds.chat.directory;
 
-import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
-import it.polimi.ds.chat.protocol.client.HeartbeatMessage;
-import it.polimi.ds.chat.protocol.directory.ClientCountUpdateMessage;
+import it.polimi.ds.chat.protocol.directory.DirectoryHeartbeatMessage;
 import it.polimi.ds.chat.protocol.directory.DirectoryRegisterMessage;
 import it.polimi.ds.chat.protocol.directory.GetBrokerRequestMessage;
 import it.polimi.ds.chat.protocol.directory.GetBrokerResponseMessage;
-import it.polimi.ds.chat.protocol.directory.GetClusterRequestMessage;
-import it.polimi.ds.chat.protocol.directory.GetClusterResponseMessage;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
@@ -29,11 +25,11 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /**
- * Directory for broker bootstrap and client-side broker selection.
+ * Directory for broker liveness tracking and client-side broker selection.
  *
- * <p>The configured Raft voter set is immutable and independent from the live
- * broker registry. The latter is a lease-style availability view used only for
- * client selection. Each broker id owns one atomic registry slot, so endpoint,
+ * <p>The registry is a lease-style availability view used only for client
+ * selection. Raft membership is configured directly on brokers. Each broker
+ * id owns one atomic registry slot, so endpoint,
  * client count and heartbeat time cannot get out of sync across independent
  * maps.</p>
  */
@@ -49,7 +45,6 @@ public class DirectoryService {
     private final Set<Thread> connectionThreads = ConcurrentHashMap.newKeySet();
     private final AtomicLong registrationEpoch = new AtomicLong();
 
-    private final Map<Integer, RaftPeerEndpoint> clusterVoters;
     private final LongSupplier clock;
     private final long heartbeatTimeoutMs;
     private final long reaperIntervalMs;
@@ -67,23 +62,19 @@ public class DirectoryService {
     /**
      * Main entry point.
      *
-     * @param args voters CSV followed by optional broker/client listener ports
+     * @param args optional broker/client listener ports
      */
     public static void main(String[] args) {
-        if (args.length < 1 || args.length > 3) {
-            System.err.println("Usage: DirectoryService <votersCSV> [brokerPort] [clientPort]");
-            System.err.println("  votersCSV: id@host:rpcPort[:clientPort],id@host:rpcPort[:clientPort],...");
+        if (args.length > 2) {
+            System.err.println("Usage: DirectoryService [brokerPort] [clientPort]");
             System.exit(2);
         }
 
-        int brokerPort = args.length >= 2 ? Integer.parseInt(args[1]) : 60000;
-        int clientPort = args.length >= 3 ? Integer.parseInt(args[2]) : 60001;
-        Map<Integer, RaftPeerEndpoint> voters = parseVoters(args[0]);
+        int brokerPort = args.length >= 1 ? Integer.parseInt(args[0]) : 60000;
+        int clientPort = args.length >= 2 ? Integer.parseInt(args[1]) : 60001;
 
         System.out.println("---REPLICATED CHAT INFRASTRUCTURE: DIRECTORY SERVICE---");
-        System.out.println("Configured cluster voters: " + voters.keySet());
-
-        DirectoryService service = new DirectoryService(voters);
+        DirectoryService service = new DirectoryService();
         try {
             service.start(brokerPort, clientPort);
         } catch (IOException | RuntimeException e) {
@@ -93,28 +84,16 @@ public class DirectoryService {
         }
     }
 
-    public DirectoryService(Map<Integer, RaftPeerEndpoint> clusterVoters) {
-        this(
-                clusterVoters,
-                System::currentTimeMillis,
-                DEFAULT_HEARTBEAT_TIMEOUT_MS,
-                DEFAULT_REAPER_INTERVAL_MS,
-                true);
-    }
-
     public DirectoryService() {
-        this(Collections.emptyMap());
+        this(System::currentTimeMillis, DEFAULT_HEARTBEAT_TIMEOUT_MS,
+                DEFAULT_REAPER_INTERVAL_MS, true);
     }
 
     DirectoryService(
-            Map<Integer, RaftPeerEndpoint> clusterVoters,
             LongSupplier clock,
             long heartbeatTimeoutMs,
             long reaperIntervalMs,
             boolean startReaper) {
-        this.clusterVoters = clusterVoters == null
-                ? Collections.emptyMap()
-                : Collections.unmodifiableMap(new HashMap<>(clusterVoters));
         this.clock = Objects.requireNonNull(clock, "clock");
         if (heartbeatTimeoutMs <= 0L || reaperIntervalMs <= 0L) {
             throw new IllegalArgumentException("Directory timing values must be > 0");
@@ -387,10 +366,6 @@ public class DirectoryService {
         RegistrationLease lease = null;
         try (socket; ObjectInputStream in = new ObjectInputStream(socket.getInputStream())) {
             Object first = in.readObject();
-            if (first instanceof GetClusterRequestMessage request) {
-                handleGetClusterRequest(socket, request);
-                return;
-            }
             if (!(first instanceof DirectoryRegisterMessage registration)) {
                 System.out.println("Unknown first object from " + socket.getRemoteSocketAddress()
                         + ": " + first);
@@ -408,10 +383,8 @@ public class DirectoryService {
                         return;
                     }
                 }
-                if (obj instanceof HeartbeatMessage) {
-                    recordHeartbeat(lease);
-                } else if (obj instanceof ClientCountUpdateMessage update) {
-                    updateClientCount(lease, update);
+                if (obj instanceof DirectoryHeartbeatMessage heartbeat) {
+                    recordHeartbeat(lease, heartbeat.clientCount());
                 } else {
                     System.out.println("Unknown object from broker " + lease.brokerId() + ": " + obj);
                 }
@@ -428,19 +401,6 @@ public class DirectoryService {
                 deactivateLease(lease);
             }
         }
-    }
-
-    private void handleGetClusterRequest(Socket socket, GetClusterRequestMessage request)
-            throws IOException {
-        int nodeId = request.getNodeId();
-        boolean ok = !clusterVoters.isEmpty() && clusterVoters.containsKey(nodeId);
-        GetClusterResponseMessage response = new GetClusterResponseMessage(
-                ok,
-                ok ? clusterVoters : Collections.emptyMap());
-
-        ObjectOutputStream out = new ObjectOutputStream(socket.getOutputStream());
-        out.writeObject(response);
-        out.flush();
     }
 
     RegistrationLease registerBroker(DirectoryRegisterMessage message) {
@@ -469,14 +429,13 @@ public class DirectoryService {
         return lease;
     }
 
-    void recordHeartbeat(RegistrationLease lease) {
+    void recordHeartbeat(RegistrationLease lease, int clientCount) {
         long now = clock.getAsLong();
         synchronized (registryLock) {
             BrokerSlot slot = brokerSlots.get(lease.brokerId());
             if (slot == null || slot.epoch() != lease.epoch()) {
                 return;
             }
-            int clientCount = slot.active() == null ? 0 : slot.active().clientCount();
             brokerSlots.put(
                     lease.brokerId(),
                     new BrokerSlot(lease.epoch(), lease.toRecord(clientCount, now)));
@@ -491,23 +450,6 @@ public class DirectoryService {
                 brokerSlots.put(lease.brokerId(), new BrokerSlot(slot.epoch(), null));
                 registryLock.notifyAll();
             }
-        }
-    }
-
-    private void updateClientCount(RegistrationLease lease, ClientCountUpdateMessage update) {
-        if (update.getBrokerId() != lease.brokerId()) {
-            return;
-        }
-        long now = clock.getAsLong();
-        synchronized (registryLock) {
-            BrokerSlot slot = brokerSlots.get(lease.brokerId());
-            if (slot == null || slot.epoch() != lease.epoch()) {
-                return;
-            }
-            brokerSlots.put(
-                    lease.brokerId(),
-                    new BrokerSlot(lease.epoch(), lease.toRecord(update.getClientCount(), now)));
-            registryLock.notifyAll();
         }
     }
 
@@ -683,35 +625,6 @@ public class DirectoryService {
             socket.close();
         } catch (IOException ignored) {
         }
-    }
-
-    private static Map<Integer, RaftPeerEndpoint> parseVoters(String csv) {
-        Map<Integer, RaftPeerEndpoint> voters = new HashMap<>();
-        for (String token : csv.split(",")) {
-            String trimmed = token.trim();
-            if (trimmed.isEmpty()) {
-                continue;
-            }
-
-            int at = trimmed.indexOf('@');
-            if (at <= 0) {
-                throw new IllegalArgumentException("Bad voter token: '" + trimmed
-                        + "' (expected id@host:rpcPort[:clientPort])");
-            }
-
-            int id = Integer.parseInt(trimmed.substring(0, at));
-            String[] parts = trimmed.substring(at + 1).split(":");
-            if (parts.length != 2 && parts.length != 3) {
-                throw new IllegalArgumentException("Bad voter token: '" + trimmed
-                        + "' (expected id@host:rpcPort[:clientPort])");
-            }
-
-            String host = parts[0];
-            int rpcPort = Integer.parseInt(parts[1]);
-            int clientPort = parts.length == 3 ? Integer.parseInt(parts[2]) : 50000 + id;
-            voters.put(id, new RaftPeerEndpoint(id, host, rpcPort, clientPort));
-        }
-        return voters;
     }
 
     private record BrokerSlot(long epoch, BrokerRecord active) {

@@ -1,6 +1,5 @@
 package it.polimi.ds.chat.ordering.raft;
 
-import it.polimi.ds.chat.common.clock.VectorClock;
 import it.polimi.ds.chat.protocol.raft.*;
 import org.junit.jupiter.api.Test;
 
@@ -89,14 +88,14 @@ class RaftPartitionRecoveryTest {
         assertEquals(newTerm, cluster.nodes[newLeader].node.getCurrentTerm());
         cluster.assertLogsAndCommitsEqual();
         assertTrue(cluster.nodes[2].applied.stream().noneMatch(e -> e.getCommand() != null
-                && e.getCommand().getLocalMsgId().equals("uncommitted-old-leader")));
+                && e.getCommand().getClientId().equals("uncommitted-old-leader")));
         cluster.propose(newLeader, "after-leader-rejoin");
         cluster.advance(1000);
         cluster.assertLogsAndCommitsEqual();
     }
 
     private static ChatCommand command(String id) {
-        return new ChatCommand(id, 0, "alice", id, new VectorClock());
+        return new ChatCommand("alice", id, 1L, id);
     }
 
     private static class Cluster {
@@ -164,8 +163,8 @@ class RaftPartitionRecoveryTest {
                     RaftLogEntry b = actual.applied.get(i);
                     assertEquals(a.getIndex(), b.getIndex());
                     assertEquals(a.getTerm(), b.getTerm());
-                    assertEquals(a.getCommand() == null ? null : a.getCommand().getLocalMsgId(),
-                            b.getCommand() == null ? null : b.getCommand().getLocalMsgId());
+                    assertEquals(a.getCommand() == null ? null : a.getCommand().getClientId(),
+                            b.getCommand() == null ? null : b.getCommand().getClientId());
                 }
             }
         }

@@ -88,7 +88,7 @@ class ClientRuntimeIntegrationTest {
     @Test
     void realDirectoryPostInstallFailureExcludesPreferredBrokerAndPreservesPendingFifo()
             throws Exception {
-        DirectoryService directory = new DirectoryService(Map.of());
+        DirectoryService directory = new DirectoryService();
         try (ScriptedBroker preferred = new ScriptedBroker();
              ScriptedBroker alternate = new ScriptedBroker()) {
             directory.start(0, 0);
@@ -193,7 +193,7 @@ class ClientRuntimeIntegrationTest {
     @Test
     void realDirectoryExclusionRoutesBootstrapAroundAStillRegisteredDeadBroker()
             throws Exception {
-        DirectoryService directory = new DirectoryService(Map.of());
+        DirectoryService directory = new DirectoryService();
         try (RejectingBroker preferredButDead = new RejectingBroker();
              ScriptedBroker alternate = new ScriptedBroker()) {
             directory.start(0, 0);

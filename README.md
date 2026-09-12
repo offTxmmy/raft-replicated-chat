@@ -1,310 +1,172 @@
 # Replicated Chat Infrastructure
 
-A fault-tolerant, totally-ordered group chat built on a hand-written **Raft**
-consensus core. Developed for the *Distributed Systems* course
-(Politecnico di Milano, A.Y. 2025–2026).
+A fault-tolerant group chat backed by a hand-written Raft implementation. Clients may connect to any broker; committed messages are replicated and delivered in one deterministic order across the cluster.
 
-Clients connect to any broker in a replicated cluster and exchange messages.
-Every connected client observes **the same messages in the same order**, and the
-order **respects causality**. The cluster keeps working while a minority of
-brokers, individual links, or clients fail.
+The project originated in the Distributed Systems course at Politecnico di Milano (A.Y. 2025–2026) and has since been cleaned up as a standalone engineering project.
 
----
+## Why Raft?
 
-## Table of Contents
-
-- [Requirements Realized](#requirements-realized)
-- [Architecture](#architecture)
-- [Ordering Guarantees](#ordering-guarantees)
-- [Transport Strategy](#transport-strategy)
-- [Project Layout](#project-layout)
-- [Build](#build)
-- [Running the System](#running-the-system)
-- [Configuration Reference](#configuration-reference)
-- [Testing](#testing)
-- [Fault Model & Scope](#fault-model--scope)
-- [Documentation](#documentation)
-
----
-
-## Requirements Realized
-
-The system implements the *Replicated Chat Infrastructure* assignment:
-
-| # | Requirement | How it is met |
-|---|-------------|---------------|
-| **P1** | Brokers share a LAN and exploit link-level broadcast. | Hybrid Raft transport: `RequestVote` and empty heartbeats travel over **UDP LAN broadcast**; log replication travels over **TCP unicast**. |
-| **P2** | A client connects to one broker and talks to clients on other brokers; clients may be off-LAN. | Client↔Broker and Client↔Directory links are point-to-point **TCP**, routable beyond the broker LAN. |
-| **P3** | All connected clients receive messages in the same order. | A single committed Raft log plus deterministic, in-order application yields one client-visible **total order**. |
-| **P4** | The order respects causality. | A single in-flight FIFO message per client extends per-client program order; the Raft total order preserves happens-before. |
-| **P5** | Brokers do not store messages; clients only receive while connected. | No inbox, history, or replay. A client becomes a recipient only after an internal Raft-ordered **JOIN fence** is applied. |
-| **F1** | Clients, brokers, and links may fail. | Raft quorum tolerates a minority of broker failures; clients reconnect with backoff, endpoint quarantine, and connection generations. |
-
-Non-goals (explicitly out of scope): network partitions, Byzantine faults,
-dynamic membership, authentication/TLS, and broker crash-recovery of the same
-identity within a run. See [Fault Model & Scope](#fault-model--scope).
-
----
+A chat message may enter through any broker, but every broker needs to agree on the same order before exposing it. Raft supplies the replicated log, leader election, majority commit, and recovery rules needed for that agreement. The implementation is intentionally built from Java sockets rather than a consensus library so that election, replication, persistence, and failure handling remain visible in the code.
 
 ## Architecture
 
-Four cooperating components communicate over Java sockets with Java
-serialization.
-
-```
-                 ┌─────────────────────┐
-                 │  Directory Service  │   static voter set, broker selection,
-                 │ (broker + client    │   client registry, heartbeats
-                 │  listeners)         │
-                 └─────────┬───────────┘
-        voter set / select │  register / heartbeat
-        ┌──────────────────┼──────────────────┐
-        │                  │                  │
-   ┌────▼────┐        ┌────▼────┐        ┌────▼────┐
-   │ Broker0 │◄──────►│ Broker1 │◄──────►│ Broker2 │   Raft cluster
-   │ (Raft)  │  Raft  │ (Raft)  │  Raft  │ (Raft)  │   (UDP broadcast + TCP)
-   └────┬────┘        └────┬────┘        └────┬────┘
-        │ TCP              │ TCP              │ TCP
-     ┌──▼──┐            ┌──▼──┐            ┌──▼──┐
-     │Client│           │Client│           │Client│
-     └─────┘            └─────┘            └─────┘
+```text
+                            client discovery
+                     +-------------------------+
+                     |    Directory Service    |
+                     | live endpoints + load   |
+                     +------------+------------+
+                                  |
+             register / heartbeat | TCP
+                                  |
+       +--------------------------+--------------------------+
+       |                          |                          |
+  +----+-----+   Raft RPCs   +----+-----+   Raft RPCs   +----+-----+
+  | Broker 0 |<------------->| Broker 1 |<------------->| Broker 2 |
+  |  + Raft  |  TCP + UDP    |  + Raft  |  TCP + UDP    |  + Raft  |
+  +----+-----+               +----+-----+               +----+-----+
+       | TCP                      | TCP                      | TCP
+    clients                    clients                    clients
 ```
 
-- **DirectoryService** — distributes the static voter set to brokers, registers
-  broker/client endpoints and heartbeats, and selects a broker for each client.
-  It does **not** participate in consensus.
-- **Broker** — holds local client sessions, builds chat proposals, receives
-  committed Raft entries, runs the hold-back queue and delivery, and reports
-  heartbeats to the Directory.
-- **RaftOrderingService** — the consensus core: election, log replication,
-  commit management, transport, persistence, and proposal deduplication.
-- **Client** — discovers a broker through the Directory, keeps one broker
-  connection, sends `JOIN`/chat messages, and handles ACKs, heartbeats, retries,
-  and reconnection.
+- **Directory Service** tracks broker leases and local client counts, then returns the least-loaded live endpoint to clients. It is not part of consensus or Raft bootstrap.
+- **Broker** owns local TCP sessions and fans out committed deliveries. Slow clients have bounded outbound queues and are disconnected without blocking Raft application.
+- **Raft ordering service** implements pre-vote, election, log replication, majority commit, persistent state, state-machine application, and retry deduplication.
+- **Client runtime** discovers an endpoint, completes JOIN, keeps exactly one chat message in flight, and reconnects without discarding the pending head.
 
-### Message flow (steady state)
+Raft membership is static and supplied directly, identically, to every broker. The Directory may be restarted or unavailable without stopping consensus or existing sessions; only new discovery is unavailable during that interval.
 
-1. The client assigns `(clientId, clientSeq)` and sends a message.
-2. The receiving broker builds a `ChatReqMessage` (identity + vector clock).
-   If it is not the leader, it forwards the proposal to the leader over TCP.
-3. The leader appends a `ChatCommand` to the Raft log.
-4. Followers replicate; the leader advances the commit index only on a
-   majority, under the current-term rule.
-5. The commit manager applies entries in order and produces a delivery.
-6. The broker passes the delivery through a per-session hold-back queue to its
-   local clients — **excluding** the originating client.
-7. The producer receives an ACK once the message is committed.
+## Message flow
 
----
+1. After a local JOIN boundary, the client sends a message identified by `(clientId, clientSeq)`.
+2. If the edge broker is a follower, it forwards the proposal to the known leader over TCP.
+3. The leader appends a `ChatCommand` and replicates it with `AppendEntries`.
+4. A majority match advances `commitIndex`, subject to Raft's current-term commit rule.
+5. Every broker applies committed entries sequentially by Raft log index and directly fans the delivery out to its active local sessions, excluding the sender.
+6. The leader returns success after commit; the edge broker ACKs the originating client. A retry keeps the same logical identity and is deduplicated.
 
-## Ordering Guarantees
+The follower-to-leader response is deliberately synchronous. It makes the client ACK mean “committed by Raft” without adding a second edge-broker acknowledgement protocol. Local delivery on the edge may follow shortly after that ACK, but global ordering and retry identity are already fixed.
 
-- **Total order.** A single committed log plus in-order application gives a
-  total order over commands. The implementation maintains a dense, deterministic
-  *application sequence* distinct from the raw Raft index — no-op entries and
-  JOIN fences occupy the log without creating client-visible gaps.
-- **Causal order.** A client keeps a single FIFO message in flight until its
-  commit ACK, so a later message can never overtake an earlier one from the same
-  client. Deduplication makes retrying the in-flight head safe across leader
-  changes, and vector-clock metadata is merged on the ready prefix before
-  visibility.
+## Guarantees
 
----
+- **Total order:** every delivered chat command follows the committed Raft log. `ChatDeliverMessage.seq` is the Raft index, so gaps caused by internal no-op entries are expected and harmless.
+- **Causal order:** a client keeps one FIFO proposal in flight. A message created in response to an observed delivery can only be proposed after that predecessor is committed and locally applied; Raft leader completeness keeps the predecessor before the response after leader changes. No separate vector clock is required.
+- **Commit-before-ACK:** a proposal is acknowledged only after majority commit, never merely after append.
+- **Retry safety:** `(clientId, clientSeq)` is the single application identity used for pending proposals and deduplication.
+- **Connected-only delivery:** JOIN is a local action serialized with state-machine application. It needs no quorum, and a new session cannot see entries applied before its boundary. There is no inbox or history replay.
+- **Failure isolation:** one slow or broken client cannot block delivery to other sessions. A failed state-machine callback is fatal to that broker; it is never silently recorded as applied.
+- **Crash recovery:** Raft term, vote, log, and commit/application progress are durable. A restarted broker reconstructs deduplication state without replaying previously applied chat history.
 
-## Transport Strategy
+These guarantees assume non-Byzantine processes and a stable, identically configured voter set. Progress requires a reachable majority.
 
-The transport is chosen per message pattern rather than broadcasting everything.
+## Transport
 
-| Message | Transport | Rationale |
-|---------|-----------|-----------|
-| `RequestVote` request | UDP LAN broadcast | Small, naturally one-to-many; loss is recovered by later election rounds. |
-| `RequestVote` response | UDP unicast | Reply to one specific candidate. |
-| `AppendEntries` (empty heartbeat) | UDP broadcast when identical for all peers | Small, common; peer-specific state falls back to unicast. |
-| `AppendEntries` (with payload) | TCP unicast | Depends on each follower's `nextIndex`; needs reliability and larger payloads. |
-| `AppendEntries` response | UDP unicast | Small reply to the leader; treated as possibly duplicated/reordered. |
-| Forward client proposal | TCP unicast | Synchronous follower→leader request/response. |
-| Client↔Broker, Client↔Directory | TCP | Point-to-point, routable off-LAN. |
+Production `raft` mode combines LAN broadcast with reliable unicast:
 
-A development-only `raft-local` mode sends **every** Raft RPC over TCP unicast so
-that multiple brokers can run on a single host.
+- pre-vote and vote rounds use UDP broadcast and TCP in parallel;
+- common empty heartbeats use UDP broadcast plus periodic TCP probes;
+- payload-bearing or follower-specific `AppendEntries` use TCP;
+- forwarded client proposals use TCP request/response.
 
----
+UDP packets may be lost, duplicated, or reordered; Raft terms, indexes, and TCP fallback preserve safety and eventual progress. `raft-local` sends all Raft traffic over TCP and is the convenient same-machine development mode.
 
-## Project Layout
+## Repository layout
 
-```
+```text
 src/main/java/it/polimi/ds/chat/
-├── directory/          DirectoryService: voter distribution, registry, selection
-├── broker/             Broker core, config, and client-session handling
-├── client/             Client runtime, connection, discovery, messaging, reconnect
+├── broker/             local sessions, fan-out, broker bootstrap
+├── client/             discovery, FIFO sender, reconnect lifecycle
+├── directory/          broker lease registry and endpoint selection
 ├── ordering/
-│   ├── api/            OrderingService abstraction
-│   └── raft/           Raft node, election, replication, commit, transport, persistence
-├── protocol/           Serializable wire messages (broker, chat, client, directory, raft)
-└── common/             Vector clock, hold-back queue, socket helpers
+│   ├── api/            application-facing ordering contract
+│   └── raft/           election, replication, transport, persistence
+├── protocol/           serializable client, Directory, and Raft messages
+└── common/             shared socket utilities
 
-src/test/java/          Unit, component, persistence, transport, and end-to-end tests
-docs/                   Specification, audit, testing tracker, migration notes
+src/test/java/          unit, deterministic fault, socket, and end-to-end tests
+docs/DESIGN.md          invariants and reviewed design decisions
 ```
 
----
+## Build and test
 
-## Build
-
-Requirements: **JDK 16+** and **Maven 3.9+**.
+Requirements: JDK 17+ and Maven 3.9+.
 
 ```bash
 mvn clean package
 ```
 
-This compiles the project, runs the test suite, and produces the class output
-under `target/`.
-
----
-
-## Running the System
-
-Start each component in its own terminal. The examples below run three brokers
-and two clients on a single host using the `raft-local` transport mode.
-
-### 1. Directory Service
-
-```bash
-mvn -q exec:java -Dexec.mainClass=it.polimi.ds.chat.directory.DirectoryService \
-  -Dexec.args="0@localhost:50100:50000,1@localhost:50101:50001,2@localhost:50102:50002"
-```
-
-The voter CSV format is `id@host:rpcPort[:clientPort]`. When `clientPort` is
-omitted it defaults to `50000 + id`. The Directory listens on port `60000` for
-brokers and `60001` for clients by default.
-
-### 2. Brokers (one per voter id)
-
-```bash
-# node 0
-mvn -q exec:java -Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain \
-  -Dexec.args="raft-local 0 50100"
-# node 1
-mvn -q exec:java -Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain \
-  -Dexec.args="raft-local 1 50101"
-# node 2
-mvn -q exec:java -Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain \
-  -Dexec.args="raft-local 2 50102"
-```
-
-Each broker fetches the static voter set from the Directory at startup. For a
-real multi-host LAN deployment, use the default `raft` mode and real host
-addresses in the voter CSV:
-
-```bash
-mvn -q exec:java -Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain \
-  -Dexec.args="raft 0 50100"
-```
-
-### 3. Clients
-
-```bash
-mvn -q exec:java -Dexec.mainClass=it.polimi.ds.chat.client.ClientMain \
-  -Dexec.args="localhost 60001"
-```
-
-Enter a username when prompted, then type messages at the `>` prompt.
-Type `/quit` (or press Ctrl-D) to leave.
-
-> **Note:** Running the compiled classes with a plain `java -cp target/classes …`
-> command also works, but the `jline` client dependencies must be on the
-> classpath. The `mvn exec:java` invocations above resolve them automatically.
-
----
-
-## Configuration Reference
-
-### DirectoryService
-
-```
-DirectoryService <votersCSV> [brokerPort] [clientPort]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `votersCSV` | — | `id@host:rpcPort[:clientPort],…` static voter set. |
-| `brokerPort` | `60000` | Listener for broker registration/heartbeats. |
-| `clientPort` | `60001` | Listener for client broker-selection requests. |
-
-### BrokerMain
-
-```
-raft       <nodeId> <rpcPort> [clientPort] [raftBroadcastPort] [clusterId] [udpMaxPayloadBytes] [directoryHost] [directoryPort]
-raft-local <nodeId> <rpcPort> [clientPort] [directoryHost] [directoryPort]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `nodeId` | — | Must appear in the voter set. |
-| `rpcPort` | — | Must match the voter endpoint for `nodeId`. |
-| `clientPort` | voter's client port | Client listener port. |
-| `raftBroadcastPort` | `7100` | UDP broadcast port (`raft` mode). |
-| `clusterId` | `default-raft-cluster` | UDP envelope cluster filter. |
-| `udpMaxPayloadBytes` | `1400` | Max UDP datagram payload. |
-| `directoryHost` / `directoryPort` | `localhost` / `60000` | Directory endpoint. |
-
-Raft state is persisted per node under `raft-data/n<nodeId>/`.
-
-### ClientMain
-
-```
-ClientMain [directoryHost] [directoryPort]
-```
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `directoryHost` | `localhost` | Directory host. |
-| `directoryPort` | `60001` | Directory client listener port. |
-
----
-
-## Testing
+For the full test suite without packaging:
 
 ```bash
 mvn test
 ```
 
-The suite spans unit and component tests, filesystem persistence, TCP/UDP Raft
-integration, client socket/reconnect behaviour, Directory lifecycle, and a full
-end-to-end path exercising Directory, Broker, Raft, the hold-back queue, and
-real client sockets — including leader kill, re-election, and reconnection.
+Tests cover election safety, log repair, current-term commit, higher-term step-down, stale responses, dropped UDP, majority loss and healing, durable restart/corruption, late commit and retry, JOIN races, slow/broken clients, Directory restart, and real-socket end-to-end failover.
 
-> The automated evidence is same-host/loopback. Multi-host LAN behaviour,
-> firewall traversal, and physical UDP broadcast must be validated manually on
-> real hardware.
+## Run three brokers locally
 
----
+Start each command in its own terminal. The same voter CSV must be passed to every broker.
 
-## Fault Model & Scope
+### 1. Directory
 
-**In scope**
+```bash
+mvn -q exec:java "-Dexec.mainClass=it.polimi.ds.chat.directory.DirectoryService" "-Dexec.args=60000 60001"
+```
 
-- Crash-stop failure of a minority of brokers; the majority keeps making
-  progress and re-elects a leader.
-- Client and link failures, handled by reconnection with backoff, endpoint
-  quarantine, and connection generations.
-- No message storage: clients receive only while connected, enforced by the
-  Raft-ordered JOIN fence.
+### 2. Brokers
 
-**Out of scope**
+```bash
+# broker 0
+mvn -q exec:java "-Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain" "-Dexec.args=raft-local 0 0@127.0.0.1:50100:50000,1@127.0.0.1:50101:50001,2@127.0.0.1:50102:50002 127.0.0.1 60000"
 
-- Network partitions and Byzantine faults.
-- Dynamic membership (the voter set is static).
-- Authentication, TLS, and production hardening.
-- Broker crash-recovery under the same identity within a single run — the
-  current delivery scope is **crash-stop**. A crashed node should not be
-  restarted with the same identity in the same execution.
+# broker 1
+mvn -q exec:java "-Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain" "-Dexec.args=raft-local 1 0@127.0.0.1:50100:50000,1@127.0.0.1:50101:50001,2@127.0.0.1:50102:50002 127.0.0.1 60000"
 
----
+# broker 2
+mvn -q exec:java "-Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain" "-Dexec.args=raft-local 2 0@127.0.0.1:50100:50000,1@127.0.0.1:50101:50001,2@127.0.0.1:50102:50002 127.0.0.1 60000"
+```
 
-## Documentation
+The voter format is `id@host:raftRpcPort[:clientPort]`. If `clientPort` is omitted, it defaults to `50000 + id`. Persistent state is written below `raft-data/n<id>/`.
 
-Additional design and verification material lives under [`docs/`](docs/):
+### 3. Clients
 
-- [`PROJECT_SPECIFICATION.md`](docs/PROJECT_SPECIFICATION.md) — requirement
-  compliance baseline and design decisions.
+```bash
+mvn -q exec:java "-Dexec.mainClass=it.polimi.ds.chat.client.ClientMain" "-Dexec.args=127.0.0.1 60001"
+```
+
+Enter a username, type messages, and use `/quit` to leave.
+
+## Run on a LAN
+
+Use stable LAN addresses in the shared voter CSV and start each broker in hybrid mode:
+
+```bash
+mvn -q exec:java "-Dexec.mainClass=it.polimi.ds.chat.broker.core.BrokerMain" "-Dexec.args=raft 0 0@192.168.1.10:50100:50000,1@192.168.1.11:50100:50000,2@192.168.1.12:50100:50000 7100 office-chat 1400 192.168.1.20 60000"
+```
+
+Allow broker RPC/client TCP ports and the shared UDP broadcast port through host firewalls. Use the same `clusterId`, broadcast port, payload limit, and voter map on every broker. Each host should run only its own node id. The Directory can run on any reachable host; clients need only its client-listener address.
+
+CLI reference:
+
+```text
+DirectoryService [brokerPort] [clientPort]
+BrokerMain raft <nodeId> <votersCSV> [broadcastPort] [clusterId]
+                [udpMaxPayloadBytes] [directoryHost] [directoryPort]
+BrokerMain raft-local <nodeId> <votersCSV> [directoryHost] [directoryPort]
+ClientMain [directoryHost] [directoryPort]
+```
+
+## Failure model and limitations
+
+Supported behavior includes minority broker crash/restart, client and link failure, lost UDP, stale messages, leader replacement, divergent uncommitted suffix repair, and temporary Directory loss. The design intentionally does not provide:
+
+- dynamic Raft membership or automatic reconfiguration;
+- Byzantine fault tolerance, authentication, authorization, or TLS;
+- availability without a broker majority;
+- exactly-once delivery to a client that disconnects during a socket write;
+- snapshots or log compaction;
+- a replicated Directory Service.
+
+The durable Raft log contains serialized command payloads, including message text. This is consensus state, not a client-visible archive: brokers expose no history API and do not replay already applied entries to clients after restart. Because compaction is not implemented, internal retention is currently unbounded; this is the principal storage limitation.
+
+See [docs/DESIGN.md](docs/DESIGN.md) for the reviewed invariants and the reasoning behind the final architecture.

@@ -34,7 +34,7 @@ class BrokerPersistenceFailureTest {
         Map<Integer, RaftPeerEndpoint> voters = Map.of(
                 1, new RaftPeerEndpoint(1, "127.0.0.1", rpcPort, clientPort),
                 2, new RaftPeerEndpoint(2, "127.0.0.1", freePort(), freePort()));
-        DirectoryService directory = new DirectoryService(voters);
+        DirectoryService directory = new DirectoryService();
         directory.start(directoryBrokerPort, directoryClientPort);
         CountDownLatch stopped = new CountDownLatch(1);
         Broker broker = new Broker(new BrokerConfig(1, "127.0.0.1", clientPort,

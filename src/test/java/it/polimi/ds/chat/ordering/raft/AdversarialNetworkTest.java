@@ -3,7 +3,6 @@ package it.polimi.ds.chat.ordering.raft;
 import it.polimi.ds.chat.protocol.raft.*;
 import it.polimi.ds.chat.ordering.raft.config.RaftPeerEndpoint;
 import it.polimi.ds.chat.protocol.chat.ChatReqMessage;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 import java.io.*;
 import java.net.*;
@@ -119,7 +118,7 @@ class AdversarialNetworkTest {
             client.attachHandlers(r -> {}, (peer, r) -> {});
             client.start();
             try {
-                var response = client.forwardClientProposal(2, new ChatReqMessage("id", 1, "a", "b", new VectorClock()));
+                var response = client.forwardClientProposal(2, new ChatReqMessage("a", "id", 1L, "b"));
                 assertFalse(response.isAccepted());
                 assertFalse(response.getReason().contains("invalid"), response.getReason());
             } finally { client.stop(); }

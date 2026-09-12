@@ -2,7 +2,6 @@ package it.polimi.ds.chat.ordering.raft;
 
 import it.polimi.ds.chat.protocol.raft.ChatCommand;
 import it.polimi.ds.chat.protocol.raft.RaftLogEntry;
-import it.polimi.ds.chat.common.clock.VectorClock;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -190,12 +189,7 @@ class FileRaftPersistenceTest {
     // --- helpers ----------------------------------------------------------
 
     private static RaftLogEntry entry(long index, long term, String text) {
-        ChatCommand cmd = new ChatCommand(
-                "msg-" + index,
-                1,
-                "alice",
-                text,
-                new VectorClock());
+        ChatCommand cmd = new ChatCommand("alice", "client-a", index, text);
         return new RaftLogEntry(index, term, cmd);
     }
 }

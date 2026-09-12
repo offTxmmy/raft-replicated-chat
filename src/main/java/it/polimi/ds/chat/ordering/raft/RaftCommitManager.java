@@ -83,6 +83,11 @@ public class RaftCommitManager {
         return lastApplied;
     }
 
+    /** Runs a local action under the monitor that serializes committed apply. */
+    public synchronized void executeAtApplyBoundary(Runnable action) {
+        Objects.requireNonNull(action, "action must not be null").run();
+    }
+
     /**
      * Advances commit index to the given value and applies newly committed entries.
      *

@@ -7,8 +7,6 @@ import it.polimi.ds.chat.protocol.client.*;
 import it.polimi.ds.chat.protocol.directory.*;
 import it.polimi.ds.chat.ordering.api.OrderingService;
 import it.polimi.ds.chat.ordering.api.OrderingServiceCallback;
-import it.polimi.ds.chat.common.delivery.HoldBackQueue;
-import it.polimi.ds.chat.common.clock.VectorClock;
 
 import java.io.*;
 import java.net.InetSocketAddress;
@@ -20,12 +18,10 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 /**
@@ -55,12 +51,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // Static broker identifier established during bootstrap.
     private final int brokerId;
 
-    // Vector clock for tracking causal dependencies when sending messages
-    private final VectorClock vectorClock = new VectorClock();
-
-    // Hold-back queue for ordered delivery (enforces total order + causal order)
-    private final HoldBackQueue holdBackQueue = new HoldBackQueue();
-
     // JOIN-completed active clients currently eligible for local fan-out.
     private final List<ClientHandler> clients = Collections.synchronizedList(new ArrayList<>());
 
@@ -73,17 +63,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
 
     // Ordering service for message ordering (decoupled from networking)
     private transient OrderingService orderingService;
-
-    // Local per-broker message counter to build unique localMsgId values.
-    private long localMsgCounter = 0;
-
-    // Cache of client proposals keyed by stable client id + client sequence.
-    // Retries must reuse the same ChatReqMessage so the vector clock advances once.
-    private final Map<String, ChatReqMessage> cachedClientRequests = new ConcurrentHashMap<>();
-
-    // Monotonic per-broker sequence number used as id for directory heartbeats.
-    private final transient AtomicLong directoryHeartbeatSeq = new AtomicLong(0);
-    private final transient AtomicBoolean directoryClientCountDirty = new AtomicBoolean(true);
 
     private final transient CountDownLatch clientListenerReady = new CountDownLatch(1);
     private transient volatile ServerSocket clientServerSocket;
@@ -130,20 +109,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // =========================================================================
     // Getters
     // =========================================================================
-
-    /**
-     * Get the vector clock tracking delivered messages.
-     */
-    public VectorClock getVectorClock() {
-        return holdBackQueue.getDeliveredClock();
-    }
-
-    /**
-     * Get the vector clock used for outgoing messages.
-     */
-    public VectorClock getSendVectorClock() {
-        return vectorClock;
-    }
 
     /**
      * Get the statically configured broker identifier.
@@ -382,9 +347,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
      */
     public void removeClient(ClientHandler handler) {
         sessions.remove(handler);
-        if (clients.remove(handler)) {
-            sendClientCountUpdate();
-        }
+        clients.remove(handler);
     }
 
     /**
@@ -415,18 +378,16 @@ public class Broker implements Serializable, OrderingServiceCallback {
     }
 
     /**
-     * Activates a newly joined session only after a committed Raft boundary has
-     * been applied locally. Until this method succeeds, the handler is not part
-     * of the client fan-out set and therefore cannot observe delayed history.
+     * Activates a newly joined session at the ordering service's local boundary.
+     * Until this succeeds, the handler is not part of the client fan-out set.
      */
     public boolean activateClient(ClientHandler handler) {
         if (handler == null || handler.isSessionClosed()) {
             return false;
         }
 
-        String boundaryId = "join:" + brokerId + ":" + UUID.randomUUID();
         AtomicBoolean activated = new AtomicBoolean(false);
-        boolean established = orderingService.establishDeliveryBoundary(boundaryId, () -> {
+        boolean established = orderingService.executeAtDeliveryBoundary(() -> {
             // This callback runs in the serialized state-machine application
             // path. Holding the same monitor used by fan-out snapshots makes
             // WELCOME + recipient activation indivisible with respect to the
@@ -441,7 +402,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
                 // to subsequent chat fan-out.
                 clients.add(handler);
                 activated.set(true);
-                sendClientCountUpdate();
             }
         });
         return established && activated.get();
@@ -485,7 +445,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     /**
      * Entry point for messages sent by clients connected to THIS broker.
      *
-     * Wraps the client message into a ChatReqMessage (including vector clock) and proposes it
+     * Wraps the client message into a ChatReqMessage and proposes it
      * to the OrderingService for global sequencing.
      *
      * @param message raw client message received by this broker
@@ -502,14 +462,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
         // Propose to ordering service.
         boolean accepted = orderingService.propose(chatReq);
 
-        if (accepted) {
-            // OrderingService true is a definitive commit confirmation. Remove
-            // only the exact cached instance used by this attempt: a delayed
-            // concurrent confirmation must not evict a newer retry entry.
-            cachedClientRequests.remove(
-                    clientProposalKey(message.getClientId(), message.getClientSeq()),
-                    chatReq);
-        } else {
+        if (!accepted) {
             System.err.println("[Broker " + brokerId + "] Proposal rejected for "
                     + message.getUsername()
                     + ". Known leader = " + orderingService.getLeaderId());
@@ -520,46 +473,14 @@ public class Broker implements Serializable, OrderingServiceCallback {
     /**
      * Handle an ordered message from the OrderingService.
      *
-     * Enqueues the delivered ChatDeliverMessage into the HoldBackQueue to enforce causal +
-     * total order, obtains all messages that are now ready, and delivers them locally.
+     * Raft invokes this callback only from its serialized committed application
+     * path, so each delivery is already in global order.
      *
      * @param chatDeliver message delivered by the ordering service (contains global seq)
      */
     public void handleOrderedMessage(ChatDeliverMessage chatDeliver) {
-        if (chatDeliver.hasClientIdentity()) {
-            // A state-machine delivery is definitive proof that this logical
-            // proposal committed. This also cleans an uncertain attempt whose
-            // synchronous propose() call timed out and was never retried here.
-            cachedClientRequests.remove(clientProposalKey(
-                    chatDeliver.getClientId(),
-                    chatDeliver.getClientSeq()
-            ));
-        }
-
-        long incomingSeq = chatDeliver.getSeq();
-        long expectedSeq = holdBackQueue.getExpectedSeq();
-
-        // Check for Gaps (Reliability Layer)
-        if (incomingSeq > expectedSeq) {
-            System.out.println("[Broker " + brokerId + "] Gap detected! Received seq = " + incomingSeq + ", expected = " + expectedSeq);
-
-            System.err.println("[Broker " + brokerId + "] Unexpected gap in Raft delivery; waiting for log catch-up.");
-        }
-
-        // Enqueue message and get all messages ready for delivery
-        List<ChatDeliverMessage> readyMessages = holdBackQueue.enqueue(chatDeliver);
-
-        // Merge causal knowledge for each message that is actually released,
-        // before making that message visible to any local client. A message that
-        // is merely buffered must not influence subsequent outgoing proposals.
-        for (ChatDeliverMessage msg : readyMessages) {
-            if (msg.getVectorClock() != null) {
-                synchronized (this) {
-                    vectorClock.update(msg.getVectorClock());
-                }
-            }
-            onChatDeliver(msg.getSeq(), msg.getUsername(), msg.getClientId(), msg.getText());
-        }
+        onChatDeliver(chatDeliver.getSeq(), chatDeliver.getUsername(),
+                chatDeliver.getClientId(), chatDeliver.getText());
     }
 
     // =========================================================================
@@ -567,14 +488,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
     // =========================================================================
 
     /**
-     * Build or reuse a ChatReqMessage for the given stable client message id.
-     *
-     * The first request for a stable client id/sequence increments the broker send vector clock,
-     * creates a local message id, and stores the resulting proposal in a local cache.
-     * Retries with the same client id and sequence reuse the cached request so the
-     * vector clock is not incremented again. The entry is retained across failed
-     * attempts and removed after either synchronous commit confirmation or the
-     * corresponding committed command is applied locally.
+     * Builds a ChatReqMessage for the stable client message identity.
      *
      * @param username sender username
      * @param clientId stable client process id
@@ -582,29 +496,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
      * @param text     message text
      * @return constructed ChatReqMessage ready for proposing to the ordering service
      */
-    private synchronized ChatReqMessage buildChatReq(String username, String clientId, long clientSeq, String text) {
-        String proposalKey = clientProposalKey(clientId, clientSeq);
-
-        return cachedClientRequests.computeIfAbsent(proposalKey, key -> {
-            vectorClock.increment(brokerId);
-            String localMsgId = brokerId + "-" + (++localMsgCounter);
-            return new ChatReqMessage(
-                    localMsgId,
-                    brokerId,
-                    username,
-                    text,
-                    new VectorClock(vectorClock),
-                    clientId,
-                    clientSeq);
-        });
-    }
-
-    private static String clientProposalKey(String clientId, long clientSeq) {
-        return clientId + ":" + clientSeq;
-    }
-
-    int cachedClientRequestCountForTesting() {
-        return cachedClientRequests.size();
+    private ChatReqMessage buildChatReq(String username, String clientId, long clientSeq, String text) {
+        return new ChatReqMessage(username, clientId, clientSeq, text);
     }
 
     /** Starts the optional, best-effort local console status refresher. */
@@ -661,22 +554,8 @@ public class Broker implements Serializable, OrderingServiceCallback {
         while (running && !Thread.currentThread().isInterrupted()) {
             try {
                 connectAndRegisterWithDirectoryService();
-                directoryClientCountDirty.set(true);
-
                 while (running && !Thread.currentThread().isInterrupted()) {
-                    sendDirectoryObject(new HeartbeatMessage(
-                            this.brokerId,
-                            directoryHeartbeatSeq.incrementAndGet()));
-                    if (directoryClientCountDirty.compareAndSet(true, false)) {
-                        try {
-                            sendDirectoryObject(new ClientCountUpdateMessage(
-                                    brokerId,
-                                    clients.size()));
-                        } catch (IOException e) {
-                            directoryClientCountDirty.set(true);
-                            throw e;
-                        }
-                    }
+                    sendDirectoryObject(new DirectoryHeartbeatMessage(clients.size()));
                     Thread.sleep(directoryHeartbeatIntervalMs());
                 }
             } catch (IOException e) {
@@ -763,7 +642,7 @@ public class Broker implements Serializable, OrderingServiceCallback {
             }
             directoryOut.writeObject(message);
             directoryOut.flush();
-            // Heartbeats and count updates are transient; resetting prevents the
+            // Heartbeats are transient; resetting prevents the
             // ObjectOutputStream handle table from growing for the lifetime of the broker.
             directoryOut.reset();
         }
@@ -787,18 +666,6 @@ public class Broker implements Serializable, OrderingServiceCallback {
                 directoryOut = null;
             }
         }
-    }
-
-    /**
-     * Send an update message to the Directory Service reporting the current number of connected clients.
-     *
-     * Errors while sending are logged.
-     */
-    private void sendClientCountUpdate() {
-        // Only the Directory session owner writes its ObjectOutputStream. Client
-        // handlers merely mark the latest count dirty, keeping Raft fan-out free
-        // from unrelated Directory I/O.
-        directoryClientCountDirty.set(true);
     }
 
 }

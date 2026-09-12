@@ -141,7 +141,7 @@ class ClientHandlerOutboundTest {
     }
 
     @Test
-    void retryCleanupPreservesCommitAcksAndClientProgramOrder() throws Exception {
+    void retryUsesStableIdentityWithoutCachingRequestObjects() throws Exception {
         Broker broker = new Broker(TestConfigs.raftBrokerConfig(1, 5000));
         ScriptedOrderingService orderingService =
                 new ScriptedOrderingService(false, true, true);
@@ -171,9 +171,15 @@ class ClientHandlerOutboundTest {
                 orderingService.proposals.stream()
                         .map(ChatReqMessage::getClientSeq)
                         .toList());
-        assertSame(
+        assertNotSame(
                 orderingService.proposals.get(0),
                 orderingService.proposals.get(1));
+        assertEquals(orderingService.proposals.get(0).getClientId(),
+                orderingService.proposals.get(1).getClientId());
+        assertEquals(orderingService.proposals.get(0).getClientSeq(),
+                orderingService.proposals.get(1).getClientSeq());
+        assertEquals(orderingService.proposals.get(0).getText(),
+                orderingService.proposals.get(1).getText());
         assertNotSame(
                 orderingService.proposals.get(1),
                 orderingService.proposals.get(2));
@@ -263,7 +269,8 @@ class ClientHandlerOutboundTest {
         }
 
         @Override
-        public boolean establishDeliveryBoundary(String boundaryId) {
+        public boolean executeAtDeliveryBoundary(Runnable action) {
+            action.run();
             return true;
         }
 
