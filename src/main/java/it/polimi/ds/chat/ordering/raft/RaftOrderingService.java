@@ -20,6 +20,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import java.io.IOException;
@@ -86,7 +87,7 @@ public final class RaftOrderingService implements OrderingService {
         shutdown.start();
     }
     // Invalidates manager callbacks that escaped their old run before stop().
-    private long lifecycleGeneration;
+    private volatile long lifecycleGeneration;
 
     private static final long PROPOSE_COMMIT_TIMEOUT_MS = 5_000L;
 
@@ -399,14 +400,30 @@ public final class RaftOrderingService implements OrderingService {
     public boolean executeAtDeliveryBoundary(Runnable action) {
         Objects.requireNonNull(action, "action");
         RaftCommitManager manager;
+        long expectedGeneration;
         synchronized (this) {
             if (!running || terminalFailure != null || commitManager == null) {
                 return false;
             }
             manager = commitManager;
+            expectedGeneration = lifecycleGeneration;
         }
-        manager.executeAtApplyBoundary(action);
-        return true;
+
+        AtomicBoolean executed = new AtomicBoolean(false);
+        manager.executeAtApplyBoundary(() -> {
+            // The service may fail or be stopped while this boundary is queued
+            // behind an in-progress application. Revalidate only after owning
+            // the apply monitor, so a failed state machine cannot publish a JOIN.
+            // Volatile state avoids taking the service monitor in the opposite
+            // order and therefore preserves the Raft lock-order discipline.
+            if (!running || terminalFailure != null
+                    || lifecycleGeneration != expectedGeneration) {
+                return;
+            }
+            action.run();
+            executed.set(true);
+        });
+        return executed.get();
     }
 
     private boolean appendAndWaitForCommit(ChatReqMessage request) {

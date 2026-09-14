@@ -30,15 +30,17 @@ class RaftStateMachineAdapterTest {
     }
 
     @Test
-    void ignoresAnInternalNoOpWithoutCreatingAnApplicationDelivery() {
+    void preservesNonContiguousVisibleRaftIndexesAcrossInternalNoOp() {
         List<ChatDeliverMessage> delivered = new ArrayList<>();
         RaftStateMachineAdapter adapter = new RaftStateMachineAdapter(delivered::add);
 
-        adapter.accept(new RaftLogEntry(2L, 1L, null));
-        adapter.accept(new RaftLogEntry(3L, 1L,
-                new ChatCommand("alice", "client-a", 1L, "after no-op")));
+        adapter.accept(new RaftLogEntry(10L, 1L,
+                new ChatCommand("alice", "client-a", 1L, "before no-op")));
+        adapter.accept(new RaftLogEntry(11L, 2L, null));
+        adapter.accept(new RaftLogEntry(12L, 2L,
+                new ChatCommand("bob", "client-b", 1L, "after no-op")));
 
-        assertEquals(1, delivered.size());
-        assertEquals(3L, delivered.get(0).getSeq());
+        assertEquals(List.of(10L, 12L),
+                delivered.stream().map(ChatDeliverMessage::getSeq).toList());
     }
 }

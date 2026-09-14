@@ -29,6 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 
@@ -220,6 +221,73 @@ class RaftOrderingServiceIntegrationTest {
                 "a broker with a failed state machine must withdraw immediately");
         assertFalse(nodes[0].propose(new ChatReqMessage(
                 "alice", "after-failure", 2L, "must be rejected")));
+    }
+
+    @Test
+    void joinBoundaryWaitingBehindFailedApplicationMustNotRun(
+            @TempDir Path baseDir
+    ) throws Exception {
+        int rpcPort = pickFreePorts(1)[0];
+        Map<Integer, RaftPeerEndpoint> voters = Map.of(
+                0,
+                new RaftPeerEndpoint(0, "127.0.0.1", rpcPort, 50000)
+        );
+        nodes = new RaftOrderingService[]{
+                buildService(0, rpcPort, voters, baseDir.resolve("n0"))
+        };
+
+        CountDownLatch deliveryEntered = new CountDownLatch(1);
+        CountDownLatch failDelivery = new CountDownLatch(1);
+        CountDownLatch terminalFailure = new CountDownLatch(1);
+        nodes[0].setFailureHandler(failure -> terminalFailure.countDown());
+        nodes[0].onDeliver(message -> {
+            deliveryEntered.countDown();
+            try {
+                if (!failDelivery.await(1, TimeUnit.SECONDS)) {
+                    throw new AssertionError("test did not release the failing delivery");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("failing delivery was interrupted", e);
+            }
+            throw new IllegalStateException("delivery failed before JOIN boundary");
+        });
+
+        nodes[0].start();
+        assertTrue(waitFor(nodes[0]::isLeader, LEADER_ELECTION_DEADLINE_MS));
+
+        CompletableFuture<Boolean> proposal = CompletableFuture.supplyAsync(
+                () -> nodes[0].propose(new ChatReqMessage(
+                        "alice", "failing-before-join", 1L, "boom"))
+        );
+        assertTrue(deliveryEntered.await(1, TimeUnit.SECONDS));
+
+        AtomicReference<Boolean> boundaryResult = new AtomicReference<>();
+        AtomicBoolean boundaryActionRan = new AtomicBoolean(false);
+        CountDownLatch boundaryCallerStarted = new CountDownLatch(1);
+        Thread boundaryThread = new Thread(() -> {
+            boundaryCallerStarted.countDown();
+            boundaryResult.set(nodes[0].executeAtDeliveryBoundary(
+                    () -> boundaryActionRan.set(true)));
+        }, "join-waiting-behind-failed-apply");
+        boundaryThread.start();
+        assertTrue(boundaryCallerStarted.await(1, TimeUnit.SECONDS));
+        assertTrue(waitFor(
+                () -> boundaryThread.getState() == Thread.State.BLOCKED,
+                1_000L
+        ), "JOIN boundary did not block behind the in-progress application");
+
+        failDelivery.countDown();
+
+        assertThrows(java.util.concurrent.ExecutionException.class,
+                () -> proposal.get(1, TimeUnit.SECONDS));
+        assertTrue(terminalFailure.await(1, TimeUnit.SECONDS));
+        boundaryThread.join(1_000L);
+        assertFalse(boundaryThread.isAlive());
+        assertFalse(boundaryActionRan.get(),
+                "a failed state machine must not publish the queued JOIN action");
+        assertEquals(Boolean.FALSE, boundaryResult.get(),
+                "a boundary queued before failure must be rejected after terminal failure");
     }
 
     @Test
