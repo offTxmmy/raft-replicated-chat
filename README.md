@@ -6,7 +6,14 @@ The project originated in the Distributed Systems course at Politecnico di Milan
 
 ## Why Raft?
 
-A chat message may enter through any broker, but every broker needs to agree on the same order before exposing it. Raft supplies the replicated log, leader election, majority commit, and recovery rules needed for that agreement. The implementation is intentionally built from Java sockets rather than a consensus library so that election, replication, persistence, and failure handling remain visible in the code.
+A chat message may enter through any broker, but every broker needs to agree on the same order before exposing it. Raft supplies the replicated log, leader election, majority commit, and recovery rules needed for that agreement. The implementation is intentionally built with Java sockets rather than a consensus library, so election, replication, persistence, and failure handling remain visible in the code.
+
+## Engineering highlights
+
+- Hand-written Raft with pre-vote, leader election, log replication, conflict recovery, and majority/current-term commit.
+- Durable Raft term, vote, log, and commit/application progress, with restart recovery that rebuilds retry state without replaying chat history.
+- Idempotent client retries keyed by `(clientId, clientSeq)` and client failover that preserves the pending message.
+- A hybrid LAN transport: UDP broadcast for small shared election/heartbeat traffic and TCP for log-bearing, peer-specific, and client-proposal traffic.
 
 ## Architecture
 
@@ -32,13 +39,13 @@ A chat message may enter through any broker, but every broker needs to agree on 
 - **Directory Service** tracks broker leases and local client counts, then returns the least-loaded live endpoint to clients. It is not part of consensus or Raft bootstrap.
 - **Broker** owns local TCP sessions and fans out committed deliveries. Slow clients have bounded outbound queues and are disconnected without blocking Raft application.
 - **Raft ordering service** implements pre-vote, election, log replication, majority commit, persistent state, state-machine application, and retry deduplication.
-- **Client runtime** discovers an endpoint, completes JOIN, keeps exactly one chat message in flight, and reconnects without discarding the pending head.
+- **Client runtime** discovers an endpoint, completes a local session join, keeps exactly one chat message in flight, and reconnects without discarding the pending head.
 
 Raft membership is static and supplied directly, identically, to every broker. The Directory may be restarted or unavailable without stopping consensus or existing sessions; only new discovery is unavailable during that interval.
 
 ## Message flow
 
-1. After a local JOIN boundary, the client sends a message identified by `(clientId, clientSeq)`.
+1. After joining a local broker session, the client sends a message identified by `(clientId, clientSeq)`.
 2. If the edge broker is a follower, it forwards the proposal to the known leader over TCP.
 3. The leader appends a `ChatCommand` and replicates it with `AppendEntries`.
 4. A majority match advances `commitIndex`, subject to Raft's current-term commit rule.
@@ -50,10 +57,9 @@ The follower-to-leader response is deliberately synchronous. It makes the client
 ## Guarantees
 
 - **Total order:** every delivered chat command follows the committed Raft log. `ChatDeliverMessage.seq` is the Raft index, so gaps caused by internal no-op entries are expected and harmless.
-- **Causal order:** a client keeps one FIFO proposal in flight. A message created in response to an observed delivery can only be proposed after that predecessor is committed and locally applied; Raft leader completeness keeps the predecessor before the response after leader changes. No separate vector clock is required.
 - **Commit-before-ACK:** a proposal is acknowledged only after majority commit, never merely after append.
 - **Retry safety:** `(clientId, clientSeq)` is the single application identity used for pending proposals and deduplication.
-- **Connected-only delivery:** JOIN is a local action serialized with state-machine application. It needs no quorum, and a new session cannot see entries applied before its boundary. There is no inbox or history replay.
+- **Connected-only delivery:** session activation is serialized with state-machine application. A new session cannot see entries applied before it becomes active; there is no inbox or history replay.
 - **Failure isolation:** one slow or broken client cannot block delivery to other sessions. A failed state-machine callback is fatal to that broker; it is never silently recorded as applied.
 - **Crash recovery:** Raft term, vote, log, and commit/application progress are durable. A restarted broker reconstructs deduplication state without replaying previously applied chat history.
 
@@ -101,7 +107,7 @@ For the full test suite without packaging:
 mvn test
 ```
 
-Tests cover election safety, log repair, current-term commit, higher-term step-down, stale responses, dropped UDP, majority loss and healing, durable restart/corruption, late commit and retry, JOIN races, slow/broken clients, Directory restart, and real-socket end-to-end failover.
+Tests cover election safety, log repair, current-term commit, higher-term step-down, stale responses, dropped UDP, majority loss and healing, durable restart/corruption, late commit and retry, session-activation races, slow/broken clients, Directory restart, and real-socket end-to-end failover.
 
 ## Run three brokers locally
 

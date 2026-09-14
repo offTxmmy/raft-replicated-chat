@@ -9,6 +9,7 @@
   <version>1.0.0-SNAPSHOT</version>
 
   <name>Replicated Chat Infrastructure</name>
+  <description>Fault-tolerant replicated group chat with a hand-written Raft ordering service.</description>
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
